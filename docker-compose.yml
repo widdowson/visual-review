@@ -1,0 +1,7 @@
+services:
+  visual-review:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
