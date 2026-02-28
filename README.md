@@ -25,7 +25,7 @@ echo "GITHUB_TOKEN=ghp_your_token_here" > .env
 docker compose up
 
 # Open in browser
-open http://localhost:8000/widdowson/apwphotos-appv2/pr/50
+open http://localhost:8080/widdowson/apwphotos-appv2/pr/50
 ```
 
 ### Local Development
@@ -33,16 +33,46 @@ open http://localhost:8000/widdowson/apwphotos-appv2/pr/50
 ```bash
 pip install -r requirements.txt
 export GITHUB_TOKEN=ghp_your_token_here
-uvicorn app:app --reload
+uvicorn app:app --reload --port 8080
 
 # Run tests
 pip install pytest pytest-asyncio
 pytest tests/ -v
 ```
 
-### Cloud Deployment
+### Google Cloud Run
 
-Works on Fly.io, Railway, Google Cloud Run, or any platform that runs Docker containers.
+The app is stateless and scales to zero, making Cloud Run an ideal deployment target — you only pay when someone is actively reviewing a PR.
+
+```bash
+# Build and deploy
+gcloud run deploy visual-review \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars GITHUB_TOKEN=ghp_your_token_here
+
+# The deploy command outputs a service URL like:
+# https://visual-review-xxxxx-uc.a.run.app
+```
+
+**Custom domain (e.g. `vr.apw.photos`):**
+
+1. Map the domain in Cloud Run:
+   ```bash
+   gcloud run domain-mappings create \
+     --service visual-review \
+     --domain vr.apw.photos \
+     --region us-central1
+   ```
+2. In Cloudflare DNS, add a CNAME record:
+   - Name: `vr`
+   - Target: `ghs.googlehosted.com` (or the target from the domain mapping output)
+   - Proxy: enabled (orange cloud)
+
+### Other Cloud Platforms
+
+Also works on Fly.io, Railway, or any platform that runs Docker containers. The Dockerfile listens on `$PORT` (default 8080) which is the standard convention for Cloud Run, Fly.io, and others.
 
 The only required secret is `GITHUB_TOKEN` — a GitHub personal access token with `repo` scope (for private repos) or `public_repo` scope (for public repos only).
 
@@ -69,6 +99,7 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GITHUB_TOKEN` | Yes | — | GitHub personal access token |
+| `PORT` | No | `8080` | Port to listen on (set automatically by Cloud Run) |
 
 ## How It Works
 
