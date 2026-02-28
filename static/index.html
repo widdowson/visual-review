@@ -1,0 +1,1771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visual Review</title>
+    <script>(function(){var p=localStorage.getItem('vr-theme-pref')||'auto';var t=(p==='auto'?window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light':p);document.documentElement.dataset.theme=t;})();</script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        /* -- Adaptive light/dark theme via CSS custom properties -- */
+        :root {
+            --vr-bg-body: #f0f2f5;
+            --vr-bg-surface: #fff;
+            --vr-bg-surface-alt: #f5f6f8;
+            --vr-bg-input: #fff;
+            --vr-text: #1a1d23;
+            --vr-text-secondary: #555;
+            --vr-text-muted: #888;
+            --vr-text-dim: #666;
+            --vr-border: #d0d5dd;
+            --vr-border-subtle: #e4e7ec;
+            --vr-link: #2563eb;
+            --vr-link-hover: #1d4ed8;
+            --vr-accent: #4a90d9;
+            --vr-active-bg: #dbeafe;
+            --vr-active-border: #4a90d9;
+            --vr-hover-bg: #f0f4fa;
+            --vr-badge-added-bg: #dcfce7; --vr-badge-added-fg: #166534;
+            --vr-badge-removed-bg: #fee2e2; --vr-badge-removed-fg: #991b1b;
+            --vr-badge-modified-bg: #fef9c3; --vr-badge-modified-fg: #854d0e;
+            --vr-comment-badge-bg: rgba(37, 99, 235, 0.1); --vr-comment-badge-fg: #2563eb;
+            --vr-checker-a: #ddd; --vr-checker-b: #eee;
+            --vr-loupe-bg: #f5f5f5;
+            --vr-loupe-label-bg: rgba(255,255,255,0.85); --vr-loupe-label-fg: #333;
+            --vr-overlay-bg: rgba(255,255,255,0.7);
+            --vr-modal-shadow: rgba(0,0,0,0.2);
+            --vr-kbd-bg: #f0f2f5; --vr-kbd-border: #d0d5dd; --vr-kbd-fg: #1a1d23;
+            --vr-hint-bg: rgba(0,0,0,0.05); --vr-hint-border: #d0d5dd;
+            --vr-spinner-track: #d0d5dd;
+        }
+        [data-theme="dark"] {
+            --vr-bg-body: #1a1d23;
+            --vr-bg-surface: #22252e;
+            --vr-bg-surface-alt: #1e2028;
+            --vr-bg-input: #2a2d38;
+            --vr-text: #e0e0e0;
+            --vr-text-secondary: #bbb;
+            --vr-text-muted: #888;
+            --vr-text-dim: #666;
+            --vr-border: #3a3f52;
+            --vr-border-subtle: #2a2d38;
+            --vr-link: #8eb5f0;
+            --vr-link-hover: #b8d4ff;
+            --vr-accent: #4a90d9;
+            --vr-active-bg: #2a3a5c;
+            --vr-active-border: #4a90d9;
+            --vr-hover-bg: #2a3042;
+            --vr-badge-added-bg: #1a3a1a; --vr-badge-added-fg: #4ade80;
+            --vr-badge-removed-bg: #3a1a1a; --vr-badge-removed-fg: #f87171;
+            --vr-badge-modified-bg: #3a3a1a; --vr-badge-modified-fg: #facc15;
+            --vr-comment-badge-bg: rgba(142, 181, 240, 0.15); --vr-comment-badge-fg: #8eb5f0;
+            --vr-checker-a: #333; --vr-checker-b: #444;
+            --vr-loupe-bg: #111;
+            --vr-loupe-label-bg: rgba(0,0,0,0.7); --vr-loupe-label-fg: #ccc;
+            --vr-overlay-bg: rgba(0,0,0,0.65);
+            --vr-modal-shadow: rgba(0,0,0,0.5);
+            --vr-kbd-bg: #1a1d23; --vr-kbd-border: #3a3f52; --vr-kbd-fg: #e0e0e0;
+            --vr-hint-bg: rgba(255,255,255,0.08); --vr-hint-border: #3a3f52;
+            --vr-spinner-track: #3a3f52;
+        }
+
+        * { box-sizing: border-box; }
+        body { background: var(--vr-bg-body); color: var(--vr-text); margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        /* Top bar — always dark */
+        .topbar {
+            background: #2a3042; padding: 10px 20px;
+            display: flex; align-items: center; gap: 16px;
+            border-bottom: 1px solid #3a3f52;
+            position: sticky; top: 0; z-index: 100;
+        }
+        .topbar a { color: #8eb5f0; text-decoration: none; }
+        .topbar a:hover { color: #b8d4ff; }
+        .topbar .pr-title { color: #fff; font-weight: 600; font-size: 1.1rem; }
+        .topbar .pr-number { color: #8eb5f0; }
+
+        /* Theme toggle */
+        .theme-toggle {
+            background: none; border: 1px solid #3a3f52; color: #8eb5f0;
+            border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        .theme-toggle:hover { border-color: #8eb5f0; }
+
+        /* Layout */
+        .layout { display: flex; height: calc(100vh - 52px); }
+
+        /* Sidebar */
+        .sidebar {
+            width: 280px; min-width: 120px; background: var(--vr-bg-surface);
+            border-right: 1px solid var(--vr-border); overflow-y: auto;
+            display: flex; flex-direction: column; position: relative;
+        }
+        .sidebar-resize {
+            position: absolute; top: 0; right: -3px; width: 6px; height: 100%;
+            cursor: col-resize; z-index: 10;
+        }
+        .sidebar-resize:hover, .sidebar-resize.dragging { background: var(--vr-accent); }
+        .sidebar-header {
+            padding: 12px 16px; border-bottom: 1px solid var(--vr-border);
+            font-size: 0.8rem; color: var(--vr-text-muted); text-transform: uppercase;
+            letter-spacing: 0.5px; font-weight: 600;
+        }
+        .file-list { list-style: none; padding: 0; margin: 0; flex: 1; overflow-y: auto; }
+        .file-item {
+            padding: 8px 16px; cursor: pointer; border-bottom: 1px solid var(--vr-border-subtle);
+            font-size: 0.85rem; transition: background 0.15s;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .file-item:hover { background: var(--vr-hover-bg); }
+        .file-item.active { background: var(--vr-active-bg); border-left: 3px solid var(--vr-active-border); }
+        .file-item .status-badge {
+            font-size: 0.65rem; padding: 1px 6px; border-radius: 8px;
+            text-transform: uppercase; font-weight: 600; flex-shrink: 0;
+        }
+        .file-item .status-badge.added { background: var(--vr-badge-added-bg); color: var(--vr-badge-added-fg); }
+        .file-item .status-badge.removed { background: var(--vr-badge-removed-bg); color: var(--vr-badge-removed-fg); }
+        .file-item .status-badge.modified { background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg); }
+        .file-item .filename {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            flex: 1;
+        }
+        .file-item .comment-badge {
+            font-size: 0.6rem; padding: 1px 6px; border-radius: 8px;
+            background: var(--vr-comment-badge-bg); color: var(--vr-comment-badge-fg);
+            flex-shrink: 0; white-space: nowrap;
+        }
+
+        /* Main content */
+        .main-content { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+
+        /* Mode toolbar */
+        .mode-toolbar {
+            padding: 10px 20px; background: var(--vr-bg-surface);
+            border-bottom: 1px solid var(--vr-border);
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        }
+        .mode-btn {
+            padding: 6px 14px; border-radius: 6px; border: 1px solid var(--vr-border);
+            background: transparent; color: var(--vr-text-muted); cursor: pointer;
+            font-size: 0.8rem; transition: all 0.15s;
+        }
+        .mode-btn:hover { border-color: var(--vr-text-dim); color: var(--vr-text-secondary); }
+        .mode-btn.active { background: var(--vr-active-bg); border-color: var(--vr-accent); color: var(--vr-text); }
+        .mode-toolbar .sep { width: 1px; height: 24px; background: var(--vr-border); margin: 0 4px; }
+        .mode-toolbar .hint { font-size: 0.75rem; color: var(--vr-text-dim); margin-left: auto; }
+
+        /* Comparison viewport */
+        .viewport {
+            flex: 1; overflow: auto; position: relative; padding: 20px;
+            display: flex; justify-content: center; align-items: flex-start;
+        }
+        .viewport.loading { align-items: center; }
+
+        /* Side by side */
+        .side-by-side {
+            display: flex; gap: 8px; align-items: flex-start;
+            width: 100%; max-width: 100%;
+        }
+        .side-panel { flex: 1; min-width: 0; position: relative; }
+        .side-panel .panel-label {
+            font-size: 0.75rem; color: var(--vr-text-muted); margin-bottom: 6px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .side-panel img {
+            max-width: 100%; width: auto; height: auto; display: block;
+            object-fit: contain;
+            background: repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px;
+            image-rendering: auto;
+        }
+        .side-by-side .side-panel:first-child img { margin-left: auto; }
+        .side-by-side .side-panel:last-child img { margin-right: auto; }
+
+        /* Crossfade */
+        .crossfade-wrap { position: relative; display: inline-block; }
+        .crossfade-wrap img {
+            display: block; max-width: 90vw;
+            background: repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px;
+        }
+        .crossfade-wrap .overlay-img { position: absolute; top: 0; left: 0; }
+        .crossfade-slider-row {
+            display: flex; align-items: center; gap: 12px;
+            margin-bottom: 12px; justify-content: center;
+            position: sticky; top: 0; z-index: 5;
+            background: var(--vr-bg-body); padding: 8px 0;
+        }
+        .crossfade-slider-row label { font-size: 0.8rem; color: var(--vr-text-muted); }
+        .crossfade-slider-row input[type="range"] { width: 300px; }
+
+        /* Swipe */
+        .swipe-wrap {
+            position: relative; display: inline-block; cursor: col-resize;
+            overflow: hidden;
+        }
+        .swipe-wrap img {
+            display: block; max-width: 90vw;
+            background: repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px;
+        }
+        .swipe-wrap .swipe-overlay {
+            position: absolute; top: 0; left: 0; height: 100%; overflow: hidden;
+        }
+        .swipe-wrap .swipe-overlay img {
+            display: block; width: auto; height: auto; max-width: none;
+        }
+        .swipe-divider {
+            position: absolute; top: 0; bottom: 0; width: 3px;
+            background: var(--vr-accent); cursor: col-resize; z-index: 10;
+        }
+        .swipe-divider::after {
+            content: ''; position: sticky; top: 0;
+            display: block; margin-left: -6px;
+            width: 0; height: 0;
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-top: 10px solid var(--vr-accent);
+            filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+        }
+
+        /* Diff overlay */
+        .diff-wrap { position: relative; display: inline-block; }
+        .diff-wrap canvas {
+            display: block; max-width: 90vw;
+            background: repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px;
+        }
+        .diff-legend {
+            display: flex; gap: 16px; margin-bottom: 10px;
+            font-size: 0.8rem; color: var(--vr-text-muted); justify-content: center;
+        }
+        .diff-legend .swatch {
+            display: inline-block; width: 14px; height: 14px;
+            border-radius: 3px; vertical-align: middle; margin-right: 4px;
+        }
+
+        /* Loupe / magnifier */
+        .loupe {
+            position: fixed; box-sizing: content-box;
+            width: 200px; height: 200px;
+            border: 2px solid var(--vr-accent); border-radius: 8px;
+            overflow: hidden; pointer-events: none; z-index: 200;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            display: none; background: var(--vr-loupe-bg);
+        }
+        .loupe canvas { display: block; width: 200px; height: 200px; }
+        .loupe-label {
+            position: absolute; bottom: 0; left: 0; right: 0;
+            background: var(--vr-loupe-label-bg); color: var(--vr-loupe-label-fg);
+            font-size: 0.65rem; text-align: center; padding: 2px;
+        }
+
+        /* Comments section */
+        .comments-section {
+            padding: 20px; border-top: 1px solid var(--vr-border);
+            max-width: 800px; margin: 0 auto; width: 100%;
+        }
+        .comments-section h4 {
+            font-size: 0.9rem; color: var(--vr-text-muted); margin-bottom: 12px;
+            text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        .comment-card {
+            background: var(--vr-bg-surface); border: 1px solid var(--vr-border);
+            border-radius: 8px; padding: 12px 16px; margin-bottom: 10px;
+        }
+        .comment-card .comment-meta {
+            font-size: 0.75rem; color: var(--vr-text-muted); margin-bottom: 6px;
+        }
+        .comment-card .comment-meta a { color: var(--vr-link); }
+        .comment-card .comment-body { font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; }
+        .comment-form { margin-top: 16px; }
+        .comment-form textarea {
+            width: 100%; background: var(--vr-bg-input); border: 1px solid var(--vr-border);
+            border-radius: 6px; color: var(--vr-text); padding: 10px;
+            font-size: 0.85rem; resize: vertical; min-height: 80px;
+        }
+        .comment-form textarea:focus { outline: none; border-color: var(--vr-accent); }
+        .comment-form button {
+            margin-top: 8px; padding: 6px 16px; border-radius: 6px;
+            border: none; background: var(--vr-accent); color: #fff;
+            font-size: 0.85rem; cursor: pointer;
+        }
+        .comment-form button:hover { background: #3a7ec5; }
+        .comment-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Empty / loading states */
+        .empty-msg { color: var(--vr-text-dim); font-size: 0.9rem; text-align: center; padding: 60px 20px; }
+        .spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid var(--vr-spinner-track); border-top-color: var(--vr-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Image info bar */
+        .image-info {
+            padding: 8px 20px; background: var(--vr-bg-surface-alt);
+            border-bottom: 1px solid var(--vr-border);
+            font-size: 0.8rem; color: var(--vr-text-muted);
+            display: flex; gap: 20px; align-items: center;
+        }
+        .image-info .dim { color: var(--vr-text-secondary); }
+
+        /* Keyboard shortcut hint pill */
+        .kbd-hint {
+            background: var(--vr-hint-bg); border: 1px solid var(--vr-hint-border);
+            border-radius: 4px; padding: 2px 8px; font-size: 0.75rem;
+            color: var(--vr-text-dim); cursor: pointer; user-select: none; margin-left: 8px;
+        }
+        .kbd-hint:hover { background: var(--vr-hover-bg); color: var(--vr-text-muted); }
+
+        /* Shortcuts overlay */
+        .shortcuts-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--vr-overlay-bg); z-index: 300;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .shortcuts-modal {
+            background: var(--vr-bg-surface); border: 1px solid var(--vr-border);
+            border-radius: 12px; padding: 24px 32px;
+            max-width: 480px; width: 90%;
+            box-shadow: 0 8px 40px var(--vr-modal-shadow);
+        }
+        .shortcuts-modal h3 {
+            margin: 0 0 16px; font-size: 1rem; color: var(--vr-text); font-weight: 600;
+        }
+        .shortcuts-modal table { width: 100%; border-collapse: collapse; }
+        .shortcuts-modal td { padding: 5px 0; font-size: 0.85rem; color: var(--vr-text-secondary); }
+        .shortcuts-modal td:first-child { width: 110px; text-align: right; padding-right: 16px; }
+        .shortcuts-modal kbd {
+            background: var(--vr-kbd-bg); border: 1px solid var(--vr-kbd-border);
+            border-radius: 3px; padding: 1px 6px; font-family: monospace;
+            font-size: 0.8rem; color: var(--vr-kbd-fg); display: inline-block;
+            min-width: 20px; text-align: center;
+        }
+        .shortcuts-modal .section-label td {
+            color: var(--vr-text-dim); font-size: 0.7rem; text-transform: uppercase;
+            letter-spacing: 0.5px; padding-top: 12px; font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <span class="pr-title" id="pr-title">Loading...</span>
+        <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+            <button class="theme-toggle" id="theme-toggle" title="Toggle theme">&#9681;</button>
+            <span class="kbd-hint" id="kbd-hint" title="Keyboard shortcuts (?)">?</span>
+        </div>
+    </div>
+
+    <div class="layout">
+        <div class="sidebar" id="sidebar">
+            <div class="sidebar-resize" id="sidebar-resize"></div>
+            <div class="sidebar-header">
+                Changed Images <span id="image-count"></span>
+            </div>
+            <ul class="file-list" id="file-list"></ul>
+        </div>
+
+        <div class="main-content" id="main-content">
+            <div class="mode-toolbar" id="mode-toolbar" style="display:none;">
+                <button class="mode-btn active" data-mode="side-by-side">Side by Side</button>
+                <button class="mode-btn" data-mode="crossfade">Crossfade</button>
+                <button class="mode-btn" data-mode="swipe">Swipe</button>
+                <button class="mode-btn" data-mode="diff">Diff Overlay</button>
+                <span class="sep"></span>
+                <span class="hint">Shift = magnify &middot; Press ? for all shortcuts</span>
+            </div>
+            <div class="image-info" id="image-info" style="display:none;"></div>
+            <div class="viewport" id="viewport">
+                <div class="empty-msg">Select an image from the sidebar to begin review.</div>
+            </div>
+            <div class="comments-section" id="comments-section" style="display:none;"></div>
+        </div>
+    </div>
+
+    <!-- Loupes for magnifier -->
+    <div class="loupe" id="loupe-base">
+        <canvas width="200" height="200"></canvas>
+        <div class="loupe-label">Base</div>
+    </div>
+    <div class="loupe" id="loupe-head">
+        <canvas width="200" height="200"></canvas>
+        <div class="loupe-label">Current</div>
+    </div>
+    <div class="loupe" id="loupe-diff">
+        <canvas width="200" height="200"></canvas>
+        <div class="loupe-label" style="color:#e53935;">Diff</div>
+    </div>
+
+    <script>
+    (function() {
+        // -- Parse owner/repo/PR from URL path --
+        // Expected: /{owner}/{repo}/pr/{number}
+        var pathParts = window.location.pathname.replace(/\/+$/, '').split('/');
+        // pathParts: ["", owner, repo, "pr", number]
+        var owner = pathParts[1] || '';
+        var repo = pathParts[2] || '';
+        var prNumber = parseInt(pathParts[4], 10);
+        var apiBase = '/api/' + owner + '/' + repo + '/pr/' + prNumber;
+
+        if (!owner || !repo || isNaN(prNumber)) {
+            document.getElementById('viewport').innerHTML =
+                '<div class="empty-msg">Invalid URL. Expected: /{owner}/{repo}/pr/{number}</div>';
+            document.getElementById('pr-title').textContent = 'Visual Review';
+            return;
+        }
+
+        // -- Theme toggle --
+        (function() {
+            var btn = document.getElementById('theme-toggle');
+            var prefs = ['auto', 'light', 'dark'];
+            var icons = {auto: '\u25D1', light: '\u2600', dark: '\u263E'};
+            function getThemePref() { return localStorage.getItem('vr-theme-pref') || 'auto'; }
+            function applyTheme(pref) {
+                var t = pref === 'auto'
+                    ? (window.matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light')
+                    : pref;
+                document.documentElement.dataset.theme = t;
+                btn.innerHTML = icons[pref] || icons.auto;
+                btn.title = 'Theme: ' + pref;
+            }
+            applyTheme(getThemePref());
+            btn.addEventListener('click', function() {
+                var cur = getThemePref();
+                var next = prefs[(prefs.indexOf(cur) + 1) % prefs.length];
+                localStorage.setItem('vr-theme-pref', next);
+                applyTheme(next);
+            });
+        })();
+
+        // -- State --
+        var state = {
+            images: [],
+            baseRef: null,
+            headRef: null,
+            currentFile: null,
+            mode: 'side-by-side',
+            baseImg: null,
+            headImg: null,
+            baseLoaded: false,
+            headLoaded: false,
+            loadError: null,
+            imageCache: {},
+            lastDirection: null,
+            diffClusters: [],
+        };
+
+        // -- DOM refs --
+        var fileList = document.getElementById('file-list');
+        var viewport = document.getElementById('viewport');
+        var modeToolbar = document.getElementById('mode-toolbar');
+        var imageInfo = document.getElementById('image-info');
+        var commentsSection = document.getElementById('comments-section');
+        var prTitle = document.getElementById('pr-title');
+        var imageCount = document.getElementById('image-count');
+        var loupeBase = document.getElementById('loupe-base');
+        var loupeHead = document.getElementById('loupe-head');
+        var loupeDiff = document.getElementById('loupe-diff');
+
+        // -- Init --
+        loadPrImages();
+
+        // -- Mode buttons --
+        modeToolbar.addEventListener('click', function(e) {
+            var btn = e.target.closest('.mode-btn');
+            if (!btn) return;
+            var mode = btn.getAttribute('data-mode');
+            state.mode = mode;
+            modeToolbar.querySelectorAll('.mode-btn').forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            if (state.currentFile) renderComparison();
+        });
+
+        // -- Load PR images list --
+        function loadPrImages() {
+            fetch(apiBase + '/images')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        viewport.innerHTML = '<div class="empty-msg">Error: ' + escHtml(data.error) + '</div>';
+                        return;
+                    }
+                    state.images = data.images || [];
+                    state.baseRef = data.base_ref;
+                    state.headRef = data.head_ref;
+
+                    prTitle.innerHTML = '<span class="pr-number">PR #' + prNumber + '</span> ' +
+                        escHtml(data.pr_title || '') +
+                        ' <a href="' + escAttr(data.pr_url || '') + '" target="_blank" style="font-size:0.8rem;color:#8eb5f0;">View on GitHub</a>';
+                    document.title = 'Visual Review - ' + owner + '/' + repo + ' PR #' + prNumber;
+
+                    imageCount.textContent = '(' + state.images.length + ')';
+                    renderFileList();
+                    loadCommentCounts();
+
+                    if (state.images.length === 0) {
+                        viewport.innerHTML = '<div class="empty-msg">No changed PNG files found in this PR.</div>';
+                    } else {
+                        var hashFile = selectFileFromHash();
+                        if (!hashFile) {
+                            selectFile(state.images[0].path);
+                        }
+                    }
+                })
+                .catch(function(err) {
+                    viewport.innerHTML = '<div class="empty-msg">Failed to load PR data: ' + escHtml(err.message) + '</div>';
+                });
+        }
+
+        // -- Render sidebar file list --
+        function renderFileList() {
+            fileList.innerHTML = '';
+            state.images.forEach(function(img) {
+                var li = document.createElement('li');
+                li.className = 'file-item';
+                li.setAttribute('data-path', img.path);
+
+                var badge = document.createElement('span');
+                badge.className = 'status-badge ' + img.status;
+                badge.textContent = img.status === 'modified' ? 'M' : img.status === 'added' ? 'A' : img.status === 'removed' ? 'D' : img.status.charAt(0).toUpperCase();
+                li.appendChild(badge);
+
+                var fname = document.createElement('span');
+                fname.className = 'filename';
+                var parts = img.path.split('/');
+                fname.textContent = parts[parts.length - 1];
+                fname.title = img.path;
+                li.appendChild(fname);
+
+                li.addEventListener('click', function() {
+                    selectFile(img.path);
+                });
+
+                fileList.appendChild(li);
+            });
+        }
+
+        // -- Deep-link: select file from URL hash --
+        function selectFileFromHash() {
+            var hash = location.hash.replace(/^#/, '');
+            if (!hash || !state.images.length) return false;
+            var target = decodeURIComponent(hash);
+            for (var i = 0; i < state.images.length; i++) {
+                var parts = state.images[i].path.split('/');
+                var fname = parts[parts.length - 1];
+                if (fname === target || state.images[i].path === target) {
+                    selectFile(state.images[i].path, true);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        window.addEventListener('hashchange', function() {
+            selectFileFromHash();
+        });
+
+        // -- Select a file --
+        function selectFile(path, skipHash, direction) {
+            if (!direction && state.currentFile && state.currentFile !== path) {
+                var prevIdx = -1, newIdx = -1;
+                for (var i = 0; i < state.images.length; i++) {
+                    if (state.images[i].path === state.currentFile) prevIdx = i;
+                    if (state.images[i].path === path) newIdx = i;
+                }
+                if (prevIdx >= 0 && newIdx >= 0) {
+                    if (newIdx === prevIdx + 1) direction = 'next';
+                    else if (newIdx === prevIdx - 1) direction = 'prev';
+                }
+            }
+            state.lastDirection = direction || null;
+            state.currentFile = path;
+            state.baseImg = null;
+            state.headImg = null;
+            state.baseLoaded = false;
+            state.headLoaded = false;
+            state.loadError = null;
+
+            // Update sidebar
+            fileList.querySelectorAll('.file-item').forEach(function(item) {
+                item.classList.toggle('active', item.getAttribute('data-path') === path);
+            });
+
+            // Update URL hash
+            if (!skipHash) {
+                var parts = path.split('/');
+                location.hash = encodeURIComponent(parts[parts.length - 1]);
+            }
+
+            // Show toolbar
+            modeToolbar.style.display = '';
+
+            // Show loading
+            viewport.innerHTML = '<div class="spinner"></div>';
+            viewport.classList.add('loading');
+            imageInfo.style.display = 'none';
+
+            // Load images
+            loadImagePair(path);
+
+            // Load comments
+            loadComments(path);
+        }
+
+        // -- Prefetch adjacent images --
+        function prefetchAdjacent(path) {
+            var curIdx = -1;
+            for (var i = 0; i < state.images.length; i++) {
+                if (state.images[i].path === path) { curIdx = i; break; }
+            }
+            if (curIdx < 0) return;
+
+            var adjacent = [];
+            if (curIdx > 0) adjacent.push(state.images[curIdx - 1]);
+            if (curIdx < state.images.length - 1) adjacent.push(state.images[curIdx + 1]);
+
+            adjacent.forEach(function(img) {
+                if (state.imageCache[img.path]) return;
+                var entry = { baseImg: null, headImg: null };
+                if (img.status !== 'added') {
+                    var imgBase = new Image();
+                    imgBase.crossOrigin = 'anonymous';
+                    imgBase.src = apiBase + '/image?path=' + encodeURIComponent(img.path) + '&ref=' + state.baseRef;
+                    entry.baseImg = imgBase;
+                }
+                if (img.status !== 'removed') {
+                    var imgHead = new Image();
+                    imgHead.crossOrigin = 'anonymous';
+                    imgHead.src = apiBase + '/image?path=' + encodeURIComponent(img.path) + '&ref=' + state.headRef;
+                    entry.headImg = imgHead;
+                }
+                state.imageCache[img.path] = entry;
+            });
+        }
+
+        // -- Load image pair (base and head) for comparison --
+        var loadGeneration = 0;
+
+        function loadImagePair(path) {
+            var gen = ++loadGeneration;
+            var fileStatus = getFileStatus(path);
+
+            // Check cache
+            if (state.imageCache[path]) {
+                var cached = state.imageCache[path];
+                if (cached.baseImg && cached.baseImg.complete && cached.baseImg.naturalWidth > 0) {
+                    state.baseImg = cached.baseImg;
+                    state.baseLoaded = true;
+                }
+                if (cached.headImg && cached.headImg.complete && cached.headImg.naturalWidth > 0) {
+                    state.headImg = cached.headImg;
+                    state.headLoaded = true;
+                }
+                if ((state.baseLoaded || fileStatus === 'added') && (state.headLoaded || fileStatus === 'removed')) {
+                    viewport.classList.remove('loading');
+                    renderComparison();
+                    prefetchAdjacent(path);
+                    return;
+                }
+            }
+
+            function checkReady() {
+                var baseReady = state.baseLoaded || fileStatus === 'added';
+                var headReady = state.headLoaded || fileStatus === 'removed';
+                if (baseReady && headReady) {
+                    viewport.classList.remove('loading');
+                    renderComparison();
+                    prefetchAdjacent(path);
+                }
+            }
+
+            var baseUrl = apiBase + '/image?path=' + encodeURIComponent(path) + '&ref=' + state.baseRef;
+            var headUrl = apiBase + '/image?path=' + encodeURIComponent(path) + '&ref=' + state.headRef;
+
+            if (fileStatus !== 'added') {
+                var imgBase = new Image();
+                imgBase.crossOrigin = 'anonymous';
+                imgBase.onload = function() {
+                    if (gen !== loadGeneration) return;
+                    state.baseImg = imgBase;
+                    state.baseLoaded = true;
+                    checkReady();
+                };
+                imgBase.onerror = function() {
+                    if (gen !== loadGeneration) return;
+                    state.baseLoaded = true;
+                    checkReady();
+                };
+                imgBase.src = baseUrl;
+            }
+
+            if (fileStatus !== 'removed') {
+                var imgHead = new Image();
+                imgHead.crossOrigin = 'anonymous';
+                imgHead.onload = function() {
+                    if (gen !== loadGeneration) return;
+                    state.headImg = imgHead;
+                    state.headLoaded = true;
+                    checkReady();
+                };
+                imgHead.onerror = function() {
+                    if (gen !== loadGeneration) return;
+                    state.loadError = 'head';
+                    state.headLoaded = true;
+                    checkReady();
+                };
+                imgHead.src = headUrl;
+            }
+
+            state.imageCache[path] = {
+                baseImg: fileStatus !== 'added' ? imgBase : null,
+                headImg: fileStatus !== 'removed' ? imgHead : null,
+            };
+        }
+
+        function getFileStatus(path) {
+            for (var i = 0; i < state.images.length; i++) {
+                if (state.images[i].path === path) return state.images[i].status;
+            }
+            return 'modified';
+        }
+
+        // -- Render comparison based on current mode --
+        function renderComparison() {
+            viewport.innerHTML = '';
+            imageInfo.style.display = '';
+            hideLoupes();
+            gutterRefreshCallbacks = [];
+
+            var fileStatus = getFileStatus(state.currentFile);
+            if (!state.baseImg && !state.headImg && fileStatus !== 'removed') {
+                var errorMsg = state.loadError
+                    ? 'Failed to load image from GitHub.'
+                    : 'No images available for this file.';
+                viewport.innerHTML = '<div class="empty-msg">' + escHtml(errorMsg) +
+                    '<br><small style="color:var(--vr-text-dim)">File: ' + escHtml(state.currentFile || '') +
+                    '<br>Check the browser console for details.</small></div>';
+                imageInfo.style.display = 'none';
+                return;
+            }
+
+            var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+            state.diffClusters = computeDiffClusters(rowMap);
+
+            var infoHtml = '<span>' + escHtml(state.currentFile) + '</span>';
+            if (state.baseImg) {
+                infoHtml += '<span>Base: <span class="dim">' + state.baseImg.naturalWidth + ' x ' + state.baseImg.naturalHeight + '</span></span>';
+            }
+            if (state.headImg) {
+                infoHtml += '<span>Current: <span class="dim">' + state.headImg.naturalWidth + ' x ' + state.headImg.naturalHeight + '</span></span>';
+            }
+            if (state.loadError) {
+                infoHtml += '<span style="color:#e53935;">Image load error (' + escHtml(state.loadError) + ')</span>';
+            }
+            imageInfo.innerHTML = infoHtml;
+
+            switch (state.mode) {
+                case 'side-by-side': renderSideBySide(); break;
+                case 'crossfade': renderCrossfade(); break;
+                case 'swipe': renderSwipe(); break;
+                case 'diff': renderDiffOverlay(); break;
+            }
+        }
+
+        var gutterRefreshCallbacks = [];
+
+        // -- Row-level diff map --
+        function computeRowDiffMap(baseImg, headImg, threshold) {
+            if (!baseImg || !headImg) return null;
+            var w = Math.max(baseImg.naturalWidth, headImg.naturalWidth);
+            var h = Math.max(baseImg.naturalHeight, headImg.naturalHeight);
+            if (w === 0 || h === 0) return null;
+
+            var bc = document.createElement('canvas');
+            bc.width = w; bc.height = h;
+            var bCtx = bc.getContext('2d');
+            bCtx.drawImage(baseImg, 0, 0);
+            var bData = bCtx.getImageData(0, 0, w, h).data;
+
+            var hc = document.createElement('canvas');
+            hc.width = w; hc.height = h;
+            var hCtx = hc.getContext('2d');
+            hCtx.drawImage(headImg, 0, 0);
+            var hData = hCtx.getImageData(0, 0, w, h).data;
+
+            var map = new Array(h);
+            var thr = threshold || 10;
+            for (var y = 0; y < h; y++) {
+                map[y] = false;
+                var rowStart = y * w * 4;
+                for (var x = 0; x < w; x++) {
+                    var i = rowStart + x * 4;
+                    if (Math.abs(bData[i] - hData[i]) > thr ||
+                        Math.abs(bData[i+1] - hData[i+1]) > thr ||
+                        Math.abs(bData[i+2] - hData[i+2]) > thr) {
+                        map[y] = true;
+                        break;
+                    }
+                }
+            }
+            return map;
+        }
+
+        function computeDiffClusters(rowMap) {
+            if (!rowMap) return [];
+            var clusters = [];
+            var inCluster = false;
+            var start = 0;
+            for (var y = 0; y < rowMap.length; y++) {
+                if (rowMap[y] && !inCluster) {
+                    start = y;
+                    inCluster = true;
+                } else if (!rowMap[y] && inCluster) {
+                    clusters.push({start: start, end: y - 1});
+                    inCluster = false;
+                }
+            }
+            if (inCluster) clusters.push({start: start, end: rowMap.length - 1});
+
+            var merged = [];
+            for (var i = 0; i < clusters.length; i++) {
+                if (merged.length && clusters[i].start - merged[merged.length - 1].end < 30) {
+                    merged[merged.length - 1].end = clusters[i].end;
+                } else {
+                    merged.push({start: clusters[i].start, end: clusters[i].end});
+                }
+            }
+            return merged;
+        }
+
+        function createDiffGutter(rowMap, displayHeight) {
+            if (!rowMap) return null;
+
+            var wrapper = document.createElement('div');
+            wrapper.style.cssText = 'position:relative;flex-shrink:0;width:16px;';
+
+            var canvas = document.createElement('canvas');
+            canvas.width = 6;
+            canvas.height = rowMap.length;
+            canvas.style.cssText = 'width:6px;margin:0 5px;image-rendering:pixelated;';
+            canvas.style.height = displayHeight ? (displayHeight + 'px') : 'auto';
+            canvas.title = 'Row diff indicator';
+            var ctx = canvas.getContext('2d');
+
+            var firstDiffRow = -1, lastDiffRow = -1;
+            for (var y = 0; y < rowMap.length; y++) {
+                if (rowMap[y]) {
+                    ctx.fillStyle = '#e53935';
+                    ctx.fillRect(0, y, 6, 1);
+                    if (firstDiffRow === -1) firstDiffRow = y;
+                    lastDiffRow = y;
+                } else {
+                    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+                    ctx.fillRect(0, y, 6, 1);
+                }
+            }
+            wrapper.appendChild(canvas);
+
+            if (firstDiffRow >= 0) {
+                var chevStyle = 'position:sticky;display:none;width:16px;text-align:center;' +
+                    'font-size:10px;color:#e53935;pointer-events:none;z-index:5;line-height:1;';
+
+                var upChev = document.createElement('div');
+                upChev.innerHTML = '&#9650;';
+                upChev.style.cssText = chevStyle + 'top:0;';
+                upChev.className = 'gutter-chev-up';
+                wrapper.appendChild(upChev);
+
+                var downChev = document.createElement('div');
+                downChev.innerHTML = '&#9660;';
+                downChev.style.cssText = chevStyle + 'bottom:0;';
+                downChev.className = 'gutter-chev-down';
+                wrapper.appendChild(downChev);
+
+                var totalRows = rowMap.length;
+                function updateChevrons() {
+                    var canvasRect = canvas.getBoundingClientRect();
+                    var vpRect = viewport.getBoundingClientRect();
+                    var scale = canvasRect.height / totalRows;
+                    var firstDiffPx = firstDiffRow * scale + canvasRect.top;
+                    var lastDiffPx = lastDiffRow * scale + canvasRect.top;
+                    upChev.style.display = (firstDiffPx < vpRect.top) ? 'block' : 'none';
+                    downChev.style.display = (lastDiffPx > vpRect.bottom) ? 'block' : 'none';
+                }
+
+                viewport.addEventListener('scroll', updateChevrons);
+                window.addEventListener('resize', updateChevrons);
+            }
+
+            wrapper.updateChevrons = (firstDiffRow >= 0) ? updateChevrons : function() {};
+            return wrapper;
+        }
+
+        // -- Side by Side --
+        function renderSideBySide() {
+            var container = document.createElement('div');
+            container.className = 'side-by-side';
+
+            var leftPanel = document.createElement('div');
+            leftPanel.className = 'side-panel';
+            var leftLabel = document.createElement('div');
+            leftLabel.className = 'panel-label';
+            leftLabel.textContent = 'Base (before)';
+            leftPanel.appendChild(leftLabel);
+
+            var rightPanel = document.createElement('div');
+            rightPanel.className = 'side-panel';
+            var rightLabel = document.createElement('div');
+            rightLabel.className = 'panel-label';
+            rightLabel.textContent = 'Current (after)';
+            rightPanel.appendChild(rightLabel);
+
+            if (state.baseImg) {
+                var imgL = document.createElement('img');
+                imgL.src = state.baseImg.src;
+                imgL.setAttribute('data-role', 'base');
+                imgL.width = state.baseImg.naturalWidth;
+                imgL.height = state.baseImg.naturalHeight;
+                leftPanel.appendChild(imgL);
+            } else {
+                var emL = document.createElement('div');
+                emL.className = 'empty-msg';
+                emL.textContent = 'No base image (new file)';
+                emL.style.padding = '40px';
+                leftPanel.appendChild(emL);
+            }
+
+            if (state.headImg) {
+                var imgR = document.createElement('img');
+                imgR.src = state.headImg.src;
+                imgR.setAttribute('data-role', 'head');
+                imgR.width = state.headImg.naturalWidth;
+                imgR.height = state.headImg.naturalHeight;
+                rightPanel.appendChild(imgR);
+            } else if (state.loadError === 'head') {
+                var emR = document.createElement('div');
+                emR.className = 'empty-msg';
+                emR.innerHTML = 'Failed to load image.<br><small style="color:var(--vr-text-dim)">Check the browser console for details.</small>';
+                emR.style.padding = '40px';
+                rightPanel.appendChild(emR);
+            } else {
+                var emR = document.createElement('div');
+                emR.className = 'empty-msg';
+                emR.textContent = getFileStatus(state.currentFile) === 'removed' ? 'No current image (deleted file)' : 'Image not available';
+                emR.style.padding = '40px';
+                rightPanel.appendChild(emR);
+            }
+
+            container.appendChild(leftPanel);
+
+            var gutterHolder = document.createElement('div');
+            gutterHolder.style.cssText = 'display:flex;align-items:flex-start;flex-shrink:0;padding-top:22px;';
+            container.appendChild(gutterHolder);
+
+            container.appendChild(rightPanel);
+            viewport.appendChild(container);
+
+            function updateGutter() {
+                var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+                if (!rowMap) return;
+                var displayImg = leftPanel.querySelector('img') || rightPanel.querySelector('img');
+                var h = displayImg ? displayImg.clientHeight : null;
+                gutterHolder.innerHTML = '';
+                var gutter = createDiffGutter(rowMap, h);
+                if (gutter) {
+                    gutterHolder.appendChild(gutter);
+                    requestAnimationFrame(function() { gutter.updateChevrons(); });
+                }
+            }
+            var imgs = container.querySelectorAll('img');
+            var loaded = 0;
+            imgs.forEach(function(img) {
+                if (img.complete) { loaded++; } else {
+                    img.addEventListener('load', function() { loaded++; if (loaded >= imgs.length) updateGutter(); });
+                }
+            });
+            if (loaded >= imgs.length) setTimeout(updateGutter, 50);
+            gutterRefreshCallbacks.push(updateGutter);
+
+            setupLoupes(container);
+        }
+
+        // -- Crossfade --
+        function renderCrossfade() {
+            var wrap = document.createElement('div');
+            wrap.style.textAlign = 'center';
+
+            var sliderRow = document.createElement('div');
+            sliderRow.className = 'crossfade-slider-row';
+            var labelL = document.createElement('label');
+            labelL.textContent = 'Base';
+            var slider = document.createElement('input');
+            slider.type = 'range'; slider.min = '0'; slider.max = '100'; slider.value = '50';
+            var labelR = document.createElement('label');
+            labelR.textContent = 'Current';
+            sliderRow.appendChild(labelL);
+            sliderRow.appendChild(slider);
+            sliderRow.appendChild(labelR);
+            wrap.appendChild(sliderRow);
+
+            var cfWrap = document.createElement('div');
+            cfWrap.className = 'crossfade-wrap';
+            cfWrap.style.display = 'inline-block';
+
+            var imgBase = null, imgHead = null;
+            var hasBase = !!state.baseImg, hasHead = !!state.headImg;
+
+            if (hasBase && hasHead) {
+                imgBase = document.createElement('img');
+                imgBase.src = state.baseImg.src;
+                imgBase.setAttribute('data-role', 'base');
+                cfWrap.appendChild(imgBase);
+                imgHead = document.createElement('img');
+                imgHead.src = state.headImg.src;
+                imgHead.className = 'overlay-img';
+                imgHead.setAttribute('data-role', 'head');
+                imgHead.style.opacity = '0.5';
+                cfWrap.appendChild(imgHead);
+            } else if (hasHead && !hasBase) {
+                imgHead = document.createElement('img');
+                imgHead.src = state.headImg.src;
+                imgHead.setAttribute('data-role', 'head');
+                imgHead.style.opacity = '0.5';
+                cfWrap.appendChild(imgHead);
+            } else if (hasBase && !hasHead) {
+                imgBase = document.createElement('img');
+                imgBase.src = state.baseImg.src;
+                imgBase.setAttribute('data-role', 'base');
+                imgBase.style.opacity = '0.5';
+                cfWrap.appendChild(imgBase);
+            }
+
+            slider.addEventListener('input', function() {
+                var val = parseInt(slider.value, 10) / 100;
+                if (hasBase && hasHead) { imgHead.style.opacity = val; }
+                else if (hasHead && !hasBase) { imgHead.style.opacity = val; }
+                else if (hasBase && !hasHead) { imgBase.style.opacity = 1 - val; }
+            });
+
+            var gutterWrap = document.createElement('div');
+            gutterWrap.style.cssText = 'display:inline-flex;gap:4px;align-items:flex-start;';
+            var gutterHolder = document.createElement('div');
+            gutterHolder.style.flexShrink = '0';
+            gutterWrap.appendChild(gutterHolder);
+            gutterWrap.appendChild(cfWrap);
+            wrap.appendChild(gutterWrap);
+            viewport.appendChild(wrap);
+
+            function addGutter() {
+                var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+                var displayImg = cfWrap.querySelector('img');
+                var h = displayImg ? displayImg.clientHeight : null;
+                gutterHolder.innerHTML = '';
+                var g = createDiffGutter(rowMap, h);
+                if (g) {
+                    gutterHolder.appendChild(g);
+                    requestAnimationFrame(function() { g.updateChevrons(); });
+                }
+            }
+            var cfImg = cfWrap.querySelector('img');
+            if (cfImg && cfImg.complete) setTimeout(addGutter, 50);
+            else if (cfImg) cfImg.addEventListener('load', addGutter);
+            gutterRefreshCallbacks.push(addGutter);
+
+            setupLoupes(cfWrap);
+        }
+
+        // -- Swipe --
+        function renderSwipe() {
+            var wrap = document.createElement('div');
+            wrap.style.textAlign = 'center';
+
+            if (!state.baseImg || !state.headImg) {
+                var msg = document.createElement('div');
+                msg.className = 'empty-msg';
+                msg.textContent = 'Swipe requires both base and current images.';
+                wrap.appendChild(msg);
+                viewport.appendChild(wrap);
+                return;
+            }
+
+            var swipe = document.createElement('div');
+            swipe.className = 'swipe-wrap';
+            swipe.style.display = 'inline-block';
+
+            var imgBase = document.createElement('img');
+            imgBase.src = state.baseImg.src;
+            imgBase.setAttribute('data-role', 'base');
+            swipe.appendChild(imgBase);
+
+            var overlay = document.createElement('div');
+            overlay.className = 'swipe-overlay';
+            var imgHead = document.createElement('img');
+            imgHead.src = state.headImg.src;
+            imgHead.setAttribute('data-role', 'head');
+            overlay.appendChild(imgHead);
+            swipe.appendChild(overlay);
+
+            var divider = document.createElement('div');
+            divider.className = 'swipe-divider';
+            swipe.appendChild(divider);
+
+            var swipeGutterWrap = document.createElement('div');
+            swipeGutterWrap.style.cssText = 'display:inline-flex;gap:4px;align-items:flex-start;';
+            var swipeGutterHolder = document.createElement('div');
+            swipeGutterHolder.style.flexShrink = '0';
+            swipeGutterWrap.appendChild(swipeGutterHolder);
+            swipeGutterWrap.appendChild(swipe);
+            wrap.appendChild(swipeGutterWrap);
+            viewport.appendChild(wrap);
+
+            function setPosition(fraction) {
+                var w = swipe.offsetWidth;
+                var px = Math.round(fraction * w);
+                overlay.style.width = px + 'px';
+                divider.style.left = px + 'px';
+            }
+
+            function syncOverlayAndGutter() {
+                imgHead.style.width = imgBase.offsetWidth + 'px';
+                imgHead.style.height = imgBase.offsetHeight + 'px';
+                var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+                var h = imgBase.clientHeight;
+                swipeGutterHolder.innerHTML = '';
+                var g = createDiffGutter(rowMap, h);
+                if (g) {
+                    swipeGutterHolder.appendChild(g);
+                    requestAnimationFrame(function() { g.updateChevrons(); });
+                }
+                setPosition(0.5);
+            }
+            if (imgBase.complete) setTimeout(syncOverlayAndGutter, 50);
+            else imgBase.addEventListener('load', function() { setTimeout(syncOverlayAndGutter, 50); });
+            gutterRefreshCallbacks.push(syncOverlayAndGutter);
+
+            var dragging = false;
+            function onMove(clientX) {
+                var rect = swipe.getBoundingClientRect();
+                var x = clientX - rect.left;
+                setPosition(Math.max(0, Math.min(1, x / rect.width)));
+            }
+
+            swipe.addEventListener('mousedown', function(e) { dragging = true; onMove(e.clientX); e.preventDefault(); });
+            document.addEventListener('mousemove', function(e) { if (dragging) onMove(e.clientX); });
+            document.addEventListener('mouseup', function() { dragging = false; });
+            swipe.addEventListener('touchstart', function(e) { dragging = true; onMove(e.touches[0].clientX); }, { passive: true });
+            document.addEventListener('touchmove', function(e) { if (dragging) onMove(e.touches[0].clientX); });
+            document.addEventListener('touchend', function() { dragging = false; });
+
+            setupLoupes(swipe);
+        }
+
+        // -- Diff Overlay --
+        function renderDiffOverlay() {
+            var wrap = document.createElement('div');
+            wrap.style.textAlign = 'center';
+
+            var legend = document.createElement('div');
+            legend.className = 'diff-legend';
+            legend.innerHTML =
+                '<span><span class="swatch" style="background:#ff0000;"></span> Changed pixels</span>' +
+                '<span><span class="swatch" style="background:#333;"></span> Unchanged</span>';
+            wrap.appendChild(legend);
+
+            if (!state.baseImg || !state.headImg) {
+                var msg = document.createElement('div');
+                msg.className = 'empty-msg';
+                msg.textContent = 'Diff overlay requires both base and current images.';
+                wrap.appendChild(msg);
+                viewport.appendChild(wrap);
+                return;
+            }
+
+            var dw = document.createElement('div');
+            dw.className = 'diff-wrap';
+            dw.style.display = 'inline-block';
+
+            var w = Math.max(state.baseImg.naturalWidth, state.headImg.naturalWidth);
+            var h = Math.max(state.baseImg.naturalHeight, state.headImg.naturalHeight);
+
+            var canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            canvas.style.maxWidth = '90vw'; canvas.style.height = 'auto';
+
+            var ctx = canvas.getContext('2d');
+
+            var baseCanvas = document.createElement('canvas');
+            baseCanvas.width = w; baseCanvas.height = h;
+            var baseCtx = baseCanvas.getContext('2d');
+            baseCtx.imageSmoothingEnabled = false;
+            baseCtx.drawImage(state.baseImg, 0, 0);
+            var baseData = baseCtx.getImageData(0, 0, w, h);
+
+            var headCanvas = document.createElement('canvas');
+            headCanvas.width = w; headCanvas.height = h;
+            var headCtx = headCanvas.getContext('2d');
+            headCtx.imageSmoothingEnabled = false;
+            headCtx.drawImage(state.headImg, 0, 0);
+            var headData = headCtx.getImageData(0, 0, w, h);
+
+            var diffData = ctx.createImageData(w, h);
+            var changedCount = 0;
+            var threshold = 10;
+            for (var i = 0; i < baseData.data.length; i += 4) {
+                var dr = Math.abs(baseData.data[i] - headData.data[i]);
+                var dg = Math.abs(baseData.data[i+1] - headData.data[i+1]);
+                var db = Math.abs(baseData.data[i+2] - headData.data[i+2]);
+                var da = Math.abs(baseData.data[i+3] - headData.data[i+3]);
+
+                if (dr > threshold || dg > threshold || db > threshold || da > threshold) {
+                    diffData.data[i] = 255; diffData.data[i+1] = 30; diffData.data[i+2] = 30; diffData.data[i+3] = 255;
+                    changedCount++;
+                } else {
+                    diffData.data[i] = Math.round(baseData.data[i] * 0.3);
+                    diffData.data[i+1] = Math.round(baseData.data[i+1] * 0.3);
+                    diffData.data[i+2] = Math.round(baseData.data[i+2] * 0.3);
+                    diffData.data[i+3] = 255;
+                }
+            }
+            ctx.putImageData(diffData, 0, 0);
+
+            dw.appendChild(canvas);
+
+            var diffGutterWrap = document.createElement('div');
+            diffGutterWrap.style.cssText = 'display:inline-flex;gap:4px;align-items:flex-start;';
+            var diffGutterHolder = document.createElement('div');
+            diffGutterHolder.style.flexShrink = '0';
+            diffGutterWrap.appendChild(diffGutterHolder);
+            diffGutterWrap.appendChild(dw);
+            wrap.appendChild(diffGutterWrap);
+
+            var totalPixels = w * h;
+            var pct = totalPixels > 0 ? ((changedCount / totalPixels) * 100).toFixed(2) : '0.00';
+            var stats = document.createElement('div');
+            stats.style.cssText = 'font-size:0.8rem;color:#aaa;text-align:center;margin-top:8px;';
+            stats.textContent = changedCount.toLocaleString() + ' changed pixels (' + pct + '% of ' + totalPixels.toLocaleString() + ' total)';
+            wrap.appendChild(stats);
+
+            viewport.appendChild(wrap);
+
+            function addDiffGutter() {
+                var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+                var displayH = canvas.clientHeight;
+                diffGutterHolder.innerHTML = '';
+                var g = createDiffGutter(rowMap, displayH);
+                if (g) {
+                    diffGutterHolder.appendChild(g);
+                    requestAnimationFrame(function() { g.updateChevrons(); });
+                }
+            }
+            setTimeout(addDiffGutter, 50);
+            gutterRefreshCallbacks.push(addDiffGutter);
+
+            setupLoupes(dw);
+        }
+
+        // -- Loupe / Magnifier --
+        var loupeActive = false;
+        var lastMouseEvent = null;
+        var loupeContainer = null;
+
+        function setupLoupes(container) {
+            container.addEventListener('mousemove', function(e) {
+                lastMouseEvent = e;
+                loupeContainer = container;
+                if (!e.shiftKey) { hideLoupes(); return; }
+                showLoupes(e, container);
+            });
+            container.addEventListener('mouseleave', function() {
+                lastMouseEvent = null;
+                loupeContainer = null;
+                hideLoupes();
+            });
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Shift' && lastMouseEvent && loupeContainer) {
+                showLoupes(lastMouseEvent, loupeContainer);
+            }
+        });
+        document.addEventListener('keyup', function(e) {
+            if (e.key === 'Shift') hideLoupes();
+        });
+
+        function hideLoupes() {
+            loupeBase.style.display = 'none';
+            loupeHead.style.display = 'none';
+            loupeDiff.style.display = 'none';
+            loupeActive = false;
+        }
+
+        function showLoupes(e, container) {
+            loupeActive = true;
+            var refDisplay = container.querySelector('img[data-role="base"]')
+                || container.querySelector('img[data-role="head"]')
+                || container.querySelector('img')
+                || container.querySelector('canvas');
+            if (!refDisplay) return;
+
+            if (state.mode === 'side-by-side') {
+                var baseDisplayImg = container.querySelector('img[data-role="base"]');
+                var headDisplayImg = container.querySelector('img[data-role="head"]');
+                var hoveredImg = baseDisplayImg;
+                var hoveredSource = state.baseImg;
+                if (headDisplayImg) {
+                    var headRect = headDisplayImg.getBoundingClientRect();
+                    if (e.clientX >= headRect.left && e.clientX <= headRect.right) {
+                        hoveredImg = headDisplayImg;
+                        hoveredSource = state.headImg;
+                    }
+                }
+                if (!hoveredImg) {
+                    hoveredImg = headDisplayImg || baseDisplayImg;
+                    hoveredSource = headDisplayImg ? state.headImg : state.baseImg;
+                }
+                if (!hoveredImg) return;
+                var hRect = hoveredImg.getBoundingClientRect();
+                var relX = (e.clientX - hRect.left) / hRect.width;
+                var relY = (e.clientY - hRect.top) / hRect.height;
+                var absCoords = {
+                    x: Math.floor(relX * hoveredSource.naturalWidth),
+                    y: Math.floor(relY * hoveredSource.naturalHeight)
+                };
+                if (state.baseImg && baseDisplayImg) {
+                    positionLoupe(loupeBase, e, baseDisplayImg, state.baseImg, -312, absCoords);
+                    loupeBase.style.display = 'block';
+                }
+                if (state.headImg && headDisplayImg) {
+                    positionLoupe(loupeHead, e, headDisplayImg, state.headImg, 112, absCoords);
+                    loupeHead.style.display = 'block';
+                }
+                if (state.baseImg && state.headImg) {
+                    positionDiffLoupe(e, hoveredImg, absCoords, -100);
+                }
+            } else {
+                var displayImg = refDisplay;
+                var dRect = displayImg.getBoundingClientRect();
+                var relX = (e.clientX - dRect.left) / dRect.width;
+                var relY = (e.clientY - dRect.top) / dRect.height;
+                var refW = displayImg.naturalWidth || displayImg.width;
+                var refH = displayImg.naturalHeight || displayImg.height;
+                var absCoords = {
+                    x: Math.floor(relX * refW),
+                    y: Math.floor(relY * refH)
+                };
+                if (state.baseImg) {
+                    positionLoupe(loupeBase, e, displayImg, state.baseImg, -312, absCoords);
+                    loupeBase.style.display = 'block';
+                }
+                if (state.headImg) {
+                    positionLoupe(loupeHead, e, displayImg, state.headImg, 112, absCoords);
+                    loupeHead.style.display = 'block';
+                }
+                if (state.baseImg && state.headImg) {
+                    positionDiffLoupe(e, displayImg, absCoords, -100);
+                }
+            }
+        }
+
+        var LOUPE_BORDER = 2;
+
+        function positionLoupe(loupeEl, mouseEvent, displayImg, sourceImg, offsetX, absCoords) {
+            var lx = mouseEvent.clientX + offsetX - LOUPE_BORDER;
+            var ly = mouseEvent.clientY - 100 - LOUPE_BORDER;
+            lx = Math.max(4, Math.min(lx, window.innerWidth - 208));
+            ly = Math.max(4, Math.min(ly, window.innerHeight - 208));
+            loupeEl.style.left = lx + 'px';
+            loupeEl.style.top = ly + 'px';
+
+            var srcX, srcY;
+            if (absCoords) {
+                srcX = absCoords.x; srcY = absCoords.y;
+            } else {
+                var rect = displayImg.getBoundingClientRect();
+                srcX = Math.floor(((mouseEvent.clientX - rect.left) / rect.width) * sourceImg.naturalWidth);
+                srcY = Math.floor(((mouseEvent.clientY - rect.top) / rect.height) * sourceImg.naturalHeight);
+            }
+
+            var canvas = loupeEl.querySelector('canvas');
+            var ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = false;
+            ctx.clearRect(0, 0, 200, 200);
+
+            var sx = srcX - 100, sy = srcY - 100, sw = 200, sh = 200;
+            var dx = 0, dy = 0, dw = 200, dh = 200;
+            if (sx < 0) { dx = -sx; sw += sx; sx = 0; dw = sw; }
+            if (sy < 0) { dy = -sy; sh += sy; sy = 0; dh = sh; }
+            if (sx + sw > sourceImg.naturalWidth) { sw = sourceImg.naturalWidth - sx; dw = sw; }
+            if (sy + sh > sourceImg.naturalHeight) { sh = sourceImg.naturalHeight - sy; dh = sh; }
+
+            if (sw > 0 && sh > 0) {
+                ctx.drawImage(sourceImg, sx, sy, sw, sh, dx, dy, dw, dh);
+            }
+            if (sw <= 0 || sh <= 0) {
+                ctx.fillStyle = 'rgba(255,255,255,0.12)';
+                ctx.font = '11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('past image bounds', 100, 96);
+                ctx.fillText('(' + sourceImg.naturalWidth + '\u00d7' + sourceImg.naturalHeight + ')', 100, 112);
+            }
+
+            ctx.strokeStyle = 'rgba(74, 144, 217, 0.6)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(100.5, 0); ctx.lineTo(100.5, 200);
+            ctx.moveTo(0, 100.5); ctx.lineTo(200, 100.5);
+            ctx.stroke();
+        }
+
+        function positionDiffLoupe(mouseEvent, displayImg, absCoords, offsetX) {
+            if (!state.baseImg || !state.headImg) return;
+            var lx = mouseEvent.clientX + offsetX - LOUPE_BORDER;
+            var ly = mouseEvent.clientY - 100 - LOUPE_BORDER;
+            lx = Math.max(4, Math.min(lx, window.innerWidth - 208));
+            ly = Math.max(4, Math.min(ly, window.innerHeight - 208));
+            loupeDiff.style.left = lx + 'px';
+            loupeDiff.style.top = ly + 'px';
+
+            var srcX, srcY;
+            if (absCoords) {
+                srcX = absCoords.x; srcY = absCoords.y;
+            } else {
+                var rect = displayImg.getBoundingClientRect();
+                var refW = displayImg.naturalWidth || displayImg.width;
+                var refH = displayImg.naturalHeight || displayImg.height;
+                srcX = Math.floor(((mouseEvent.clientX - rect.left) / rect.width) * refW);
+                srcY = Math.floor(((mouseEvent.clientY - rect.top) / rect.height) * refH);
+            }
+
+            var canvas = loupeDiff.querySelector('canvas');
+            var ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = false;
+
+            function clampCrop(img) {
+                var sx = srcX - 100, sy = srcY - 100;
+                var dx = 0, dy = 0, sw = 200, sh = 200, dw = 200, dh = 200;
+                if (sx < 0) { dx = -sx; sw += sx; sx = 0; dw = sw; }
+                if (sy < 0) { dy = -sy; sh += sy; sy = 0; dh = sh; }
+                if (sx + sw > img.naturalWidth) { sw = img.naturalWidth - sx; dw = sw; }
+                if (sy + sh > img.naturalHeight) { sh = img.naturalHeight - sy; dh = sh; }
+                return { sx: sx, sy: sy, sw: sw, sh: sh, dx: dx, dy: dy, dw: dw, dh: dh };
+            }
+
+            var bc = clampCrop(state.baseImg);
+            ctx.clearRect(0, 0, 200, 200);
+            if (bc.sw > 0 && bc.sh > 0) ctx.drawImage(state.baseImg, bc.sx, bc.sy, bc.sw, bc.sh, bc.dx, bc.dy, bc.dw, bc.dh);
+            var bData = ctx.getImageData(0, 0, 200, 200);
+
+            var hc = clampCrop(state.headImg);
+            ctx.clearRect(0, 0, 200, 200);
+            if (hc.sw > 0 && hc.sh > 0) ctx.drawImage(state.headImg, hc.sx, hc.sy, hc.sw, hc.sh, hc.dx, hc.dy, hc.dw, hc.dh);
+            var hData = ctx.getImageData(0, 0, 200, 200);
+
+            var out = ctx.createImageData(200, 200);
+            var thr = 10;
+            for (var i = 0; i < bData.data.length; i += 4) {
+                var dr = Math.abs(bData.data[i] - hData.data[i]);
+                var dg = Math.abs(bData.data[i+1] - hData.data[i+1]);
+                var db = Math.abs(bData.data[i+2] - hData.data[i+2]);
+                if (dr > thr || dg > thr || db > thr) {
+                    out.data[i] = 255; out.data[i+1] = 30; out.data[i+2] = 30; out.data[i+3] = 255;
+                } else {
+                    out.data[i] = Math.round(bData.data[i] * 0.25);
+                    out.data[i+1] = Math.round(bData.data[i+1] * 0.25);
+                    out.data[i+2] = Math.round(bData.data[i+2] * 0.25);
+                    out.data[i+3] = 255;
+                }
+            }
+            ctx.putImageData(out, 0, 0);
+            ctx.strokeStyle = 'rgba(74, 144, 217, 0.6)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(100.5, 0); ctx.lineTo(100.5, 200);
+            ctx.moveTo(0, 100.5); ctx.lineTo(200, 100.5);
+            ctx.stroke();
+            loupeDiff.style.display = 'block';
+        }
+
+        // -- Comments --
+        function loadComments(path) {
+            commentsSection.style.display = '';
+            commentsSection.innerHTML = '<h4>Comments on this file</h4><div class="spinner"></div>';
+
+            fetch(apiBase + '/comments?path=' + encodeURIComponent(path))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var comments = data.comments || [];
+                    renderComments(comments, path);
+                    updateCommentBadge(path, comments.length);
+                })
+                .catch(function() {
+                    renderComments([], path);
+                });
+        }
+
+        function renderComments(comments, path) {
+            var html = '<h4>Comments on this file (' + comments.length + ')</h4>';
+
+            comments.forEach(function(c) {
+                html += '<div class="comment-card">';
+                html += '<div class="comment-meta">';
+                html += '<strong>' + escHtml(c.user) + '</strong> &middot; ';
+                html += '<span title="' + escAttr(c.created_at) + '">' + timeAgo(c.created_at) + '</span>';
+                if (c.html_url) {
+                    html += ' &middot; <a href="' + escAttr(c.html_url) + '" target="_blank">view</a>';
+                }
+                html += '</div>';
+                html += '<div class="comment-body">' + escHtml(c.body) + '</div>';
+                html += '</div>';
+            });
+
+            html += '<div class="comment-form">';
+            html += '<textarea id="comment-text" placeholder="Add a review comment on this file..."></textarea>';
+            html += '<button id="comment-submit">Post Comment</button>';
+            html += '</div>';
+
+            commentsSection.innerHTML = html;
+
+            var textarea = document.getElementById('comment-text');
+            var submitBtn = document.getElementById('comment-submit');
+            submitBtn.addEventListener('click', function() {
+                var body = textarea.value.trim();
+                if (!body) return;
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Posting...';
+
+                fetch(apiBase + '/comments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: path, body: body }),
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.ok) {
+                        textarea.value = '';
+                        loadComments(path);
+                    } else {
+                        alert('Error posting comment: ' + (data.error || 'Unknown error'));
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = 'Post Comment';
+                    }
+                })
+                .catch(function(err) {
+                    alert('Failed to post comment: ' + err.message);
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Post Comment';
+                });
+            });
+        }
+
+        function updateCommentBadge(path, count) {
+            var items = fileList.querySelectorAll('.file-item');
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].getAttribute('data-path') !== path) continue;
+                var existing = items[i].querySelector('.comment-badge');
+                if (existing) existing.remove();
+                if (count > 0) {
+                    var badge = document.createElement('span');
+                    badge.className = 'comment-badge';
+                    badge.textContent = '\uD83D\uDCAC\u2009' + count;
+                    badge.title = count + ' comment' + (count !== 1 ? 's' : '');
+                    items[i].appendChild(badge);
+                }
+                break;
+            }
+        }
+
+        function loadCommentCounts() {
+            fetch(apiBase + '/comment-counts')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var counts = data.counts || {};
+                    for (var path in counts) {
+                        if (counts.hasOwnProperty(path)) {
+                            updateCommentBadge(path, counts[path]);
+                        }
+                    }
+                })
+                .catch(function() {});
+        }
+
+        // -- Utilities --
+        function escHtml(s) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(s || ''));
+            return div.innerHTML;
+        }
+
+        function escAttr(s) {
+            return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function timeAgo(isoStr) {
+            if (!isoStr) return '';
+            var d = new Date(isoStr);
+            var now = new Date();
+            var secs = Math.floor((now - d) / 1000);
+            if (secs < 60) return 'just now';
+            if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+            if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+            return Math.floor(secs / 86400) + 'd ago';
+        }
+
+        // -- Keyboard shortcuts --
+        var shortcutsVisible = false;
+
+        function toggleShortcutsOverlay() {
+            var existing = document.getElementById('shortcuts-overlay');
+            if (existing) {
+                existing.remove();
+                shortcutsVisible = false;
+                return;
+            }
+            shortcutsVisible = true;
+            var isMac = /Mac/.test(navigator.platform) || /Mac/.test(navigator.userAgent);
+            var altKey = isMac ? '\u2325' : 'Alt';
+            var shiftKey = isMac ? '\u21E7' : 'Shift';
+            var overlay = document.createElement('div');
+            overlay.className = 'shortcuts-overlay';
+            overlay.id = 'shortcuts-overlay';
+            overlay.innerHTML =
+                '<div class="shortcuts-modal">' +
+                '<h3>Keyboard Shortcuts</h3>' +
+                '<table>' +
+                '<tr class="section-label"><td colspan="2">Navigation</td></tr>' +
+                '<tr><td><kbd>n</kbd></td><td>Next diff region (within file)</td></tr>' +
+                '<tr><td><kbd>p</kbd></td><td>Previous diff region (within file)</td></tr>' +
+                '<tr><td><kbd>N</kbd> <kbd>j</kbd> <kbd>&darr;</kbd></td><td>Next file</td></tr>' +
+                '<tr><td><kbd>P</kbd> <kbd>k</kbd> <kbd>&uarr;</kbd></td><td>Previous file</td></tr>' +
+                '<tr class="section-label"><td colspan="2">Comparison Modes</td></tr>' +
+                '<tr><td><kbd>1</kbd></td><td>Side by side</td></tr>' +
+                '<tr><td><kbd>2</kbd></td><td>Crossfade</td></tr>' +
+                '<tr><td><kbd>3</kbd></td><td>Swipe</td></tr>' +
+                '<tr><td><kbd>4</kbd></td><td>Diff overlay</td></tr>' +
+                '<tr class="section-label"><td colspan="2">Tools</td></tr>' +
+                '<tr><td><kbd>' + shiftKey + '</kbd></td><td>Hold to magnify (pixel loupe)</td></tr>' +
+                '<tr><td><kbd>?</kbd></td><td>Toggle this help</td></tr>' +
+                '<tr><td><kbd>Esc</kbd></td><td>Close this help</td></tr>' +
+                '</table>' +
+                '</div>';
+            overlay.addEventListener('click', function(ev) {
+                if (ev.target === overlay) toggleShortcutsOverlay();
+            });
+            document.body.appendChild(overlay);
+        }
+
+        document.getElementById('kbd-hint').addEventListener('click', toggleShortcutsOverlay);
+
+        function hardNavigate(direction) {
+            if (!state.images.length) return;
+            var currentIdx = -1;
+            for (var i = 0; i < state.images.length; i++) {
+                if (state.images[i].path === state.currentFile) { currentIdx = i; break; }
+            }
+            if (direction === 'next') {
+                currentIdx = Math.min(currentIdx + 1, state.images.length - 1);
+            } else {
+                currentIdx = Math.max(currentIdx - 1, 0);
+            }
+            selectFile(state.images[currentIdx].path, false, direction);
+            var activeItem = fileList.querySelector('.file-item.active');
+            if (activeItem) activeItem.scrollIntoView({ block: 'nearest' });
+        }
+
+        function softNavigate(direction) {
+            if (!state.diffClusters || !state.diffClusters.length) {
+                hardNavigate(direction);
+                return;
+            }
+
+            var refEl = viewport.querySelector('img[data-role="base"]')
+                     || viewport.querySelector('img[data-role="head"]')
+                     || viewport.querySelector('img')
+                     || viewport.querySelector('canvas');
+            if (!refEl) { hardNavigate(direction); return; }
+
+            var refRect = refEl.getBoundingClientRect();
+            var vpRect = viewport.getBoundingClientRect();
+            var naturalH = refEl.naturalHeight || refEl.height;
+            if (!naturalH) { hardNavigate(direction); return; }
+            var scale = refRect.height / naturalH;
+
+            var imgTopInContent = (refRect.top - vpRect.top) + viewport.scrollTop;
+            var vpCenterInContent = viewport.scrollTop + viewport.clientHeight / 2;
+            var centerRow = (vpCenterInContent - imgTopInContent) / scale;
+
+            if (direction === 'next') {
+                var nextCluster = null;
+                for (var i = 0; i < state.diffClusters.length; i++) {
+                    var mid = (state.diffClusters[i].start + state.diffClusters[i].end) / 2;
+                    if (mid > centerRow + 10) { nextCluster = state.diffClusters[i]; break; }
+                }
+                if (!nextCluster) { hardNavigate('next'); return; }
+                var targetRow = (nextCluster.start + nextCluster.end) / 2;
+                var targetInContent = imgTopInContent + targetRow * scale;
+                viewport.scrollTo({top: targetInContent - viewport.clientHeight / 2, behavior: 'smooth'});
+            } else {
+                var prevCluster = null;
+                for (var i = state.diffClusters.length - 1; i >= 0; i--) {
+                    var mid = (state.diffClusters[i].start + state.diffClusters[i].end) / 2;
+                    if (mid < centerRow - 10) { prevCluster = state.diffClusters[i]; break; }
+                }
+                if (!prevCluster) { hardNavigate('prev'); return; }
+                var targetRow = (prevCluster.start + prevCluster.end) / 2;
+                var targetInContent = imgTopInContent + targetRow * scale;
+                viewport.scrollTo({top: targetInContent - viewport.clientHeight / 2, behavior: 'smooth'});
+            }
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+
+            if (e.key === '?') { toggleShortcutsOverlay(); return; }
+            if (e.key === 'Escape') { if (shortcutsVisible) { toggleShortcutsOverlay(); return; } }
+
+            var modes = ['side-by-side', 'crossfade', 'swipe', 'diff'];
+            if (e.key >= '1' && e.key <= '4') {
+                var idx = parseInt(e.key, 10) - 1;
+                if (idx < modes.length) {
+                    state.mode = modes[idx];
+                    modeToolbar.querySelectorAll('.mode-btn').forEach(function(b) {
+                        b.classList.toggle('active', b.getAttribute('data-mode') === state.mode);
+                    });
+                    if (state.currentFile) renderComparison();
+                }
+                return;
+            }
+
+            if (e.key === 'n') { e.preventDefault(); softNavigate('next'); return; }
+            if (e.key === 'p') { e.preventDefault(); softNavigate('prev'); return; }
+            if (e.key === 'N' || e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); hardNavigate('next'); return; }
+            if (e.key === 'P' || e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); hardNavigate('prev'); return; }
+        });
+
+        // -- Sidebar resize handle --
+        (function() {
+            var sidebar = document.getElementById('sidebar');
+            var handle = document.getElementById('sidebar-resize');
+            var dragging = false;
+            handle.addEventListener('mousedown', function(e) {
+                e.preventDefault();
+                dragging = true;
+                handle.classList.add('dragging');
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+            });
+            document.addEventListener('mousemove', function(e) {
+                if (!dragging) return;
+                var newWidth = Math.max(120, Math.min(e.clientX, 600));
+                sidebar.style.width = newWidth + 'px';
+                sidebar.style.minWidth = newWidth + 'px';
+                requestAnimationFrame(function() {
+                    gutterRefreshCallbacks.forEach(function(fn) { fn(); });
+                });
+            });
+            document.addEventListener('mouseup', function() {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            });
+        })();
+
+    })();
+    </script>
+</body>
+</html>
