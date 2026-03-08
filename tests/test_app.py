@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache
+from app import app, _cache, _resolve_repo
 
 
 @pytest.fixture(autouse=True)
@@ -431,3 +431,312 @@ class TestPostPrComment:
                 )
         data = resp.json()
         assert "error" in data
+
+
+# -- Short URL resolution -----------------------------------------------------
+
+class TestResolveRepo:
+    @pytest.mark.asyncio
+    async def test_resolve_numeric_id(self):
+        """Numeric identifier resolves via /repositories/{id}."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "owner": {"login": "widdowson"},
+            "name": "visual-review",
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result = await _resolve_repo("12345")
+
+        assert result == [("widdowson", "visual-review")]
+
+    @pytest.mark.asyncio
+    async def test_resolve_numeric_id_not_found(self):
+        """Numeric ID that doesn't exist returns empty list."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result = await _resolve_repo("99999999")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_repo_name_unique(self):
+        """Repo name with exactly one match resolves successfully."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "visual-review", "owner": {"login": "widdowson"}},
+            ]
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result = await _resolve_repo("visual-review")
+
+        assert result == [("widdowson", "visual-review")]
+
+    @pytest.mark.asyncio
+    async def test_resolve_repo_name_ambiguous(self):
+        """Repo name with multiple exact matches returns all matches."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "myrepo", "owner": {"login": "alice"}},
+                {"name": "myrepo", "owner": {"login": "bob"}},
+                {"name": "myrepo-extra", "owner": {"login": "charlie"}},
+            ]
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result = await _resolve_repo("myrepo")
+
+        # Only exact matches, not "myrepo-extra"
+        assert result == [("alice", "myrepo"), ("bob", "myrepo")]
+
+    @pytest.mark.asyncio
+    async def test_resolve_repo_name_no_match(self):
+        """Repo name with no matches returns empty list."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"items": []}
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result = await _resolve_repo("nonexistent-repo")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_no_token(self):
+        """Without a GitHub token, resolution returns empty."""
+        with patch("app.GITHUB_TOKEN", ""):
+            result = await _resolve_repo("visual-review")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_caches_result(self):
+        """Resolved repos are cached; second call doesn't hit API."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "owner": {"login": "widdowson"},
+            "name": "visual-review",
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result1 = await _resolve_repo("12345")
+            result2 = await _resolve_repo("12345")
+
+        assert result1 == result2
+        # httpx.AsyncClient should only be called once (cached on second call)
+        assert MockClient.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_resolve_case_insensitive_name_match(self):
+        """Name matching is case-insensitive."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "Visual-Review", "owner": {"login": "widdowson"}},
+            ]
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            result = await _resolve_repo("visual-review")
+
+        assert result == [("widdowson", "Visual-Review")]
+
+
+class TestShortUrlRedirect:
+    @pytest.mark.asyncio
+    async def test_redirect_by_repo_name(self):
+        """Short URL by repo name redirects to canonical path."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "visual-review", "owner": {"login": "widdowson"}},
+            ]
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test", follow_redirects=False
+            ) as ac:
+                resp = await ac.get("/visual-review/pr/42")
+
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/widdowson/visual-review/pr/42"
+
+    @pytest.mark.asyncio
+    async def test_redirect_by_repo_id(self):
+        """Short URL by numeric repo ID redirects to canonical path."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "owner": {"login": "widdowson"},
+            "name": "visual-review",
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test", follow_redirects=False
+            ) as ac:
+                resp = await ac.get("/12345/pr/42")
+
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/widdowson/visual-review/pr/42"
+
+    @pytest.mark.asyncio
+    async def test_short_url_not_found(self):
+        """Unknown repo name returns 404."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"items": []}
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/nonexistent/pr/1")
+
+        assert resp.status_code == 404
+        data = resp.json()
+        assert "not found" in data["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_short_url_ambiguous(self):
+        """Ambiguous repo name returns 300 with matches listed."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "myrepo", "owner": {"login": "alice"}},
+                {"name": "myrepo", "owner": {"login": "bob"}},
+            ]
+        }
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/myrepo/pr/5")
+
+        assert resp.status_code == 300
+        data = resp.json()
+        assert data["error"] == "Ambiguous repository name"
+        assert len(data["matches"]) == 2
+        assert data["matches"][0]["url"] == "/alice/myrepo/pr/5"
+        assert data["matches"][1]["url"] == "/bob/myrepo/pr/5"
+
+    @pytest.mark.asyncio
+    async def test_canonical_url_still_works(self):
+        """The full /{owner}/{repo}/pr/{number} route still works."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/owner/repo/pr/123")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")

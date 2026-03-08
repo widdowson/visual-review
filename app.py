@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("visual-review")
@@ -57,6 +57,58 @@ def _gh_headers() -> dict[str, str]:
     }
 
 
+# -- Repo resolver for short URLs ---------------------------------------------
+
+async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
+    """Resolve a short identifier (repo name or numeric ID) to (owner, repo) pairs.
+
+    - Numeric identifier: look up via GET /repositories/{id}
+    - String identifier: search by exact repo name via GitHub search API
+
+    Returns a list of (owner, repo) tuples. Empty list means no match.
+    Results are cached for 1 hour.
+    """
+    cache_key = f"resolve_repo:{identifier}"
+    cached = _cache_get(cache_key, 3600)
+    if cached is not None:
+        return cached
+
+    if not GITHUB_TOKEN:
+        return []
+
+    headers = _gh_headers()
+    matches: list[tuple[str, str]] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            if identifier.isdigit():
+                resp = await client.get(
+                    f"https://api.github.com/repositories/{identifier}",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    matches = [(data["owner"]["login"], data["name"])]
+            else:
+                resp = await client.get(
+                    "https://api.github.com/search/repositories",
+                    headers=headers,
+                    params={"q": f"{identifier} in:name", "per_page": 10},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    matches = [
+                        (r["owner"]["login"], r["name"])
+                        for r in data.get("items", [])
+                        if r["name"].lower() == identifier.lower()
+                    ]
+    except Exception:
+        return []
+
+    _cache_set(cache_key, matches)
+    return matches
+
+
 # -- Static files --------------------------------------------------------------
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -74,6 +126,39 @@ async def health_check():
 async def visual_review_page(owner: str, repo: str, number: int):
     """Serve the visual review SPA for any owner/repo/PR."""
     return FileResponse(os.path.join(static_dir, "index.html"))
+
+
+@app.get("/{identifier}/pr/{number}")
+async def short_url_redirect(identifier: str, number: int):
+    """Resolve a short URL and 302-redirect to the canonical path.
+
+    Supports:
+    - /{repo_name}/pr/{number} — resolve owner by searching for repo name
+    - /{repo_id}/pr/{number} — resolve owner + name by numeric GitHub repo ID
+    """
+    matches = await _resolve_repo(identifier)
+
+    if len(matches) == 1:
+        owner, repo = matches[0]
+        return RedirectResponse(url=f"/{owner}/{repo}/pr/{number}", status_code=302)
+
+    if len(matches) > 1:
+        return JSONResponse(
+            status_code=300,
+            content={
+                "error": "Ambiguous repository name",
+                "identifier": identifier,
+                "matches": [
+                    {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}/pr/{number}"}
+                    for owner, repo in matches
+                ],
+            },
+        )
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"Repository not found: {identifier}"},
+    )
 
 
 # -- API endpoints -------------------------------------------------------------
@@ -393,4 +478,5 @@ async def root():
     return JSONResponse(content={
         "app": "Visual Review",
         "usage": "Navigate to /{owner}/{repo}/pr/{number} to review a PR's visual changes.",
+        "short_urls": "Also supports /{repo_name}/pr/{number} and /{repo_id}/pr/{number}.",
     })
