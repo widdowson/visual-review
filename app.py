@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger("visual-review")
@@ -57,6 +57,103 @@ def _gh_headers() -> dict[str, str]:
     }
 
 
+# -- Repo resolver for short URLs ---------------------------------------------
+
+def _base36_decode(s: str) -> int | None:
+    """Decode a base36 string to an integer, or None if invalid."""
+    try:
+        return int(s, 36)
+    except ValueError:
+        return None
+
+
+def _base36_encode(n: int) -> str:
+    """Encode a non-negative integer as a base36 string."""
+    if n < 0:
+        raise ValueError("Cannot base36-encode negative numbers")
+    if n == 0:
+        return "0"
+    chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+    result = []
+    while n:
+        result.append(chars[n % 36])
+        n //= 36
+    return "".join(reversed(result))
+
+
+async def _lookup_repo_by_id(client: httpx.AsyncClient, repo_id: int, headers: dict) -> list[tuple[str, str]]:
+    """Look up a repo by numeric GitHub ID. Returns 0 or 1 matches."""
+    resp = await client.get(
+        f"https://api.github.com/repositories/{repo_id}",
+        headers=headers,
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        return [(data["owner"]["login"], data["name"])]
+    return []
+
+
+async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
+    """Resolve a short identifier to (owner, repo) pairs.
+
+    Resolution order:
+    - Numeric (all digits): look up via GET /repositories/{id}
+    - Otherwise: search by exact repo name via GitHub search API
+    - If name search finds nothing: try base36 decode → repo ID lookup
+
+    Base36 gives compact repo IDs (e.g., 1125541223 → "im495z").
+
+    Returns a list of (owner, repo) tuples. Empty list means no match.
+    Results are cached for 1 hour.
+    """
+    cache_key = f"resolve_repo:{identifier}"
+    cached = _cache_get(cache_key, 3600)
+    if cached is not None:
+        return cached
+
+    if not GITHUB_TOKEN:
+        return []
+
+    # Validate identifier: only alphanumeric, hyphens, underscores, dots
+    # (matches GitHub repo name rules + base36 charset)
+    if not all(c.isalnum() or c in '-_.' for c in identifier):
+        return []
+
+    headers = _gh_headers()
+    matches: list[tuple[str, str]] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            if identifier.isdigit():
+                # Pure numeric — decimal repo ID
+                matches = await _lookup_repo_by_id(client, int(identifier), headers)
+            else:
+                # Try as repo name first — quote identifier to prevent search qualifier injection
+                resp = await client.get(
+                    "https://api.github.com/search/repositories",
+                    headers=headers,
+                    params={"q": f'"{identifier}" in:name', "per_page": 10},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    matches = [
+                        (r["owner"]["login"], r["name"])
+                        for r in data.get("items", [])
+                        if r["name"].lower() == identifier.lower()
+                    ]
+
+                # If no name match, try base36 decode → repo ID lookup
+                if not matches:
+                    repo_id = _base36_decode(identifier)
+                    if repo_id is not None:
+                        matches = await _lookup_repo_by_id(client, repo_id, headers)
+    except Exception:
+        return []
+
+    _cache_set(cache_key, matches)
+    return matches
+
+
 # -- Static files --------------------------------------------------------------
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -74,6 +171,39 @@ async def health_check():
 async def visual_review_page(owner: str, repo: str, number: int):
     """Serve the visual review SPA for any owner/repo/PR."""
     return FileResponse(os.path.join(static_dir, "index.html"))
+
+
+@app.get("/{identifier}/pr/{number}")
+async def short_url_redirect(identifier: str, number: int):
+    """Resolve a short URL and 302-redirect to the canonical path.
+
+    Supports:
+    - /{repo_name}/pr/{number} — resolve owner by searching for repo name
+    - /{repo_id}/pr/{number} — resolve owner + name by numeric GitHub repo ID
+    """
+    matches = await _resolve_repo(identifier)
+
+    if len(matches) == 1:
+        owner, repo = matches[0]
+        return RedirectResponse(url=f"/{owner}/{repo}/pr/{number}", status_code=302)
+
+    if len(matches) > 1:
+        return JSONResponse(
+            status_code=300,
+            content={
+                "error": "Ambiguous repository name",
+                "identifier": identifier,
+                "matches": [
+                    {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}/pr/{number}"}
+                    for owner, repo in matches
+                ],
+            },
+        )
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"Repository not found: {identifier}"},
+    )
 
 
 # -- API endpoints -------------------------------------------------------------
@@ -123,6 +253,7 @@ async def pr_images(owner: str, repo: str, number: int):
             result["head_label"] = pr_data["head"]["label"]
             result["pr_title"] = pr_data["title"]
             result["pr_url"] = pr_data["html_url"]
+            result["repo_id"] = pr_data["base"]["repo"]["id"]
 
             # Compare API to find changed files
             compare_resp = await client.get(
@@ -393,4 +524,5 @@ async def root():
     return JSONResponse(content={
         "app": "Visual Review",
         "usage": "Navigate to /{owner}/{repo}/pr/{number} to review a PR's visual changes.",
+        "short_urls": "Also supports /{repo_name}/pr/{number}, /{repo_id}/pr/{number}, and /{base36_id}/pr/{number}.",
     })

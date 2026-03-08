@@ -83,6 +83,13 @@
         .topbar a:hover { color: #b8d4ff; }
         .topbar .pr-title { color: #fff; font-weight: 600; font-size: 1.1rem; }
         .topbar .pr-number { color: #8eb5f0; }
+        .short-url-btn {
+            background: none; border: 1px solid #3a3f52; color: #8eb5f0;
+            border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 0.75rem;
+            margin-left: 8px; white-space: nowrap; transition: border-color 0.15s, color 0.15s;
+        }
+        .short-url-btn:hover { border-color: #8eb5f0; color: #b8d4ff; }
+        .short-url-btn.copied { border-color: #4ade80; color: #4ade80; }
 
         /* Theme toggle */
         .theme-toggle {
@@ -487,10 +494,34 @@
                     state.baseRef = data.base_ref;
                     state.headRef = data.head_ref;
 
+                    var shortUrlHtml = '';
+                    if (data.repo_id) {
+                        var base36Id = data.repo_id.toString(36);
+                        shortUrlHtml = ' <button class="short-url-btn" id="copy-short-url" title="Copy short URL" data-short-path="/' + escAttr(base36Id) + '/pr/' + prNumber + '">Short URL</button>';
+                    }
                     prTitle.innerHTML = '<span class="pr-number">PR #' + prNumber + '</span> ' +
                         escHtml(data.pr_title || '') +
-                        ' <a href="' + escAttr(data.pr_url || '') + '" target="_blank" style="font-size:0.8rem;color:#8eb5f0;">View on GitHub</a>';
+                        ' <a href="' + escAttr(data.pr_url || '') + '" target="_blank" style="font-size:0.8rem;color:#8eb5f0;">View on GitHub</a>' +
+                        shortUrlHtml;
                     document.title = 'Visual Review - ' + owner + '/' + repo + ' PR #' + prNumber;
+
+                    // Wire up short URL copy button
+                    var copyBtn = document.getElementById('copy-short-url');
+                    if (copyBtn) {
+                        copyBtn.addEventListener('click', function() {
+                            var shortPath = copyBtn.getAttribute('data-short-path');
+                            var hash = window.location.hash || '';
+                            var fullUrl = window.location.origin + shortPath + hash;
+                            navigator.clipboard.writeText(fullUrl).then(function() {
+                                copyBtn.textContent = 'Copied!';
+                                copyBtn.classList.add('copied');
+                                setTimeout(function() {
+                                    copyBtn.textContent = 'Short URL';
+                                    copyBtn.classList.remove('copied');
+                                }, 1500);
+                            });
+                        });
+                    }
 
                     imageCount.textContent = '(' + state.images.length + ')';
                     renderFileList();
