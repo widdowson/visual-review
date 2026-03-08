@@ -68,7 +68,9 @@ def _base36_decode(s: str) -> int | None:
 
 
 def _base36_encode(n: int) -> str:
-    """Encode an integer as a base36 string."""
+    """Encode a non-negative integer as a base36 string."""
+    if n < 0:
+        raise ValueError("Cannot base36-encode negative numbers")
     if n == 0:
         return "0"
     chars = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -99,7 +101,7 @@ async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
     - Otherwise: search by exact repo name via GitHub search API
     - If name search finds nothing: try base36 decode → repo ID lookup
 
-    Base36 gives compact repo IDs (e.g., 1125541223 → "iw9qjr").
+    Base36 gives compact repo IDs (e.g., 1125541223 → "im495z").
 
     Returns a list of (owner, repo) tuples. Empty list means no match.
     Results are cached for 1 hour.
@@ -112,6 +114,11 @@ async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
     if not GITHUB_TOKEN:
         return []
 
+    # Validate identifier: only alphanumeric, hyphens, underscores, dots
+    # (matches GitHub repo name rules + base36 charset)
+    if not all(c.isalnum() or c in '-_.' for c in identifier):
+        return []
+
     headers = _gh_headers()
     matches: list[tuple[str, str]] = []
 
@@ -121,11 +128,11 @@ async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
                 # Pure numeric — decimal repo ID
                 matches = await _lookup_repo_by_id(client, int(identifier), headers)
             else:
-                # Try as repo name first
+                # Try as repo name first — quote identifier to prevent search qualifier injection
                 resp = await client.get(
                     "https://api.github.com/search/repositories",
                     headers=headers,
-                    params={"q": f"{identifier} in:name", "per_page": 10},
+                    params={"q": f'"{identifier}" in:name', "per_page": 10},
                 )
                 if resp.status_code == 200:
                     data = resp.json()

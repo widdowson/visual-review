@@ -773,7 +773,7 @@ class TestShortUrlRedirect:
             async with AsyncClient(
                 transport=transport, base_url="http://test", follow_redirects=False
             ) as ac:
-                resp = await ac.get("/iw9qjr/pr/209")
+                resp = await ac.get("/im495z/pr/209")
 
         assert resp.status_code == 302
         assert resp.headers["location"] == "/widdowson/apwphotos-appv2/pr/209"
