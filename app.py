@@ -59,11 +59,47 @@ def _gh_headers() -> dict[str, str]:
 
 # -- Repo resolver for short URLs ---------------------------------------------
 
-async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
-    """Resolve a short identifier (repo name or numeric ID) to (owner, repo) pairs.
+def _base36_decode(s: str) -> int | None:
+    """Decode a base36 string to an integer, or None if invalid."""
+    try:
+        return int(s, 36)
+    except ValueError:
+        return None
 
-    - Numeric identifier: look up via GET /repositories/{id}
-    - String identifier: search by exact repo name via GitHub search API
+
+def _base36_encode(n: int) -> str:
+    """Encode an integer as a base36 string."""
+    if n == 0:
+        return "0"
+    chars = "0123456789abcdefghijklmnopqrstuvwxyz"
+    result = []
+    while n:
+        result.append(chars[n % 36])
+        n //= 36
+    return "".join(reversed(result))
+
+
+async def _lookup_repo_by_id(client: httpx.AsyncClient, repo_id: int, headers: dict) -> list[tuple[str, str]]:
+    """Look up a repo by numeric GitHub ID. Returns 0 or 1 matches."""
+    resp = await client.get(
+        f"https://api.github.com/repositories/{repo_id}",
+        headers=headers,
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        return [(data["owner"]["login"], data["name"])]
+    return []
+
+
+async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
+    """Resolve a short identifier to (owner, repo) pairs.
+
+    Resolution order:
+    - Numeric (all digits): look up via GET /repositories/{id}
+    - Otherwise: search by exact repo name via GitHub search API
+    - If name search finds nothing: try base36 decode → repo ID lookup
+
+    Base36 gives compact repo IDs (e.g., 1125541223 → "iw9qjr").
 
     Returns a list of (owner, repo) tuples. Empty list means no match.
     Results are cached for 1 hour.
@@ -82,14 +118,10 @@ async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             if identifier.isdigit():
-                resp = await client.get(
-                    f"https://api.github.com/repositories/{identifier}",
-                    headers=headers,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    matches = [(data["owner"]["login"], data["name"])]
+                # Pure numeric — decimal repo ID
+                matches = await _lookup_repo_by_id(client, int(identifier), headers)
             else:
+                # Try as repo name first
                 resp = await client.get(
                     "https://api.github.com/search/repositories",
                     headers=headers,
@@ -102,6 +134,12 @@ async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
                         for r in data.get("items", [])
                         if r["name"].lower() == identifier.lower()
                     ]
+
+                # If no name match, try base36 decode → repo ID lookup
+                if not matches:
+                    repo_id = _base36_decode(identifier)
+                    if repo_id is not None:
+                        matches = await _lookup_repo_by_id(client, repo_id, headers)
     except Exception:
         return []
 
@@ -208,6 +246,7 @@ async def pr_images(owner: str, repo: str, number: int):
             result["head_label"] = pr_data["head"]["label"]
             result["pr_title"] = pr_data["title"]
             result["pr_url"] = pr_data["html_url"]
+            result["repo_id"] = pr_data["base"]["repo"]["id"]
 
             # Compare API to find changed files
             compare_resp = await client.get(
@@ -478,5 +517,5 @@ async def root():
     return JSONResponse(content={
         "app": "Visual Review",
         "usage": "Navigate to /{owner}/{repo}/pr/{number} to review a PR's visual changes.",
-        "short_urls": "Also supports /{repo_name}/pr/{number} and /{repo_id}/pr/{number}.",
+        "short_urls": "Also supports /{repo_name}/pr/{number}, /{repo_id}/pr/{number}, and /{base36_id}/pr/{number}.",
     })
