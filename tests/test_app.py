@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +96,10 @@ class TestPrImages:
                 {"filename": "tests/screenshots/baseline/test.png", "status": "modified"},
                 {"filename": "src/main.py", "status": "modified"},
                 {"filename": "tests/screenshots/baseline/new.PNG", "status": "added"},
+                {"filename": "photos/hero.jpg", "status": "modified"},
+                {"filename": "photos/banner.jpeg", "status": "added"},
+                {"filename": "photos/thumb.JPG", "status": "modified"},
+                {"filename": "docs/readme.txt", "status": "modified"},
             ]
         }
 
@@ -124,10 +128,13 @@ class TestPrImages:
         assert data["base_ref"] == "aaa"
         assert data["head_ref"] == "bbb"
         assert data["repo_id"] == 12345
-        # Only .png files should be included (2 out of 3)
-        assert len(data["images"]) == 2
+        # Only image files (.png, .jpg, .jpeg) should be included (5 out of 7)
+        assert len(data["images"]) == 5
         assert data["images"][0]["path"] == "tests/screenshots/baseline/test.png"
         assert data["images"][1]["path"] == "tests/screenshots/baseline/new.PNG"
+        assert data["images"][2]["path"] == "photos/hero.jpg"
+        assert data["images"][3]["path"] == "photos/banner.jpeg"
+        assert data["images"][4]["path"] == "photos/thumb.JPG"
 
     @pytest.mark.asyncio
     async def test_pr_images_pr_not_found(self):
@@ -235,6 +242,62 @@ class TestPrImage:
         assert resp.status_code == 200
         assert resp.content == img_data
         assert "image/png" in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_pr_image_jpeg_content_type(self):
+        """JPEG files should be served with image/jpeg content type."""
+        img_data = b"fake-jpeg-data"
+        b64_data = base64.b64encode(img_data).decode()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"encoding": "base64", "content": b64_data}
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/image?path=photo.jpg&ref=abc123")
+
+        assert resp.status_code == 200
+        assert resp.content == img_data
+        assert "image/jpeg" in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_pr_image_jpeg_extension_content_type(self):
+        """Files with .jpeg extension should also be served with image/jpeg."""
+        img_data = b"fake-jpeg-data"
+        b64_data = base64.b64encode(img_data).decode()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"encoding": "base64", "content": b64_data}
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/image?path=banner.jpeg&ref=abc123")
+
+        assert resp.status_code == 200
+        assert resp.content == img_data
+        assert "image/jpeg" in resp.headers.get("content-type", "")
 
     @pytest.mark.asyncio
     async def test_pr_image_github_404(self):
@@ -786,6 +849,29 @@ class TestShortUrlRedirect:
             resp = await ac.get("/owner/repo/pr/123")
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
+
+
+class TestMimeForPath:
+    def test_png(self):
+        assert _mime_for_path("screenshots/test.png") == "image/png"
+
+    def test_png_uppercase(self):
+        assert _mime_for_path("screenshots/test.PNG") == "image/png"
+
+    def test_jpg(self):
+        assert _mime_for_path("photos/hero.jpg") == "image/jpeg"
+
+    def test_jpeg(self):
+        assert _mime_for_path("photos/banner.jpeg") == "image/jpeg"
+
+    def test_jpg_uppercase(self):
+        assert _mime_for_path("photos/HERO.JPG") == "image/jpeg"
+
+    def test_unknown_defaults_to_png(self):
+        assert _mime_for_path("file.bmp") == "image/png"
+
+    def test_no_extension_defaults_to_png(self):
+        assert _mime_for_path("noext") == "image/png"
 
 
 class TestBase36:
