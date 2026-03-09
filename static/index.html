@@ -1144,15 +1144,16 @@
             viewport.appendChild(wrap);
 
             function setPosition(fraction) {
-                var w = swipe.offsetWidth;
+                var w = swipe.getBoundingClientRect().width;
                 var px = Math.round(fraction * w);
                 overlay.style.width = px + 'px';
                 divider.style.left = px + 'px';
             }
 
             function syncOverlayAndGutter() {
-                imgHead.style.width = imgBase.offsetWidth + 'px';
-                imgHead.style.height = imgBase.offsetHeight + 'px';
+                var baseRect = imgBase.getBoundingClientRect();
+                imgHead.style.width = baseRect.width + 'px';
+                imgHead.style.height = baseRect.height + 'px';
                 var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
                 var h = imgBase.clientHeight;
                 swipeGutterHolder.innerHTML = '';
@@ -1780,7 +1781,8 @@
             });
             document.addEventListener('mousemove', function(e) {
                 if (!dragging) return;
-                var newWidth = Math.max(120, Math.min(e.clientX, 600));
+                var sidebarRect = sidebar.getBoundingClientRect();
+                var newWidth = Math.max(120, Math.min(e.clientX - sidebarRect.left, 600));
                 sidebar.style.width = newWidth + 'px';
                 sidebar.style.minWidth = newWidth + 'px';
                 requestAnimationFrame(function() {
