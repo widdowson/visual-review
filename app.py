@@ -1,7 +1,8 @@
 """Visual Review — a standalone GitHub PR image diff viewer.
 
-Proxies PNG images from GitHub's API and serves a single-page app
-for side-by-side, crossfade, swipe, and diff overlay comparisons.
+Proxies image files (PNG, JPG, JPEG) from GitHub's API and serves a
+single-page app for side-by-side, crossfade, swipe, and diff overlay
+comparisons.
 """
 
 import base64
@@ -45,6 +46,23 @@ def _cache_get(key: str, ttl: float) -> Any | None:
 
 def _cache_set(key: str, val: Any) -> None:
     _cache[key] = (time.time(), val)
+
+
+# Supported image extensions (lowercase, with leading dot)
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+# Map file extension to MIME type
+_EXT_MIME: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+
+def _mime_for_path(path: str) -> str:
+    """Return the MIME type for an image path based on its extension."""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return _EXT_MIME.get(f".{ext}", "image/png")
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -210,7 +228,7 @@ async def short_url_redirect(identifier: str, number: int):
 
 @app.get("/api/{owner}/{repo}/pr/{number}/images")
 async def pr_images(owner: str, repo: str, number: int):
-    """List all changed PNG files in a PR."""
+    """List all changed image files (PNG, JPG, JPEG) in a PR."""
     github_repo = f"{owner}/{repo}"
 
     if not GITHUB_TOKEN:
@@ -271,7 +289,8 @@ async def pr_images(owner: str, repo: str, number: int):
 
             for f in files:
                 filename = f.get("filename", "")
-                if filename.lower().endswith(".png"):
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                if f".{ext}" in IMAGE_EXTENSIONS:
                     result["images"].append({
                         "path": filename,
                         "status": f.get("status", "modified"),
@@ -306,6 +325,7 @@ async def pr_image(
 
     headers = _gh_headers()
     img_headers = {"Cache-Control": "public, max-age=300"}
+    mime = _mime_for_path(path)
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -331,7 +351,7 @@ async def pr_image(
                 content = base64.b64decode(data["content"])
                 return Response(
                     content=content,
-                    media_type="image/png",
+                    media_type=mime,
                     headers=img_headers,
                 )
 
@@ -348,7 +368,7 @@ async def pr_image(
                         content = base64.b64decode(blob_data["content"])
                         return Response(
                             content=content,
-                            media_type="image/png",
+                            media_type=mime,
                             headers=img_headers,
                         )
 
@@ -363,7 +383,7 @@ async def pr_image(
                 if img_resp.status_code == 200:
                     return Response(
                         content=img_resp.content,
-                        media_type="image/png",
+                        media_type=mime,
                         headers=img_headers,
                     )
 
