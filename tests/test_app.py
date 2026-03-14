@@ -99,6 +99,7 @@ class TestPrImages:
                 {"filename": "photos/hero.jpg", "status": "modified"},
                 {"filename": "photos/banner.jpeg", "status": "added"},
                 {"filename": "photos/thumb.JPG", "status": "modified"},
+                {"filename": "tests/screenshots/baseline/page.bmp", "status": "added"},
                 {"filename": "docs/readme.txt", "status": "modified"},
             ]
         }
@@ -128,13 +129,14 @@ class TestPrImages:
         assert data["base_ref"] == "aaa"
         assert data["head_ref"] == "bbb"
         assert data["repo_id"] == 12345
-        # Only image files (.png, .jpg, .jpeg) should be included (5 out of 7)
-        assert len(data["images"]) == 5
+        # Only image files (.png, .jpg, .jpeg, .bmp) should be included (6 out of 8)
+        assert len(data["images"]) == 6
         assert data["images"][0]["path"] == "tests/screenshots/baseline/test.png"
         assert data["images"][1]["path"] == "tests/screenshots/baseline/new.PNG"
         assert data["images"][2]["path"] == "photos/hero.jpg"
         assert data["images"][3]["path"] == "photos/banner.jpeg"
         assert data["images"][4]["path"] == "photos/thumb.JPG"
+        assert data["images"][5]["path"] == "tests/screenshots/baseline/page.bmp"
 
     @pytest.mark.asyncio
     async def test_pr_images_pr_not_found(self):
@@ -298,6 +300,34 @@ class TestPrImage:
         assert resp.status_code == 200
         assert resp.content == img_data
         assert "image/jpeg" in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_pr_image_bmp_content_type(self):
+        """BMP files should be served with image/bmp content type."""
+        img_data = b"BM\x00\x00fake-bmp-data"
+        b64_data = base64.b64encode(img_data).decode()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"encoding": "base64", "content": b64_data}
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/image?path=baseline/test.bmp&ref=abc123")
+
+        assert resp.status_code == 200
+        assert resp.content == img_data
+        assert "image/bmp" in resp.headers.get("content-type", "")
 
     @pytest.mark.asyncio
     async def test_pr_image_github_404(self):
@@ -867,8 +897,14 @@ class TestMimeForPath:
     def test_jpg_uppercase(self):
         assert _mime_for_path("photos/HERO.JPG") == "image/jpeg"
 
+    def test_bmp(self):
+        assert _mime_for_path("screenshots/test.bmp") == "image/bmp"
+
+    def test_bmp_uppercase(self):
+        assert _mime_for_path("screenshots/test.BMP") == "image/bmp"
+
     def test_unknown_defaults_to_png(self):
-        assert _mime_for_path("file.bmp") == "image/png"
+        assert _mime_for_path("file.tiff") == "image/png"
 
     def test_no_extension_defaults_to_png(self):
         assert _mime_for_path("noext") == "image/png"
