@@ -1,8 +1,7 @@
 """Visual Review — a standalone GitHub PR image diff viewer.
 
-Proxies image files (PNG, JPG, JPEG, BMP) from GitHub's API and serves a
-single-page app for side-by-side, crossfade, swipe, and diff overlay
-comparisons.
+Proxies image files from GitHub's API and serves a single-page app for
+side-by-side, crossfade, swipe, and diff overlay comparisons.
 """
 
 import base64
@@ -48,16 +47,14 @@ def _cache_set(key: str, val: Any) -> None:
     _cache[key] = (time.time(), val)
 
 
-# Supported image extensions (lowercase, with leading dot)
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
-
-# Map file extension to MIME type
 _EXT_MIME: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".bmp": "image/bmp",
 }
+
+IMAGE_EXTENSIONS = _EXT_MIME.keys()
 
 
 def _mime_for_path(path: str) -> str:
@@ -229,7 +226,7 @@ async def short_url_redirect(identifier: str, number: int):
 
 @app.get("/api/{owner}/{repo}/pr/{number}/images")
 async def pr_images(owner: str, repo: str, number: int):
-    """List all changed image files (PNG, JPG, JPEG, BMP) in a PR."""
+    """List all changed image files in a PR."""
     github_repo = f"{owner}/{repo}"
 
     if not GITHUB_TOKEN:
