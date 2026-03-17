@@ -1,0 +1,22 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+js_library(
+    name = "content_js",
+    srcs = ["content.js"],
+)
+
+js_library(
+    name = "background_js",
+    srcs = ["background.js"],
+)
+
+# The full Chrome extension bundle: manifest + scripts + icons
+filegroup(
+    name = "extension",
+    srcs = [
+        "manifest.json",
+        ":content_js",
+        ":background_js",
+    ] + glob(["icons/*.png"]),
+    visibility = ["//visibility:public"],
+)

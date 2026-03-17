@@ -1,6 +1,7 @@
 .git
 __pycache__
 tests
+extension
 *.pyc
 .gitignore
 docker-compose.yml

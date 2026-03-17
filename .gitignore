@@ -24,5 +24,12 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Bazel
+bazel-bin
+bazel-out
+bazel-testlogs
+bazel-visual-review
+MODULE.bazel.lock
+
 # Environment
 .env

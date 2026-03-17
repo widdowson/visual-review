@@ -1,0 +1,6 @@
+module(
+    name = "visual-review",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "aspect_rules_js", version = "3.0.3")

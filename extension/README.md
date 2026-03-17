@@ -1,0 +1,67 @@
+# Visual Review — Chrome Extension
+
+Browser extension that adds **Visual Review** links to GitHub PR pages. When a PR contains image files (`.png`, `.bmp`, `.jpg`, `.jpeg`), the extension injects links that open the PR in [Visual Review](https://vr.apw.photos) for side-by-side image comparison.
+
+## What it does
+
+- **PR list page** (`/{owner}/{repo}/pulls`): Adds a small purple VR goggles icon next to open PR titles that have image files
+- **PR detail page** (`/{owner}/{repo}/pull/{n}`): Adds a "Visual Review" button in the header actions area
+
+Only PRs in the `widdowson/` owner space are processed. Only open (not merged/closed) PRs are eligible. The extension checks the first 100 changed files for image extensions and caches positive results in `localStorage` for one week.
+
+No API token is needed — the extension piggybacks on your existing GitHub session cookies via GitHub's internal JSON API.
+
+## Installation (unpacked, for development)
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (toggle in top right)
+3. Click **Load unpacked**
+4. Select this `extension/` directory
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `manifest.json` | Chrome Manifest V3 config |
+| `content.js` | Content script injected on `github.com` pages |
+| `background.js` | Service worker for extension reload support |
+| `icons/` | Extension icons (16/48/128px) |
+
+## Development
+
+After editing `content.js`, reload the extension:
+
+- **Manual**: Click the reload icon on `chrome://extensions`
+- **From the browser**: Append `#vr_reload` to any GitHub URL — the content script detects the hash change and triggers a full extension reload via the service worker
+- **From Claude Code `--chrome`**: Navigate to any GitHub page with `#vr_reload` appended to trigger a reload programmatically, e.g.:
+  ```
+  // In a Claude Code --chrome session:
+  // After editing extension files, trigger reload by navigating to:
+  // https://github.com/{owner}/{repo}/pulls#vr_reload
+  ```
+
+The `#vr_reload` hash is automatically stripped from the URL after triggering the reload.
+
+### Regenerating icons
+
+The extension icons are PNGs derived from the web app's `static/favicon.svg` (the authoritative source). To regenerate after editing the SVG:
+
+```bash
+for size in 16 48 128; do
+  rsvg-convert -w $size -h $size static/favicon.svg -o extension/icons/icon${size}.png
+done
+```
+
+Requires `rsvg-convert` (`brew install librsvg`).
+
+## Configuration
+
+Constants at the top of `content.js`:
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `VR_BASE_URL` | `https://vr.apw.photos` | Base URL of the Visual Review instance |
+| `OWNER_FILTER` | `widdowson` | Only inject on repos owned by this user/org |
+| `IMAGE_REGEX` | `/\.(png\|bmp\|jpg\|jpeg)$/i` | File extensions that count as images |
+| `MAX_FILES` | `100` | Max files to check per PR |
+| `CACHE_DURATION_MS` | 7 days | How long positive results are cached |
