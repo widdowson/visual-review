@@ -2,7 +2,15 @@
 __pycache__
 tests
 extension
+bazel-*
 *.pyc
+.bazelversion
 .gitignore
+BUILD.bazel
+MODULE.bazel
+MODULE.bazel.lock
 docker-compose.yml
 README.md
+requirements_lock.txt
+requirements-test.txt
+server.py

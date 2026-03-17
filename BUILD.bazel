@@ -1,10 +1,86 @@
 load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_py//py:defs.bzl", "py_binary", "py_image_layer")
+load("@pip//:requirements.bzl", "requirement")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_push")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
 
-# Root BUILD file
-exports_files(["image_extensions.json"])
+exports_files([
+    "image_extensions.json",
+    "requirements_lock.txt",
+])
 
 js_library(
     name = "image_extensions_json",
     srcs = ["image_extensions.json"],
     visibility = ["//extension:__pkg__"],
+)
+
+# ── Python server library ────────────────────────────────────────────────────
+
+py_library(
+    name = "app_lib",
+    srcs = ["app.py"],
+    data = ["image_extensions.json"],
+    deps = [
+        requirement("fastapi"),
+        requirement("httpx"),
+        requirement("uvicorn"),
+    ],
+)
+
+# ── Server binary (for OCI image) ───────────────────────────────────────────
+
+py_binary(
+    name = "server",
+    srcs = ["server.py"],
+    data = [
+        "image_extensions.json",
+        "static/favicon.svg",
+        "static/index.html",
+    ],
+    deps = [":app_lib"],
+)
+
+# ── Python tests (pytest) ───────────────────────────────────────────────────
+
+py_test(
+    name = "test_app",
+    srcs = [
+        "tests/run_tests.py",
+        "tests/test_app.py",
+        "tests/__init__.py",
+    ],
+    args = ["tests/test_app.py"],
+    data = ["image_extensions.json"],
+    main = "tests/run_tests.py",
+    deps = [
+        ":app_lib",
+        requirement("httpx"),
+        requirement("pytest"),
+        requirement("pytest-asyncio"),
+    ],
+)
+
+# ── OCI container image ─────────────────────────────────────────────────────
+
+# py_image_layer splits the py_binary's runfiles into optimized tar layers:
+# - pip packages (changes rarely → cached)
+# - app code (changes often → small layer)
+oci_image(
+    name = "image",
+    base = "@python_slim_linux_amd64",
+    cmd = ["/server"],
+    env = {"PORT": "8080"},
+    tars = py_image_layer(
+        name = "server_layers",
+        binary = ":server",
+        root = "/",
+    ),
+)
+
+oci_push(
+    name = "push",
+    image = ":image",
+    repository = "us-central1-docker.pkg.dev/vr-apw-photos/visual-review/app",
 )

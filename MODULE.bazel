@@ -3,5 +3,35 @@ module(
     version = "0.0.0",
 )
 
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
 bazel_dep(name = "aspect_rules_js", version = "3.0.3")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "rules_oci", version = "2.3.0")
+bazel_dep(name = "rules_pkg", version = "1.2.0")
+bazel_dep(name = "aspect_rules_py", version = "1.9.1")
+bazel_dep(name = "rules_python", version = "1.9.0")
+
+# ── Python toolchain ─────────────────────────────────────────────────────────
+
+# ── Pip dependencies ─────────────────────────────────────────────────────────
+# Uses the Python 3.11 host toolchain registered by aspect_rules_js.
+# The OCI container image independently uses python:3.12-slim as its base.
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "pip",
+    python_version = "3.11",
+    requirements_lock = "//:requirements_lock.txt",
+)
+use_repo(pip, "pip")
+
+# ── OCI base image ───────────────────────────────────────────────────────────
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "python_slim",
+    image = "docker.io/library/python",
+    tag = "3.12-slim",
+    platforms = ["linux/amd64"],
+)
+use_repo(oci, "python_slim", "python_slim_linux_amd64")
