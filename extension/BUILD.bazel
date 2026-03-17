@@ -1,4 +1,17 @@
-load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+
+# Generate image_config.js from the shared image_extensions.json
+genrule(
+    name = "image_config",
+    srcs = ["//:image_extensions.json"],
+    outs = ["image_config.js"],
+    cmd = """python3 -c "
+import json, sys
+exts = list(json.load(open(sys.argv[1])).keys())
+print('var IMAGE_EXTENSIONS = ' + json.dumps(exts) + ';')
+" $(location //:image_extensions.json) > $@""",
+)
 
 js_library(
     name = "content_js",
@@ -15,8 +28,44 @@ filegroup(
     name = "extension",
     srcs = [
         "manifest.json",
+        ":image_config",
         ":content_js",
         ":background_js",
     ] + glob(["icons/*.png"]),
     visibility = ["//visibility:public"],
+)
+
+build_test(
+    name = "extension_build_test",
+    targets = [":extension"],
+)
+
+# ── Tests ────────────────────────────────────────────────────────────────────
+
+js_test(
+    name = "test_manifest",
+    entry_point = "test_manifest.js",
+    data = [
+        "manifest.json",
+        "content.js",
+        "background.js",
+        ":image_config",
+    ] + glob(["icons/*.png"]),
+)
+
+js_test(
+    name = "test_icons",
+    entry_point = "test_icons.js",
+    data = [
+        "manifest.json",
+    ] + glob(["icons/*.png"]),
+)
+
+js_test(
+    name = "test_content_logic",
+    entry_point = "test_content_logic.js",
+    data = [
+        ":image_config",
+        "//:image_extensions_json",
+    ],
 )

@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _EXT_MIME, IMAGE_EXTENSIONS
 
 
 @pytest.fixture(autouse=True)
@@ -908,6 +908,31 @@ class TestMimeForPath:
 
     def test_no_extension_defaults_to_png(self):
         assert _mime_for_path("noext") == "image/png"
+
+
+class TestImageExtensionsJson:
+    """Verify that _EXT_MIME is loaded correctly from image_extensions.json."""
+
+    def test_ext_mime_loaded_from_json(self):
+        import json
+        json_path = Path(__file__).resolve().parent.parent / "image_extensions.json"
+        with open(json_path) as f:
+            expected = json.load(f)
+        assert _EXT_MIME == expected
+
+    def test_all_extensions_start_with_dot(self):
+        for ext in IMAGE_EXTENSIONS:
+            assert ext.startswith("."), f"Extension must start with dot: {ext}"
+
+    def test_all_mime_types_are_image(self):
+        for ext, mime in _EXT_MIME.items():
+            assert mime.startswith("image/"), f"{ext} MIME must start with image/, got {mime}"
+
+    def test_known_extensions_present(self):
+        assert ".png" in _EXT_MIME
+        assert ".jpg" in _EXT_MIME
+        assert ".jpeg" in _EXT_MIME
+        assert ".bmp" in _EXT_MIME
 
 
 class TestBase36:

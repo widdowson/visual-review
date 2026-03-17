@@ -5,6 +5,7 @@ side-by-side, crossfade, swipe, and diff overlay comparisons.
 """
 
 import base64
+import json
 import logging
 import os
 import time
@@ -47,12 +48,9 @@ def _cache_set(key: str, val: Any) -> None:
     _cache[key] = (time.time(), val)
 
 
-_EXT_MIME: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".bmp": "image/bmp",
-}
+_ext_file = os.path.join(os.path.dirname(__file__), "image_extensions.json")
+with open(_ext_file) as _f:
+    _EXT_MIME: dict[str, str] = json.load(_f)
 
 IMAGE_EXTENSIONS = _EXT_MIME.keys()
 

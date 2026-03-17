@@ -1,1 +1,10 @@
-# Root BUILD file — targets live in subdirectories
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+
+# Root BUILD file
+exports_files(["image_extensions.json"])
+
+js_library(
+    name = "image_extensions_json",
+    srcs = ["image_extensions.json"],
+    visibility = ["//extension:__pkg__"],
+)

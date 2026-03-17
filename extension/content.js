@@ -27,9 +27,17 @@
   const VR_BASE_URL = 'https://vr.apw.photos';
   const CACHE_KEY_PREFIX = 'vr_pr_has_images_';
   const CACHE_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
-  const IMAGE_REGEX = /\.(png|bmp|jpg|jpeg)$/i;
+  // IMAGE_EXTENSIONS is defined in image_config.js (loaded before this script)
   const MAX_FILES = 100;
   const OWNER_FILTER = 'widdowson';
+
+  function hasImageExtension(path) {
+    var lower = path.toLowerCase();
+    for (var i = 0; i < IMAGE_EXTENSIONS.length; i++) {
+      if (lower.endsWith(IMAGE_EXTENSIONS[i])) return true;
+    }
+    return false;
+  }
 
   /* ─── Cache helpers ─── */
 
@@ -72,7 +80,7 @@
       const data = await resp.json();
       const summaries = data.payload.pullRequestsChangesRoute.diffSummaries;
       const hasImages = summaries.slice(0, MAX_FILES).some(function(s) {
-        return IMAGE_REGEX.test(s.path);
+        return hasImageExtension(s.path);
       });
       setCachedResult(owner, repo, prNumber, hasImages);
       return hasImages;
