@@ -535,6 +535,70 @@ async def post_pr_comment(owner: str, repo: str, number: int, request: Request):
         return {"error": str(e)}
 
 
+@app.get("/api/{owner}/{repo}/pr/{number}/checks")
+async def pr_checks(owner: str, repo: str, number: int):
+    """Return combined CI check status for a PR's head commit."""
+    github_repo = f"{owner}/{repo}"
+
+    if not GITHUB_TOKEN:
+        return {"error": "No GITHUB_TOKEN configured"}
+
+    headers = _gh_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Get the PR to find the head SHA
+            pr_resp = await client.get(
+                f"https://api.github.com/repos/{github_repo}/pulls/{number}",
+                headers=headers,
+            )
+            if pr_resp.status_code != 200:
+                return {"error": f"PR not found: HTTP {pr_resp.status_code}"}
+
+            head_sha = pr_resp.json()["head"]["sha"]
+
+            cache_key = f"pr_checks:{github_repo}:{number}:{head_sha}"
+            cached = _cache_get(cache_key, 60)
+            if cached is not None:
+                return cached
+
+            # Fetch check runs (GitHub Actions, etc.)
+            checks_resp = await client.get(
+                f"https://api.github.com/repos/{github_repo}/commits/{head_sha}/check-runs",
+                headers=headers,
+                params={"per_page": 100},
+            )
+
+            runs = []
+            if checks_resp.status_code == 200:
+                for r in checks_resp.json().get("check_runs", []):
+                    runs.append({
+                        "name": r["name"],
+                        "status": r["status"],
+                        "conclusion": r.get("conclusion"),
+                        "html_url": r.get("html_url", ""),
+                    })
+
+            # Derive overall state
+            if not runs:
+                overall = "none"
+            elif all(r["conclusion"] == "success" for r in runs):
+                overall = "success"
+            elif any(r["conclusion"] in ("failure", "timed_out", "action_required") for r in runs):
+                overall = "failure"
+            elif any(r["status"] in ("queued", "in_progress") for r in runs):
+                overall = "pending"
+            else:
+                overall = "unknown"
+
+            result = {"overall": overall, "runs": runs, "sha": head_sha[:8]}
+            _cache_set(cache_key, result)
+            return result
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # -- Root redirect -------------------------------------------------------------
 
 @app.get("/")

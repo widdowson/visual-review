@@ -1011,6 +1011,141 @@ class TestMimeForPath:
         assert _mime_for_path("noext") == "image/png"
 
 
+class TestPrChecks:
+    @pytest.mark.asyncio
+    async def test_checks_no_token(self):
+        with patch("app.GITHUB_TOKEN", ""):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+        data = resp.json()
+        assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_checks_success(self):
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {"head": {"sha": "abc123def456"}}
+
+        mock_checks_resp = MagicMock()
+        mock_checks_resp.status_code = 200
+        mock_checks_resp.json.return_value = {
+            "check_runs": [
+                {
+                    "name": "Test",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": "http://gh/runs/1",
+                },
+                {
+                    "name": "Deploy",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": "http://gh/runs/2",
+                },
+            ]
+        }
+
+        async def mock_get(url, **kwargs):
+            if "/pulls/" in url:
+                return mock_pr_resp
+            if "/check-runs" in url:
+                return mock_checks_resp
+            return MagicMock(status_code=404)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+
+        data = resp.json()
+        assert data["overall"] == "success"
+        assert len(data["runs"]) == 2
+        assert data["sha"] == "abc123de"
+
+    @pytest.mark.asyncio
+    async def test_checks_failure(self):
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {"head": {"sha": "abc123def456"}}
+
+        mock_checks_resp = MagicMock()
+        mock_checks_resp.status_code = 200
+        mock_checks_resp.json.return_value = {
+            "check_runs": [
+                {"name": "Test", "status": "completed", "conclusion": "failure", "html_url": ""},
+                {"name": "Lint", "status": "completed", "conclusion": "success", "html_url": ""},
+            ]
+        }
+
+        async def mock_get(url, **kwargs):
+            if "/pulls/" in url:
+                return mock_pr_resp
+            return mock_checks_resp
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+
+        data = resp.json()
+        assert data["overall"] == "failure"
+
+    @pytest.mark.asyncio
+    async def test_checks_pending(self):
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {"head": {"sha": "abc123def456"}}
+
+        mock_checks_resp = MagicMock()
+        mock_checks_resp.status_code = 200
+        mock_checks_resp.json.return_value = {
+            "check_runs": [
+                {"name": "Test", "status": "in_progress", "conclusion": None, "html_url": ""},
+            ]
+        }
+
+        async def mock_get(url, **kwargs):
+            if "/pulls/" in url:
+                return mock_pr_resp
+            return mock_checks_resp
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+
+        data = resp.json()
+        assert data["overall"] == "pending"
+
+
 class TestImageExtensionsJson:
     """Verify that _EXT_MIME is loaded correctly from image_extensions.json."""
 
