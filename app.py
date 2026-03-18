@@ -287,12 +287,15 @@ async def pr_images(owner: str, repo: str, number: int):
                 filename = f.get("filename", "")
                 ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
                 if f".{ext}" in IMAGE_EXTENSIONS:
-                    result["images"].append({
+                    entry = {
                         "path": filename,
                         "status": f.get("status", "modified"),
                         "additions": f.get("additions", 0),
                         "deletions": f.get("deletions", 0),
-                    })
+                    }
+                    if f.get("status") == "renamed" and f.get("previous_filename"):
+                        entry["previous_filename"] = f["previous_filename"]
+                    result["images"].append(entry)
 
     except Exception as e:
         return JSONResponse(

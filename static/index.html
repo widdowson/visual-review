@@ -133,6 +133,7 @@
         .file-item .status-badge.added { background: var(--vr-badge-added-bg); color: var(--vr-badge-added-fg); }
         .file-item .status-badge.removed { background: var(--vr-badge-removed-bg); color: var(--vr-badge-removed-fg); }
         .file-item .status-badge.modified { background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg); }
+        .file-item .status-badge.renamed { background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg); }
         .file-item .filename {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             flex: 1;
@@ -323,6 +324,10 @@
             display: flex; gap: 20px; align-items: center;
         }
         .image-info .dim { color: var(--vr-text-secondary); }
+        .image-info .gh-diff-link { color: var(--vr-link); text-decoration: none; font-size: 0.75rem; }
+        .image-info .gh-diff-link:hover { color: var(--vr-link-hover); text-decoration: underline; }
+        .renamed-label { color: var(--vr-text-muted); font-size: 0.85rem; margin-bottom: 8px; }
+        .renamed-label .renamed-arrow { color: var(--vr-accent); margin: 0 6px; }
 
         /* Keyboard shortcut hint pill */
         .kbd-hint {
@@ -565,7 +570,7 @@
 
                 var badge = document.createElement('span');
                 badge.className = 'status-badge ' + img.status;
-                badge.textContent = img.status === 'modified' ? 'M' : img.status === 'added' ? 'A' : img.status === 'removed' ? 'D' : img.status.charAt(0).toUpperCase();
+                badge.textContent = img.status === 'modified' ? 'M' : img.status === 'added' ? 'A' : img.status === 'removed' ? 'D' : img.status === 'renamed' ? 'R' : img.status.charAt(0).toUpperCase();
                 li.appendChild(badge);
 
                 var fname = document.createElement('span');
@@ -717,7 +722,10 @@
                 }
             }
 
-            var baseUrl = apiBase + '/image?path=' + encodeURIComponent(path) + '&ref=' + state.baseRef;
+            // For renamed files, the base image is at the previous path
+            var fileData = getFileData(path);
+            var basePath = (fileStatus === 'renamed' && fileData && fileData.previous_filename) ? fileData.previous_filename : path;
+            var baseUrl = apiBase + '/image?path=' + encodeURIComponent(basePath) + '&ref=' + state.baseRef;
             var headUrl = apiBase + '/image?path=' + encodeURIComponent(path) + '&ref=' + state.headRef;
 
             if (fileStatus !== 'added') {
@@ -791,6 +799,8 @@
             state.diffClusters = computeDiffClusters(rowMap);
 
             var infoHtml = '<span>' + escHtml(state.currentFile) + '</span>';
+            // GitHub diff link placeholder (filled async)
+            infoHtml += '<span id="gh-diff-link-container"></span>';
             if (state.baseImg) {
                 infoHtml += '<span>Base: <span class="dim">' + state.baseImg.naturalWidth + ' x ' + state.baseImg.naturalHeight + '</span></span>';
             }
@@ -801,6 +811,21 @@
                 infoHtml += '<span style="color:#e53935;">Image load error (' + escHtml(state.loadError) + ')</span>';
             }
             imageInfo.innerHTML = infoHtml;
+
+            // Add GitHub diff link asynchronously
+            sha256Hex(state.currentFile).then(function(hash) {
+                var container = document.getElementById('gh-diff-link-container');
+                if (container) {
+                    var ghUrl = 'https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/pull/' + prNumber + '/files#diff-' + hash;
+                    container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) + '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
+                }
+            });
+
+            // Issue #14: renamed files — show single image with rename label, no diff modes
+            if (fileStatus === 'renamed') {
+                renderRenamed();
+                return;
+            }
 
             switch (state.mode) {
                 case 'side-by-side': renderSideBySide(); break;
@@ -1303,6 +1328,44 @@
             setupLoupes(dw);
         }
 
+        // -- Renamed file (no diff modes) --
+        function renderRenamed() {
+            modeToolbar.style.display = 'none';
+            var fileData = getFileData(state.currentFile);
+            var prevPath = fileData && fileData.previous_filename;
+
+            var wrap = document.createElement('div');
+            wrap.style.textAlign = 'center';
+
+            if (prevPath) {
+                var label = document.createElement('div');
+                label.className = 'renamed-label';
+                label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
+                    '<span class="renamed-arrow">\u2192</span>' +
+                    '<code>' + escHtml(state.currentFile) + '</code>';
+                wrap.appendChild(label);
+            }
+
+            var img = state.headImg || state.baseImg;
+            if (img) {
+                var imgEl = document.createElement('img');
+                imgEl.src = img.src;
+                imgEl.style.maxWidth = '90vw';
+                imgEl.style.height = 'auto';
+                imgEl.style.display = 'block';
+                imgEl.style.margin = '0 auto';
+                imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
+                wrap.appendChild(imgEl);
+            } else {
+                var msg = document.createElement('div');
+                msg.className = 'empty-msg';
+                msg.textContent = 'Image not available.';
+                wrap.appendChild(msg);
+            }
+
+            viewport.appendChild(wrap);
+        }
+
         // -- Loupe / Magnifier --
         var loupeActive = false;
         var lastMouseEvent = null;
@@ -1644,6 +1707,20 @@
 
         function escAttr(s) {
             return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        // SHA-256 hash for GitHub diff anchors (async, uses SubtleCrypto)
+        async function sha256Hex(str) {
+            var data = new TextEncoder().encode(str);
+            var buf = await crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+        }
+
+        function getFileData(path) {
+            for (var i = 0; i < state.images.length; i++) {
+                if (state.images[i].path === path) return state.images[i];
+            }
+            return null;
         }
 
         function timeAgo(isoStr) {

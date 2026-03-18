@@ -139,6 +139,107 @@ class TestPrImages:
         assert data["images"][5]["path"] == "tests/screenshots/baseline/page.bmp"
 
     @pytest.mark.asyncio
+    async def test_pr_images_renamed_file(self):
+        """Renamed image files include previous_filename in the response."""
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {
+            "base": {"sha": "aaa", "label": "main", "repo": {"id": 12345}},
+            "head": {"sha": "bbb", "label": "feature"},
+            "title": "Test PR",
+            "html_url": "http://gh/pr/1",
+        }
+
+        mock_compare_resp = MagicMock()
+        mock_compare_resp.status_code = 200
+        mock_compare_resp.json.return_value = {
+            "files": [
+                {
+                    "filename": "screenshots/new_name.png",
+                    "status": "renamed",
+                    "previous_filename": "screenshots/old_name.png",
+                },
+                {
+                    "filename": "photos/moved.jpg",
+                    "status": "renamed",
+                    "previous_filename": "old_photos/moved.jpg",
+                },
+            ]
+        }
+
+        async def mock_get(url, **kwargs):
+            if "/pulls/" in url:
+                return mock_pr_resp
+            if "/compare/" in url:
+                return mock_compare_resp
+            return MagicMock(status_code=404)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert len(data["images"]) == 2
+        assert data["images"][0]["status"] == "renamed"
+        assert data["images"][0]["previous_filename"] == "screenshots/old_name.png"
+        assert data["images"][1]["previous_filename"] == "old_photos/moved.jpg"
+
+    @pytest.mark.asyncio
+    async def test_pr_images_modified_no_previous_filename(self):
+        """Non-renamed files should not include previous_filename."""
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {
+            "base": {"sha": "aaa", "label": "main", "repo": {"id": 12345}},
+            "head": {"sha": "bbb", "label": "feature"},
+            "title": "Test PR",
+            "html_url": "http://gh/pr/1",
+        }
+
+        mock_compare_resp = MagicMock()
+        mock_compare_resp.status_code = 200
+        mock_compare_resp.json.return_value = {
+            "files": [
+                {"filename": "test.png", "status": "modified"},
+            ]
+        }
+
+        async def mock_get(url, **kwargs):
+            if "/pulls/" in url:
+                return mock_pr_resp
+            if "/compare/" in url:
+                return mock_compare_resp
+            return MagicMock(status_code=404)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert len(data["images"]) == 1
+        assert "previous_filename" not in data["images"][0]
+
+    @pytest.mark.asyncio
     async def test_pr_images_pr_not_found(self):
         mock_resp = MagicMock()
         mock_resp.status_code = 404
