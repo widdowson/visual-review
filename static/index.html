@@ -378,10 +378,91 @@
             color: var(--vr-text-dim); font-size: 0.7rem; text-transform: uppercase;
             letter-spacing: 0.5px; padding-top: 12px; font-weight: 600;
         }
+
+        /* Sidebar toggle button — hidden on desktop */
+        #sidebar-toggle {
+            display: none;
+            background: none; border: 1px solid #3a3f52; color: #8eb5f0;
+            border-radius: 4px; padding: 4px 10px; cursor: pointer;
+            font-size: 1.1rem; line-height: 1; flex-shrink: 0;
+        }
+        #sidebar-toggle:hover { border-color: #8eb5f0; }
+
+        /* Backdrop shown when sidebar is open on mobile */
+        .sidebar-backdrop {
+            display: none; position: absolute; inset: 0;
+            background: rgba(0,0,0,0.4); z-index: 40;
+        }
+        .sidebar-backdrop.visible { display: block; }
+
+        @media (max-width: 768px) {
+            /* Show hamburger */
+            #sidebar-toggle { display: block; }
+
+            /* Topbar: tighten up for small screens */
+            .topbar { padding: 8px 12px; gap: 8px; }
+            .topbar .pr-title { font-size: 0.95rem; }
+
+            /* Layout needs a positioning context for the absolute sidebar */
+            .layout { position: relative; overflow: hidden; }
+
+            /* Sidebar slides in from the left; hidden by default */
+            .sidebar {
+                position: absolute; top: 0; left: 0; bottom: 0;
+                z-index: 50;
+                transform: translateX(-100%);
+                transition: transform 0.25s ease;
+                width: 280px !important; min-width: 280px !important;
+                box-shadow: 4px 0 16px rgba(0,0,0,0.25);
+            }
+            .sidebar.open { transform: translateX(0); }
+
+            /* Hide the drag-resize handle on mobile (not useful with touch) */
+            .sidebar-resize { display: none; }
+
+            /* Viewport and mode toolbar: tighter padding */
+            .viewport { padding: 10px; }
+            .mode-toolbar { padding: 8px 10px; gap: 6px; }
+            .mode-btn { padding: 8px 10px; font-size: 0.8rem; }
+            .mode-toolbar .hint { display: none; }
+
+            /* Image info bar: allow wrapping */
+            .image-info { padding: 6px 12px; flex-wrap: wrap; gap: 6px; }
+
+            /* Comments */
+            .comments-section { max-width: 100%; }
+
+            /* Crossfade slider: large touch target */
+            .crossfade-slider-row input[type="range"] {
+                width: 100%; max-width: 260px;
+                height: 44px;
+                -webkit-appearance: none; appearance: none;
+                cursor: pointer;
+            }
+            .crossfade-slider-row input[type="range"]::-webkit-slider-runnable-track {
+                height: 6px; border-radius: 3px;
+                background: var(--vr-border);
+            }
+            .crossfade-slider-row input[type="range"]::-moz-range-track {
+                height: 6px; border-radius: 3px;
+                background: var(--vr-border);
+            }
+            .crossfade-slider-row input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none; appearance: none;
+                width: 44px; height: 44px; border-radius: 50%;
+                background: var(--vr-accent);
+                margin-top: -19px; cursor: pointer;
+            }
+            .crossfade-slider-row input[type="range"]::-moz-range-thumb {
+                width: 44px; height: 44px; border-radius: 50%;
+                background: var(--vr-accent); border: none; cursor: pointer;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="topbar">
+        <button id="sidebar-toggle" aria-label="Toggle file panel" aria-expanded="false">&#9776;</button>
         <span class="pr-title" id="pr-title">Loading...</span>
         <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
             <button class="theme-toggle" id="theme-toggle" title="Toggle theme">&#9681;</button>
@@ -390,6 +471,7 @@
     </div>
 
     <div class="layout">
+        <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
         <div class="sidebar" id="sidebar">
             <div class="sidebar-resize" id="sidebar-resize"></div>
             <div class="sidebar-header">
@@ -1962,6 +2044,40 @@
                 handle.classList.remove('dragging');
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
+            });
+        })();
+
+        // -- Mobile sidebar toggle --
+        (function() {
+            var toggleBtn = document.getElementById('sidebar-toggle');
+            var sidebar = document.getElementById('sidebar');
+            var backdrop = document.getElementById('sidebar-backdrop');
+
+            function openSidebar() {
+                sidebar.classList.add('open');
+                backdrop.classList.add('visible');
+                toggleBtn.setAttribute('aria-expanded', 'true');
+            }
+            function closeSidebar() {
+                sidebar.classList.remove('open');
+                backdrop.classList.remove('visible');
+                toggleBtn.setAttribute('aria-expanded', 'false');
+            }
+
+            toggleBtn.addEventListener('click', function() {
+                if (sidebar.classList.contains('open')) {
+                    closeSidebar();
+                } else {
+                    openSidebar();
+                }
+            });
+
+            // Tapping backdrop closes the sidebar
+            backdrop.addEventListener('click', closeSidebar);
+
+            // After a file is selected on mobile, close the sidebar automatically
+            document.getElementById('file-list').addEventListener('click', function() {
+                if (window.innerWidth <= 768) closeSidebar();
             });
         })();
 
