@@ -1,16 +1,16 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@aspect_bazel_lib//lib:jq.bzl", "jq")
 load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
-# Generate image_config.js from the shared image_extensions.json
-genrule(
+# Generate image_config.js from the shared image_extensions.json.
+# Uses the hermetic jq toolchain — no host python3 dependency.
+jq(
     name = "image_config",
     srcs = ["//:image_extensions.json"],
-    outs = ["image_config.js"],
-    cmd = """python3 -c "
-import json, sys
-exts = list(json.load(open(sys.argv[1])).keys())
-print('var IMAGE_EXTENSIONS = ' + json.dumps(exts) + ';')
-" $(location //:image_extensions.json) > $@""",
+    out = "image_config.js",
+    args = ["--raw-output"],
+    filter = '"var IMAGE_EXTENSIONS = " + (keys_unsorted | tojson) + ";"',
 )
 
 js_library(
@@ -35,9 +35,25 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Materializes a directory Chrome can "Load unpacked" directly:
+# bazel-bin/extension/extension_bundle/
+copy_to_directory(
+    name = "extension_bundle",
+    srcs = [
+        "manifest.json",
+        "content.js",
+        "background.js",
+        ":image_config",
+    ] + glob(["icons/*.png"]),
+    visibility = ["//visibility:public"],
+)
+
 build_test(
     name = "extension_build_test",
-    targets = [":extension"],
+    targets = [
+        ":extension",
+        ":extension_bundle",
+    ],
 )
 
 # ── Tests ────────────────────────────────────────────────────────────────────
