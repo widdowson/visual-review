@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS, _gh_paginate, _GitHubError, _GH_PAGE_SIZE
 
 
 @pytest.fixture(autouse=True)
@@ -89,26 +89,25 @@ class TestPrImages:
             "html_url": "http://gh/pr/1",
         }
 
-        mock_compare_resp = MagicMock()
-        mock_compare_resp.status_code = 200
-        mock_compare_resp.json.return_value = {
-            "files": [
-                {"filename": "tests/screenshots/baseline/test.png", "status": "modified"},
-                {"filename": "src/main.py", "status": "modified"},
-                {"filename": "tests/screenshots/baseline/new.PNG", "status": "added"},
-                {"filename": "photos/hero.jpg", "status": "modified"},
-                {"filename": "photos/banner.jpeg", "status": "added"},
-                {"filename": "photos/thumb.JPG", "status": "modified"},
-                {"filename": "tests/screenshots/baseline/page.bmp", "status": "added"},
-                {"filename": "docs/readme.txt", "status": "modified"},
-            ]
-        }
+        mock_files_resp = MagicMock()
+        mock_files_resp.status_code = 200
+        mock_files_resp.json.return_value = [
+            {"filename": "tests/screenshots/baseline/test.png", "status": "modified"},
+            {"filename": "src/main.py", "status": "modified"},
+            {"filename": "tests/screenshots/baseline/new.PNG", "status": "added"},
+            {"filename": "photos/hero.jpg", "status": "modified"},
+            {"filename": "photos/banner.jpeg", "status": "added"},
+            {"filename": "photos/thumb.JPG", "status": "modified"},
+            {"filename": "tests/screenshots/baseline/page.bmp", "status": "added"},
+            {"filename": "docs/readme.txt", "status": "modified"},
+        ]
 
         async def mock_get(url, **kwargs):
+            # /files before /pulls/: the files endpoint is nested under it.
+            if url.endswith("/files"):
+                return mock_files_resp
             if "/pulls/" in url:
                 return mock_pr_resp
-            if "/compare/" in url:
-                return mock_compare_resp
             return MagicMock(status_code=404)
 
         with (
@@ -150,28 +149,27 @@ class TestPrImages:
             "html_url": "http://gh/pr/1",
         }
 
-        mock_compare_resp = MagicMock()
-        mock_compare_resp.status_code = 200
-        mock_compare_resp.json.return_value = {
-            "files": [
-                {
-                    "filename": "screenshots/new_name.png",
-                    "status": "renamed",
-                    "previous_filename": "screenshots/old_name.png",
-                },
-                {
-                    "filename": "photos/moved.jpg",
-                    "status": "renamed",
-                    "previous_filename": "old_photos/moved.jpg",
-                },
-            ]
-        }
+        mock_files_resp = MagicMock()
+        mock_files_resp.status_code = 200
+        mock_files_resp.json.return_value = [
+            {
+                "filename": "screenshots/new_name.png",
+                "status": "renamed",
+                "previous_filename": "screenshots/old_name.png",
+            },
+            {
+                "filename": "photos/moved.jpg",
+                "status": "renamed",
+                "previous_filename": "old_photos/moved.jpg",
+            },
+        ]
 
         async def mock_get(url, **kwargs):
+            # /files before /pulls/: the files endpoint is nested under it.
+            if url.endswith("/files"):
+                return mock_files_resp
             if "/pulls/" in url:
                 return mock_pr_resp
-            if "/compare/" in url:
-                return mock_compare_resp
             return MagicMock(status_code=404)
 
         with (
@@ -206,19 +204,18 @@ class TestPrImages:
             "html_url": "http://gh/pr/1",
         }
 
-        mock_compare_resp = MagicMock()
-        mock_compare_resp.status_code = 200
-        mock_compare_resp.json.return_value = {
-            "files": [
-                {"filename": "test.png", "status": "modified"},
-            ]
-        }
+        mock_files_resp = MagicMock()
+        mock_files_resp.status_code = 200
+        mock_files_resp.json.return_value = [
+            {"filename": "test.png", "status": "modified"},
+        ]
 
         async def mock_get(url, **kwargs):
+            # /files before /pulls/: the files endpoint is nested under it.
+            if url.endswith("/files"):
+                return mock_files_resp
             if "/pulls/" in url:
                 return mock_pr_resp
-            if "/compare/" in url:
-                return mock_compare_resp
             return MagicMock(status_code=404)
 
         with (
@@ -261,6 +258,280 @@ class TestPrImages:
         data = resp.json()
         assert "error" in data
         assert data["images"] == []
+
+
+# -- Paginated file listing (#12) ---------------------------------------------
+
+def _paged_client(pages, pr_data=None, status_by_page=None):
+    """Mock an httpx.AsyncClient serving ``pages`` from pulls/{n}/files.
+
+    ``pages`` is a list of per-page payloads, 1-indexed by request. A request
+    for a page past the end gets ``[]``, which is what GitHub answers. Every
+    requested page number is recorded on ``instance.requested_pages`` so a test
+    can assert which requests the walk actually made — a walk that stops one
+    page early and one that never stops both return plausible lists.
+
+    ``status_by_page`` maps a 1-indexed page number to an HTTP status, for
+    driving a failure partway through the walk.
+    """
+    pr_data = pr_data or {
+        "base": {"sha": "aaa", "label": "main", "repo": {"id": 12345}},
+        "head": {"sha": "bbb", "label": "feature"},
+        "title": "Big PR",
+        "html_url": "http://gh/pr/352",
+    }
+    mock_pr_resp = MagicMock()
+    mock_pr_resp.status_code = 200
+    mock_pr_resp.json.return_value = pr_data
+
+    requested_pages = []
+
+    async def mock_get(url, **kwargs):
+        if url.endswith("/files"):
+            params = kwargs.get("params", {})
+            page = params.get("page")
+            requested_pages.append(page)
+            status = (status_by_page or {}).get(page, 200)
+            resp = MagicMock()
+            resp.status_code = status
+            if status == 200:
+                resp.json.return_value = pages[page - 1] if 1 <= page <= len(pages) else []
+            return resp
+        if "/pulls/" in url:
+            return mock_pr_resp
+        return MagicMock(status_code=404)
+
+    instance = AsyncMock()
+    instance.get = mock_get
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=False)
+    instance.requested_pages = requested_pages
+    return instance
+
+
+def _png_pages(total, per_page=_GH_PAGE_SIZE):
+    """Split ``total`` synthetic .png file entries into full pages."""
+    files = [
+        {"filename": f"baselines/shot_{i:04d}.png", "status": "added"}
+        for i in range(total)
+    ]
+    return [files[i:i + per_page] for i in range(0, len(files), per_page)] or [[]]
+
+
+class TestPrImagesPagination:
+    """#12: a 300+ file PR lost every file past the first page, silently."""
+
+    @pytest.mark.asyncio
+    async def test_all_files_returned_past_the_compare_cap(self):
+        """489 image files — PR 352's real shape — all come back.
+
+        The compare endpoint this replaced answered that PR with exactly 300
+        files and no next page, so 189 went missing with nothing said.
+        """
+        instance = _paged_client(_png_pages(489))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/352/images")
+
+        data = resp.json()
+        assert len(data["images"]) == 489
+        assert data["images"][0]["path"] == "baselines/shot_0000.png"
+        assert data["images"][-1]["path"] == "baselines/shot_0488.png"
+        assert data["truncated"] is False
+        # Five pages: four full, then an 89-entry page that ends the walk.
+        assert instance.requested_pages == [1, 2, 3, 4, 5]
+
+    @pytest.mark.asyncio
+    async def test_hits_the_files_endpoint_not_compare(self):
+        """The compare endpoint cannot serve this, so nothing may call it."""
+        seen = []
+
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {
+            "base": {"sha": "aaa", "label": "main", "repo": {"id": 12345}},
+            "head": {"sha": "bbb", "label": "feature"},
+            "title": "Test PR",
+            "html_url": "http://gh/pr/1",
+        }
+
+        async def mock_get(url, **kwargs):
+            seen.append(url)
+            if url.endswith("/files"):
+                r = MagicMock(status_code=200)
+                r.json.return_value = [{"filename": "a.png", "status": "added"}]
+                return r
+            if "/pulls/" in url:
+                return mock_pr_resp
+            return MagicMock(status_code=404)
+
+        instance = AsyncMock()
+        instance.get = mock_get
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        assert resp.json()["images"] == [
+            {"path": "a.png", "status": "added", "additions": 0, "deletions": 0}
+        ]
+        assert not any("/compare/" in url for url in seen)
+        assert any(url.endswith("/pulls/1/files") for url in seen)
+
+    @pytest.mark.asyncio
+    async def test_exact_page_multiple_needs_the_empty_page(self):
+        """A full last page is indistinguishable from a middle one.
+
+        200 files is two full pages; only the empty third page ends the walk,
+        so the response must not stop at 100.
+        """
+        instance = _paged_client(_png_pages(200))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert len(data["images"]) == 200
+        assert instance.requested_pages == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_files_request_failure_is_reported(self):
+        """A page that fails partway through is an error, not a short list."""
+        instance = _paged_client(_png_pages(250), status_by_page={2: 500})
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert data["images"] == []
+        assert "500" in data["error"]
+        # It stopped at the failure rather than walking on past it.
+        assert instance.requested_pages == [1, 2]
+
+
+class TestGhPaginate:
+    """The walk itself, driven directly so every branch is reachable."""
+
+    def _client(self, pages, status_by_page=None):
+        requested = []
+
+        async def mock_get(url, **kwargs):
+            page = kwargs.get("params", {}).get("page")
+            requested.append(page)
+            status = (status_by_page or {}).get(page, 200)
+            resp = MagicMock()
+            resp.status_code = status
+            if status == 200:
+                resp.json.return_value = pages[page - 1] if 1 <= page <= len(pages) else []
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.requested = requested
+        return client
+
+    @pytest.mark.asyncio
+    async def test_single_short_page(self):
+        client = self._client([[1, 2, 3]])
+        items, truncated = await _gh_paginate(client, "http://gh/list", {})
+        assert items == [1, 2, 3]
+        assert truncated is False
+        assert client.requested == [1]
+
+    @pytest.mark.asyncio
+    async def test_requests_per_page_100(self):
+        """Asking for more than 100 is clamped by GitHub, so ask for 100."""
+        captured = {}
+
+        async def mock_get(url, **kwargs):
+            captured.update(kwargs.get("params", {}))
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = []
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        await _gh_paginate(client, "http://gh/list", {})
+        assert captured["per_page"] == 100
+
+    @pytest.mark.asyncio
+    async def test_caller_params_survive_paging(self):
+        captured = []
+
+        async def mock_get(url, **kwargs):
+            captured.append(dict(kwargs.get("params", {})))
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = []
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        await _gh_paginate(client, "http://gh/list", {}, params={"state": "all"})
+        assert captured[0]["state"] == "all"
+        assert captured[0]["page"] == 1
+
+    @pytest.mark.asyncio
+    async def test_truncates_at_max_pages(self):
+        """max_pages is a parameter so this block is reachable at all.
+
+        Three full pages with max_pages=2 stops with more still to read.
+        """
+        client = self._client([list(range(_GH_PAGE_SIZE))] * 3)
+        items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=2)
+        assert len(items) == 2 * _GH_PAGE_SIZE
+        assert truncated is True
+        assert client.requested == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_last_page_exactly_full_is_not_truncated(self):
+        """Stopping on the cap is only truncation if more remained."""
+        client = self._client([list(range(_GH_PAGE_SIZE)), []])
+        items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=2)
+        assert len(items) == _GH_PAGE_SIZE
+        assert truncated is False
+        assert client.requested == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_non_200_raises(self):
+        client = self._client([[1]], status_by_page={1: 404})
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {})
+        assert exc.value.status_code == 404
+        assert "404" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_non_list_body_raises(self):
+        """A dict body would otherwise extend the result with its keys."""
+        client = self._client([{"message": "Not Found"}])
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {})
+        assert exc.value.status_code is None
+        assert "dict" in str(exc.value)
 
 
 # -- PR image proxy endpoint --------------------------------------------------

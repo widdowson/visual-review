@@ -94,6 +94,71 @@ def _gh_headers() -> dict[str, str]:
     }
 
 
+# -- Paginated GitHub list endpoints -------------------------------------------
+
+# GitHub clamps ``per_page`` to 100 on every list endpoint, so asking for more
+# just wastes the round trip.
+_GH_PAGE_SIZE = 100
+
+# "List pull requests files" serves at most 3000 files, i.e. 30 pages of 100.
+# The loop stops there itself rather than trusting the sequence to end, so a
+# change at GitHub's end can cost a truncated list but never an endless walk.
+_GH_MAX_PAGES = 30
+
+
+class _GitHubError(Exception):
+    """A GitHub API list request could not be completed.
+
+    ``status_code`` is the HTTP status that stopped the walk, or ``None`` when
+    the request succeeded but the body was not the list the endpoint promises.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _gh_paginate(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    params: dict[str, Any] | None = None,
+    max_pages: int = _GH_MAX_PAGES,
+) -> tuple[list[Any], bool]:
+    """Read every page of a GitHub list endpoint.
+
+    Returns ``(items, truncated)``, where ``truncated`` is true only when the
+    walk stopped at ``max_pages`` with a full page still in hand — i.e. there
+    was more to read. Raises :class:`_GitHubError` if any page fails.
+
+    Pages are walked by incrementing ``page`` rather than by following the
+    ``Link: rel="next"`` header. Both terminate correctly; counting means the
+    ``Authorization`` header is only ever sent to a URL this function built,
+    and it makes the page cap above a straightforward bound on the walk.
+
+    A short page ends the sequence, so a file count that is an exact multiple
+    of ``_GH_PAGE_SIZE`` costs one extra request that comes back empty.
+    """
+    items: list[Any] = []
+    base_params = dict(params or {})
+    base_params["per_page"] = _GH_PAGE_SIZE
+
+    for page in range(1, max_pages + 1):
+        resp = await client.get(url, headers=headers, params={**base_params, "page": page})
+        if resp.status_code != 200:
+            raise _GitHubError(f"HTTP {resp.status_code}", resp.status_code)
+
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise _GitHubError(f"expected a list of items, got {type(batch).__name__}")
+
+        items.extend(batch)
+        if len(batch) < _GH_PAGE_SIZE:
+            return items, False
+
+    return items, True
+
+
 # -- Repo resolver for short URLs ---------------------------------------------
 
 def _base36_decode(s: str) -> int | None:
@@ -257,7 +322,13 @@ async def pr_images(owner: str, repo: str, number: int):
         )
 
     headers = _gh_headers()
-    result = {"pr_number": number, "images": [], "base_ref": None, "head_ref": None}
+    result = {
+        "pr_number": number,
+        "images": [],
+        "base_ref": None,
+        "head_ref": None,
+        "truncated": False,
+    }
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -292,19 +363,34 @@ async def pr_images(owner: str, repo: str, number: int):
             result["pr_url"] = pr_data["html_url"]
             result["repo_id"] = pr_data["base"]["repo"]["id"]
 
-            # Compare API to find changed files
-            compare_resp = await client.get(
-                f"https://api.github.com/repos/{github_repo}/compare/{base_ref}...{head_ref}",
-                headers=headers,
-            )
-            if compare_resp.status_code != 200:
+            # The changed-file list comes from "List pull request files"
+            # rather than the compare API, because compare's ``files`` array
+            # is capped at 300 entries and offers no page beyond that: PR 352
+            # of apwphotos-appv2 (489 files) answers with exactly 300 files
+            # and a Link header whose only relations are ``first`` and
+            # ``prev``. Compare paginates its *commits*, not its files, so
+            # the remaining 189 were unreachable however the request was
+            # phrased, and they went missing with nothing said (#12).
+            #
+            # Both endpoints diff the merge base against the head, so below
+            # the cap they agree exactly — measured on three PRs of this
+            # repo (27, 9 and 4 files): identical path sets both ways.
+            try:
+                files, files_truncated = await _gh_paginate(
+                    client,
+                    f"https://api.github.com/repos/{github_repo}/pulls/{number}/files",
+                    headers,
+                )
+            except _GitHubError as e:
                 return JSONResponse(
-                    content={"error": f"Compare failed: HTTP {compare_resp.status_code}", "images": []},
+                    content={"error": f"Files request failed: {e}", "images": []},
                     headers={"Cache-Control": "no-store"},
                 )
 
-            compare_data = compare_resp.json()
-            files = compare_data.get("files", [])
+            # True only if GitHub has more files than it will serve. Left in
+            # the payload so a list that really is incomplete says so, rather
+            # than repeating this bug one order of magnitude up.
+            result["truncated"] = files_truncated
 
             for f in files:
                 filename = f.get("filename", "")
