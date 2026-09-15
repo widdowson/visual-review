@@ -74,6 +74,9 @@ py_test(
 # the target takes a cache hit instead of running.
 py_test(
     name = "test_spa_prefetch",
+    # "medium" despite an ~8s happy path, which earns Bazel's "size is too big"
+    # advisory: a total-prefetch-failure mutant spends 66s in wait_until
+    # timeouts before reporting, and a browser is not a small-size workload.
     size = "medium",
     srcs = [
         "tests/__init__.py",
@@ -84,6 +87,7 @@ py_test(
     ],
     args = ["tests/test_spa_prefetch.py"],
     data = [
+        "browsers.1.57.0.json",
         "static/index.html",
         "@playwright//:chromium-headless-shell",
     ],
@@ -93,6 +97,11 @@ py_test(
     main = "tests/run_tests.py",
     tags = ["browser"],
     deps = [
+        # The fixture asks app.py for the image Cache-Control rather than
+        # copying the literal, so that "the immutable header is load-bearing"
+        # cannot go on being asserted about a header production stopped
+        # sending.
+        ":app_lib",
         requirement("playwright"),
         requirement("pytest"),
     ],

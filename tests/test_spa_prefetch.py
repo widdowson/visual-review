@@ -38,8 +38,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fixture_server import BASE_REF, HEAD_REF, serve  # noqa: E402
 from spa_harness import (  # noqa: E402
     LOAD_COUNTER, SLOW_IMAGE, Probe, active_path, find_chromium,
-    index_html_path, load_starts, rendered_image_count, wait_until,
+    index_html_path, issued_requests, load_starts, prefetch_tuning,
+    rendered_image_count, repo_file, wait_until,
 )
+
+TUNING = prefetch_tuning()
 
 FILE_COUNT = 12
 RENAMED_INDEX = 4
@@ -47,6 +50,29 @@ RENAMED_INDEX = 4
 
 def path_of(i: int) -> str:
     return f"shots/file_{i:02d}.png"
+
+
+# ── the pin the whole harness rests on ──────────────────────────────────────
+
+def test_the_browser_build_matches_the_playwright_pin():
+    """`browsers.1.57.0.json` and `playwright==1.57.0` must move together.
+
+    README.md and requirements-test.txt both say so in prose, and prose does
+    not fail. Playwright refuses a browser whose revision it does not expect,
+    so bumping one without the other turns every test in this file into an
+    opaque launch error rather than a sentence naming the mismatch.
+    """
+    import glob as _glob
+    import importlib.metadata
+
+    manifests = _glob.glob(repo_file("browsers.*.json"))
+    assert len(manifests) == 1, f"expected exactly one browsers manifest, found {manifests}"
+    pinned = os.path.basename(manifests[0]).removeprefix("browsers.").removesuffix(".json")
+
+    installed = importlib.metadata.version("playwright")
+    assert pinned == installed, (
+        f"the browser manifest is pinned to {pinned} but the playwright package is "
+        f"{installed}; update MODULE.bazel and requirements_lock.txt together")
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -79,6 +105,12 @@ def page(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 900})
     p = ctx.new_page()
     p.add_init_script(LOAD_COUNTER)
+    # The order the renderer issued requests in. The fixture cannot answer
+    # that: its `start` is stamped inside a ThreadingHTTPServer handler
+    # thread, so four near-simultaneous requests are ordered by the OS
+    # scheduler and a sub-millisecond margin means nothing.
+    p.vr_requests = []
+    p.on("request", lambda r: p.vr_requests.append(r.url))
     errors = []
     p.on("pageerror", lambda e: errors.append(str(e)))
     yield p
@@ -117,14 +149,30 @@ def test_the_next_file_is_warmed_while_you_read_this_one(page, probe, base_url):
     # rather than in the scroll test below because during a fast scroll the
     # abort already prevents the speculation — measured, with the debounce
     # removed, as the identical 22 requests — so the scroll cannot see it.
-    landed = [r["end"] for r in probe.images(path_of(0)) if r["end"]]
-    assert landed, "the current pair should have finished before anything is warmed"
-    current_done = max(landed)
     warm_began = min(r["start"] for r in warmed)
-    gap = warm_began - current_done
-    assert gap >= 0.20, \
+    # Only records that closed *before* the warm started. Taking the max over
+    # every record for file 0 couples this to the caching behaviour of the
+    # baseline file: a later request for it — which is exactly what happens if
+    # the immutable header goes away — makes the gap negative and this
+    # assertion fails for a reason that is nothing to do with the debounce.
+    landed = [r["end"] for r in probe.images(path_of(0))
+              if r["end"] is not None and r["end"] <= warm_began]
+    assert landed, "the current pair should have finished before anything is warmed"
+
+    gap = warm_began - max(landed)
+    # Read from PREFETCH_TUNING rather than restated: a retune to 240ms is the
+    # author's to make and must move this expectation, not fail it. The 20%
+    # slack is for the timer firing late, never early.
+    #
+    # Scaling to the knob does mean `delayMs: 0` makes this assertion vacuous.
+    # That floor is held elsewhere and deliberately: //:test_prefetch_policy
+    # asserts `delayMs > 0` ("prefetching must be debounced"), so between them
+    # one test says a debounce must exist and this one says the configured
+    # value is honoured. Checked — `delayMs: 0` is red over there.
+    expected = TUNING["delayMs"] / 1000
+    assert gap >= expected * 0.8, \
         f"the warm began {gap:.3f}s after the current pair landed; the debounce " \
-        f"is meant to hold it for {0.25:.2f}s"
+        f"is meant to hold it for {expected:.2f}s"
 
     # Invisibly: the selection has not moved and nothing on screen shows the
     # warmed file. A prefetch the reviewer can see happening is a bug.
@@ -167,15 +215,21 @@ def test_the_previous_file_is_warmed_too(page, probe, base_url):
     open_pr(page, base_url, hash_suffix=f"#file_{start:02d}.png")
     wait_until(lambda: active_path(page) == path_of(start), "the deep link to select its file")
 
-    wait_until(lambda: len(probe.images(path_of(start - 1))) == 2,
-               "the file above to be warmed")
-    wait_until(lambda: len(probe.images(path_of(start + 1))) == 2,
-               "the file below to be warmed")
+    above, below = f"file_{start - 1:02d}", f"file_{start + 1:02d}"
+
+    def issued(name: str) -> list[int]:
+        return [i for i, url in enumerate(issued_requests(page)) if name in url]
+
+    wait_until(lambda: len(issued(above)) == 2, "both sides of the file above to be warmed")
+    wait_until(lambda: len(issued(below)) == 2, "both sides of the file below to be warmed")
 
     # Next before previous, so a reader going forwards never waits on a warm
-    # they did not ask for.
-    assert (min(r["start"] for r in probe.images(path_of(start + 1)))
-            < min(r["start"] for r in probe.images(path_of(start - 1)))), \
+    # they did not ask for. Read off the renderer's issue order, not the
+    # fixture's arrival times: the fixture stamps `start` inside a handler
+    # thread, so four near-simultaneous requests are ordered by the OS
+    # scheduler and a sub-millisecond margin means nothing. One run had the
+    # two 325 microseconds apart, the wrong way round.
+    assert min(issued(below)) < min(issued(above)), \
         "the next file should be requested before the previous one"
 
 
@@ -187,20 +241,45 @@ def test_a_fast_scroll_does_not_pile_up_transfers(page, probe, base_url):
     the last one's transfers. The debounce is not what this measures — with it
     removed the scroll issued the identical 22 requests, because a file passed
     through never finishes rendering and so never reaches the code that arms a
-    prefetch at all. The debounce is pinned by the timing assertion in the first
-    test instead.
+    prefetch at all. The debounce is pinned by the timing assertion in the
+    first test instead.
     """
     open_pr(page, base_url)
     probe.reset()
 
+    # Sampled during the scroll, not after it, and for two reasons. It is the
+    # positive control on the instrument: an upper bound of "<= 2 racing" is
+    # satisfied by any reader that under-reports, `return []` included, so
+    # without this the test's own measuring device is unpinned. And a mid-scroll
+    # sample is the only place the races actually exist.
+    high_water = 0
     for _ in range(FILE_COUNT - 1):
         page.keyboard.press("j")
         page.wait_for_timeout(75)
+        high_water = max(high_water, len(probe.in_flight()))
 
     assert active_path(page) == path_of(FILE_COUNT - 1)
-    in_flight = probe.in_flight()
-    assert len(in_flight) <= 2, \
-        f"{len(in_flight)} transfers still racing after the scroll: {in_flight}"
+    assert high_water >= 1, \
+        "the in-flight reader never saw a single transfer during a scroll of " \
+        f"{FILE_COUNT - 1} files, so it cannot bound anything"
+
+    # Bounded re-sample rather than one reading. An aborted transfer stays open
+    # in the log until the fixture's next write into that socket raises, which
+    # is up to a slice-time later — so a single sample taken the instant the
+    # scroll stops counts the previous file's pair as still racing when the
+    # browser has already cancelled it. What is being asserted is that they
+    # drain, not that the server has already noticed.
+    wait_until(lambda: len(probe.in_flight()) <= 2,
+               "the racing transfers to drain to the landed pair",
+               timeout=SLOW_IMAGE * 4)
+
+    # The other half of the bound: the scroll really did issue the traffic it
+    # was supposed to, so "<= 2 left" is not the emptiness of a scroll that
+    # never happened.
+    issued = probe.images()
+    assert len(issued) >= 2 * (FILE_COUNT - 1), \
+        f"a scroll through {FILE_COUNT - 1} files should have issued at least " \
+        f"{2 * (FILE_COUNT - 1)} requests, saw {len(issued)}"
 
     wait_until(lambda: rendered_image_count(page) == 2, "the landed file to render")
 
@@ -264,9 +343,9 @@ def test_a_renamed_file_is_warmed_at_its_previous_path(page, probe, base_url):
     open_pr(page, base_url, hash_suffix=f"#file_{RENAMED_INDEX - 1:02d}.png")
     wait_until(lambda: active_path(page) == path_of(RENAMED_INDEX - 1), "the file above the rename")
 
-    warmed = wait_until(lambda: probe.images(f"{RENAMED_INDEX:02d}.png"),
-                        "the renamed file to be warmed")
-    by_ref = {r["ref"]: r["path"] for r in warmed}
+    wait_until(lambda: len(probe.images(f"{RENAMED_INDEX:02d}.png")) == 2,
+               "both sides of the renamed file to be warmed")
+    by_ref = {r["ref"]: r["path"] for r in probe.images(f"{RENAMED_INDEX:02d}.png")}
     assert by_ref.get(BASE_REF) == f"shots/old_name_{RENAMED_INDEX:02d}.png", \
         f"the base side should be warmed at the previous path, got {by_ref}"
     assert by_ref.get(HEAD_REF) == path_of(RENAMED_INDEX), \

@@ -21,9 +21,14 @@ a write into a half-delivered response raises, and the record is closed with
 import json
 import os
 import struct
+import sys
 import threading
 import time
 import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app import _image_cache_control  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -58,13 +63,15 @@ class FixtureState:
         self.file_count = file_count
         self.renamed_index = renamed_index
         self.image_delay = 0.30       # seconds spread across the response body
-        # Mirrors what app.py serves for a sha-addressed image. This is not a
-        # detail: the SPA never displays the Image objects it decodes — every
-        # comparison mode builds fresh <img> elements from `state.baseImg.src`
-        # — so the pixels on screen come out of the HTTP cache. Serve these
-        # `no-store` and "renders from memory" stops working altogether, which
-        # is how this fixture found out.
-        self.cache_control = "private, max-age=31536000, immutable"
+        # Asked of app.py rather than copied from it. The SPA never displays
+        # the Image objects it decodes — every comparison mode builds fresh
+        # <img> elements from `state.baseImg.src` — so the pixels on screen
+        # come out of the HTTP cache, and this header is load-bearing for the
+        # feature rather than a nicety. Serve these `no-store` and "renders
+        # from memory" stops working altogether, which is how the fixture
+        # found out. A hard-coded copy would go on asserting that about a
+        # header production had stopped sending.
+        self.cache_control = _image_cache_control(HEAD_REF)
         self.log: list[dict] = []
         self.lock = threading.Lock()
         self.t0 = time.monotonic()
@@ -165,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
         seed = (zlib.crc32(img_path.encode()) % 200) + (7 if ref == HEAD_REF else 0)
         body = png_bytes(seed)
 
+        aborted = False
         try:
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
@@ -186,10 +194,15 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(pause)
                 self.wfile.write(body[off:off + step])
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            self.state.close_record(rec, aborted=True)
-            return
-        self.state.close_record(rec)
+        except OSError:
+            # Any failure to write is the client having gone: a bare OSError or
+            # a ConnectionAbortedError counts as much as a BrokenPipeError. The
+            # close must also happen on an error nobody anticipated, because a
+            # record left open reads as a transfer racing forever and surfaces
+            # as an unrelated wait_until timeout somewhere else.
+            aborted = True
+        finally:
+            self.state.close_record(rec, aborted=aborted)
 
 
 def serve(file_count: int, index_html_path: str,

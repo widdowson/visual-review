@@ -6,6 +6,7 @@ Kept out of the test module so that the assertions there read as assertions.
 import glob
 import json
 import os
+import re
 import time
 import urllib.request
 
@@ -21,28 +22,69 @@ def find_chromium() -> str | None:
     None outside Bazel so the file can also be run against a locally installed
     browser while developing.
     """
-    tree = os.environ.get("BAZEL_PLAYWRIGHT_CHROMIUM")
-    if not tree:
+    rlocation = os.environ.get("BAZEL_PLAYWRIGHT_CHROMIUM")
+    if not rlocation:
         return None
-    runfiles = os.environ.get("RUNFILES_DIR", "")
-    if runfiles and not os.path.isabs(tree):
-        tree = os.path.join(runfiles, tree)
-    for pattern in ("**/headless_shell", "**/chrome-headless-shell", "**/chrome"):
-        for hit in glob.glob(os.path.join(tree, pattern), recursive=True):
-            if os.access(hit, os.X_OK) and not os.path.isdir(hit):
-                return hit
+
+    # RUNFILES_DIR is absent under a manifest-only runfiles tree (which is what
+    # --nobuild_runfile_links gives you). Falling back to TEST_SRCDIR keeps the
+    # failure about the browser rather than about the variable.
+    roots = [r for r in (os.environ.get("RUNFILES_DIR"),
+                         os.environ.get("TEST_SRCDIR")) if r]
+    trees = [rlocation] if os.path.isabs(rlocation) else [
+        os.path.join(root, rlocation) for root in roots] or [rlocation]
+
+    for tree in trees:
+        for pattern in ("**/headless_shell", "**/chrome-headless-shell", "**/chrome"):
+            for hit in glob.glob(os.path.join(tree, pattern), recursive=True):
+                if os.access(hit, os.X_OK) and not os.path.isdir(hit):
+                    return hit
     raise AssertionError(
-        f"BAZEL_PLAYWRIGHT_CHROMIUM is set but no browser binary was found under {tree}")
+        "BAZEL_PLAYWRIGHT_CHROMIUM is set but no browser binary was found under "
+        + " or ".join(trees))
+
+
+def repo_file(*parts: str) -> str:
+    """A path to a file at the repo root, under Bazel runfiles or a checkout."""
+    for root in (os.environ.get("RUNFILES_DIR"), os.environ.get("TEST_SRCDIR")):
+        if root:
+            candidate = os.path.join(root, "_main", *parts)
+            if os.path.exists(candidate):
+                return candidate
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(here, *parts)
 
 
 def index_html_path() -> str:
-    runfiles = os.environ.get("RUNFILES_DIR", "")
-    if runfiles:
-        candidate = os.path.join(runfiles, "_main", "static", "index.html")
-        if os.path.exists(candidate):
-            return candidate
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(here, "static", "index.html")
+    return repo_file("static", "index.html")
+
+
+def prefetch_tuning() -> dict[str, int]:
+    """PREFETCH_TUNING, read out of the marked region of static/index.html.
+
+    So a test can state the debounce's contract without restating its value.
+    A retune to 240ms is a judgement call the author is allowed to make, and it
+    must move this test's expectation with it rather than failing it.
+
+    Comments are stripped first and each key must appear exactly once, for the
+    reason tests/spa_source.js carries the same rule: a commented-out previous
+    value sitting above a live one otherwise reads as the live one.
+    """
+    src = open(index_html_path(), encoding="utf-8").read()
+    begin = src.index("prefetch-policy:begin")
+    end = src.index("prefetch-policy:end")
+    region = re.sub(r"//.*$", "", src[begin:end], flags=re.M)
+
+    body = re.search(r"PREFETCH_TUNING\s*=\s*\{(.*?)\}", region, re.S)
+    assert body, "static/index.html must define a PREFETCH_TUNING object literal"
+
+    tuning = {}
+    for key, value in re.findall(r"(\w+)\s*:\s*(\d+)", body.group(1)):
+        assert key not in tuning, f"PREFETCH_TUNING.{key} is declared twice"
+        tuning[key] = int(value)
+    assert set(tuning) == {"ahead", "behind", "delayMs", "cacheRadius"}, \
+        f"PREFETCH_TUNING changed shape: {sorted(tuning)}"
+    return tuning
 
 
 class Probe:
@@ -50,14 +92,20 @@ class Probe:
 
     def __init__(self, base_url: str):
         self.base = base_url
+        # An explicitly empty ProxyHandler, because the module-level urlopen
+        # honours http_proxy from the environment. Bazel scrubs those today, so
+        # this is latent rather than broken — but a --test_env or an
+        # --action_env on some future runner would send a loopback probe to a
+        # proxy, and the failure would look like the fixture being broken.
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def log(self) -> list[dict]:
-        with urllib.request.urlopen(self.base + "/__probe/log", timeout=10) as r:
+        with self.opener.open(self.base + "/__probe/log", timeout=10) as r:
             return json.load(r)
 
     def reset(self) -> None:
         req = urllib.request.Request(self.base + "/__probe/reset", method="POST", data=b"")
-        urllib.request.urlopen(req, timeout=10).read()
+        self.opener.open(req, timeout=10).read()
 
     def images(self, path_fragment: str = "") -> list[dict]:
         return [r for r in self.log()
@@ -119,6 +167,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
 def load_starts(page) -> int:
     return page.evaluate("window.__vrLoads || 0")
+
+
+def issued_requests(page) -> list[str]:
+    """Every URL the renderer has asked for, in the order it asked.
+
+    The round-trip is not decoration. Playwright's sync API dispatches queued
+    CDP events only when the main thread calls into it, and the waits in these
+    tests poll the fixture over HTTP rather than the page — so without a call
+    into Playwright the listener's list stays empty however long you wait, and
+    an ordering assertion reads it as "the page never requested that".
+    """
+    page.evaluate("0")
+    return list(page.vr_requests)
 
 
 def active_path(page) -> str | None:

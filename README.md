@@ -58,8 +58,22 @@ node tests/test_image_urls.js
 `//:test_spa_prefetch` drives the real SPA in a browser, against a fake backend
 (`tests/fixture_server.py`) rather than GitHub. Chromium is hermetic — Bazel
 downloads it, pinned in `MODULE.bazel` to the build matching the `playwright`
-pin in `requirements_lock.txt`, so the two must move together. Nothing needs to
-be installed and `playwright install` must not be run.
+pin in `requirements_lock.txt`. Those two must move together, and the test
+asserts it rather than trusting this paragraph. Nothing needs to be installed
+and `playwright install` must not be run.
+
+**Which Linux build it fetches is a build flag, not autodetection.**
+`@rules_playwright//:linux_distro` defaults to `ubuntu24.04`, so on Debian 12
+or Ubuntu 22.04 Bazel will fetch a shell built for the wrong distro and the
+failure surfaces as an opaque browser launch error. Pass the right one:
+
+```bash
+bazel test //... --@rules_playwright//:linux_distro=debian12
+```
+
+Accepted values are `debian11`, `debian12`, `ubuntu20.04`, `ubuntu22.04` and
+`ubuntu24.04`. CI pins `runs-on: ubuntu-24.04` so the runner and the default
+cannot drift apart.
 
 To poke at the fixture by hand, serve it and open the URL it prints:
 
