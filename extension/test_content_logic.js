@@ -1,6 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { loadExtensions } = require('./content_source');
 
 const runfiles = process.env.RUNFILES_DIR || '';
 
@@ -35,14 +36,25 @@ for (const [ext, mime] of Object.entries(extMime)) {
 }
 
 // ── Test: hasImageExtension logic ───────────────────────────────────────────
+//
+// The real function out of content.js, not a copy of it. This file used to
+// hold its own, which would have kept passing after content.js started
+// matching against a list fetched from the server.
+//
+// ensureExtensions is deliberately never called here, so the function matches
+// against the bundled list — which is what the cases below are about. The
+// fetch stub throws to make reaching the network a failure rather than a
+// silent read; test_extensions_fetch.js is where the fetched list is
+// exercised.
 
-function hasImageExtension(filePath) {
-  var lower = filePath.toLowerCase();
-  for (var i = 0; i < IMAGE_EXTENSIONS.length; i++) {
-    if (lower.endsWith(IMAGE_EXTENSIONS[i])) return true;
-  }
-  return false;
-}
+const { hasImageExtension } = loadExtensions({
+  IMAGE_EXTENSIONS: IMAGE_EXTENSIONS,
+  VR_BASE_URL: 'https://vr.invalid',
+  fetch: () => { throw new Error('test_content_logic must not reach the network'); },
+  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  Date: Date,
+  console: console,
+});
 
 // Positive cases
 assert.ok(hasImageExtension('screenshots/test.png'), '.png should match');

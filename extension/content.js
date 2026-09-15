@@ -1,7 +1,9 @@
 // Visual Review — Chrome extension content script for GitHub
 //
-// Adds "Visual Review" links to open PRs that contain image files
-// (.png, .bmp, .jpg, .jpeg). Works on PR list and PR detail pages.
+// Adds "Visual Review" links to open PRs that contain image files. Which
+// extensions count is the server's answer, fetched from /api/extensions and
+// cached; see the vr:extensions region below. Works on PR list and PR detail
+// pages.
 //
 // Goggles icon: Font Awesome Free (CC BY 4.0) — fa-vr-cardboard
 
@@ -31,13 +33,107 @@
   const MAX_FILES = 100;
   const OWNER_FILTER = 'widdowson';
 
+  /* ─── Supported image extensions ─── */
+  //
+  // The server owns the list. IMAGE_EXTENSIONS is the copy baked into this
+  // bundle at build time from image_extensions.json, and it is what the
+  // extension matches against until the server's answer arrives — and
+  // whatever happens, if that answer never does. So a format added on the
+  // server reaches an already-installed extension without a rebuild, and a
+  // server that is down, blocked or answering nonsense leaves the extension
+  // behaving exactly as it did before this was added.
+  //
+  // The region below is marked because extension/test_extensions_fetch.js
+  // extracts and runs this source rather than keeping its own copy of it.
+  //
+  // vr:extensions:begin
+  var EXT_CACHE_KEY = 'vr_image_extensions';
+  var EXT_CACHE_DURATION_MS = 24 * 60 * 60 * 1000;
+
+  var _extensions = IMAGE_EXTENSIONS.slice();
+  var _extensionsPromise = null;
+
+  // Returns the list to adopt, or null to keep the one we have. An empty array
+  // is rejected rather than adopted: it is what a half-configured server would
+  // answer, and adopting it would stop the extension matching anything at all
+  // — which on a PR page is indistinguishable from "this PR has no images",
+  // so nobody would notice the links had quietly stopped appearing.
+  function normalizeExtensions(value) {
+    if (!Array.isArray(value) || value.length === 0) return null;
+    var out = [];
+    for (var i = 0; i < value.length; i++) {
+      var ext = value[i];
+      if (typeof ext !== 'string') return null;
+      if (ext.length < 2 || ext.charAt(0) !== '.') return null;
+      out.push(ext.toLowerCase());
+    }
+    return out;
+  }
+
+  function readCachedExtensions() {
+    try {
+      var raw = localStorage.getItem(EXT_CACHE_KEY);
+      if (!raw) return null;
+      var entry = JSON.parse(raw);
+      if (!entry || typeof entry.ts !== 'number') return null;
+      if (Date.now() - entry.ts > EXT_CACHE_DURATION_MS) return null;
+      return normalizeExtensions(entry.extensions);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeCachedExtensions(list) {
+    try {
+      localStorage.setItem(EXT_CACHE_KEY,
+        JSON.stringify({ extensions: list, ts: Date.now() }));
+    } catch (e) {}
+  }
+
+  // Memoized: one fetch per page however many PR rows ask, since a list page
+  // calls prHasImageFiles once per row. A failure memoizes the bundled list
+  // too, so an unreachable server costs one request rather than one per row.
+  //
+  // credentials:'omit' because the endpoint needs no auth and this runs on
+  // github.com — there is no reason to send cookies to a third-party host.
+  function ensureExtensions() {
+    if (_extensionsPromise) return _extensionsPromise;
+
+    var cached = readCachedExtensions();
+    if (cached) {
+      _extensions = cached;
+      _extensionsPromise = Promise.resolve(cached);
+      return _extensionsPromise;
+    }
+
+    _extensionsPromise = fetch(VR_BASE_URL + '/api/extensions', { credentials: 'omit' })
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function(data) {
+        var list = normalizeExtensions(data && data.extensions);
+        if (!list) throw new Error('malformed /api/extensions response');
+        _extensions = list;
+        writeCachedExtensions(list);
+        return list;
+      })
+      .catch(function(e) {
+        console.warn('[VR] Using the bundled image extensions:', e);
+        return _extensions;
+      });
+
+    return _extensionsPromise;
+  }
+
   function hasImageExtension(path) {
     var lower = path.toLowerCase();
-    for (var i = 0; i < IMAGE_EXTENSIONS.length; i++) {
-      if (lower.endsWith(IMAGE_EXTENSIONS[i])) return true;
+    for (var i = 0; i < _extensions.length; i++) {
+      if (lower.endsWith(_extensions[i])) return true;
     }
     return false;
   }
+  // vr:extensions:end
 
   /* ─── Cache helpers ─── */
 
@@ -68,6 +164,10 @@
   async function prHasImageFiles(owner, repo, prNumber) {
     const cached = getCachedResult(owner, repo, prNumber);
     if (cached === true) return true;
+
+    // Every caller reaches hasImageExtension through here, so this one await
+    // covers the list page, the detail page and the hovercard.
+    await ensureExtensions();
 
     try {
       const resp = await fetch('/' + owner + '/' + repo + '/pull/' + prNumber + '/files', {

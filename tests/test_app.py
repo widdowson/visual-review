@@ -65,6 +65,99 @@ class TestVisualReviewPage:
         assert "text/html" in resp.headers.get("content-type", "")
 
 
+# -- Supported extensions endpoint --------------------------------------------
+
+class TestExtensionsEndpoint:
+    @pytest.mark.asyncio
+    async def test_returns_the_servers_own_list(self):
+        """The endpoint is the same list the server matches with.
+
+        Asserted against ``_EXT_MIME`` rather than a literal, so adding a
+        format to image_extensions.json does not need this test edited — and
+        so an endpoint that answered a hardcoded list of its own would fail
+        here, which is the whole defect this endpoint exists to remove.
+        """
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"extensions": list(_EXT_MIME.keys())}
+
+    @pytest.mark.asyncio
+    async def test_every_entry_is_a_lowercase_dotted_extension(self):
+        """The shape the browser extension validates against before adopting it."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        extensions = resp.json()["extensions"]
+        assert extensions, "an empty list is rejected by the client, so never serve one"
+        for ext in extensions:
+            assert isinstance(ext, str)
+            assert ext.startswith("."), ext
+            assert len(ext) >= 2, ext
+            assert ext == ext.lower(), ext
+
+    @pytest.mark.asyncio
+    async def test_needs_no_github_token(self):
+        """Every other API endpoint degrades without a token; this one must not."""
+        with patch("app.GITHUB_TOKEN", ""):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/extensions")
+
+        assert resp.status_code == 200
+        assert resp.json()["extensions"] == list(_EXT_MIME.keys())
+
+    @pytest.mark.asyncio
+    async def test_is_publicly_cacheable(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        cache_control = resp.headers.get("cache-control", "")
+        assert "public" in cache_control, cache_control
+        assert "max-age=" in cache_control, cache_control
+
+    @pytest.mark.asyncio
+    async def test_answers_cross_origin(self):
+        """Load-bearing, not incidental.
+
+        The browser extension reads this from a content script running on
+        github.com. A Manifest V3 content script's fetch carries the page's
+        origin and is subject to CORS, and ``host_permissions`` cannot exempt
+        it — that moved to the service worker in V3 — so losing this header
+        makes the endpoint unreachable from the only client it has.
+        """
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(
+                "/api/extensions", headers={"Origin": "https://github.com"}
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
+    @pytest.mark.asyncio
+    async def test_is_not_shadowed_by_the_short_url_route(self):
+        """``/api/extensions`` is two segments and the dynamic routes are three
+        or more, so nothing should claim it first. Pinned because the route
+        that resolves a short identifier is registered ahead of it and a
+        future ``/{identifier}/{thing}`` pattern would silently take it.
+        """
+        route_paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/api/extensions" in route_paths
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        # A short-URL match would 404 or redirect rather than answer the list.
+        assert resp.status_code == 200
+        assert "extensions" in resp.json()
+
+
 # -- PR images endpoint -------------------------------------------------------
 
 class TestPrImages:

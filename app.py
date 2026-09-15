@@ -245,6 +245,32 @@ async def short_url_redirect(identifier: str, number: int):
 
 # -- API endpoints -------------------------------------------------------------
 
+@app.get("/api/extensions")
+async def supported_extensions():
+    """The image extensions this server understands.
+
+    Exists so a client does not have to keep its own copy of the list. The
+    browser extension reads this instead of the copy baked into its bundle, so
+    a format added to ``image_extensions.json`` reaches an already-installed
+    extension without anyone rebuilding and reloading it.
+
+    ``public`` rather than the ``private`` the proxied images use: this answer
+    is derived from a file in the image, not from any repository or token, so
+    it is the same for every caller and there is nothing to keep an
+    intermediary from holding.
+
+    The CORS header the middleware adds is part of the contract rather than
+    incidental. A Manifest V3 content script's ``fetch`` carries the page's
+    origin (github.com) and is subject to CORS — ``host_permissions`` cannot
+    exempt it, that moved to the service worker in V3 — so this endpoint is
+    reachable from the extension only while it answers cross-origin.
+    """
+    return JSONResponse(
+        content={"extensions": list(IMAGE_EXTENSIONS)},
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/api/{owner}/{repo}/pr/{number}/images")
 async def pr_images(owner: str, repo: str, number: int):
     """List all changed image files in a PR."""
