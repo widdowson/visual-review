@@ -38,10 +38,13 @@ assert.ok(tuning.cacheRadius >= 1, 'the retained window must extend beyond the c
 
 // The SPA must actually feed the tuning to the policy; the plan cases below
 // all pass explicit arguments, so none of them would notice a hard-coded 0.
+// Each knob is matched with the option it fills, not on its own: with bare
+// tokens, `ahead: PREFETCH_TUNING.behind` keeps both present and passes.
 const runPrefetchBody = bodyOf('runPrefetch');
-for (const key of ['ahead', 'behind', 'cacheRadius']) {
-  assert.ok(new RegExp('PREFETCH_TUNING\\s*\\.\\s*' + key + '\\b').test(runPrefetchBody),
-    'runPrefetch must pass PREFETCH_TUNING.' + key + ' to the policy');
+for (const [option, key] of [['ahead', 'ahead'], ['behind', 'behind'], ['radius', 'cacheRadius']]) {
+  assert.ok(
+    new RegExp(option + '\\s*:\\s*PREFETCH_TUNING\\s*\\.\\s*' + key + '\\b').test(runPrefetchBody),
+    'runPrefetch must pass PREFETCH_TUNING.' + key + ' as the policy\'s ' + option);
 }
 assert.ok(/PREFETCH_TUNING\s*\.\s*delayMs\b/.test(bodyOf('schedulePrefetch')),
   'schedulePrefetch must use PREFETCH_TUNING.delayMs');

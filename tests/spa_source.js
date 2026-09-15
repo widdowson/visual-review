@@ -73,10 +73,27 @@ function extract(name, exportName) {
 // `function` keyword to its matching close brace. Used for structural checks
 // on code that touches the DOM and so cannot be extracted and run.
 //
-// Brace-matched rather than indentation-matched: an earlier version looked for
-// a `}` at a fixed indent, so reindenting a function made the capture run on
-// into the next one and a deleted call was then satisfied by the following
-// function's own declaration line — a green run over a real defect.
+// The brace walk is deliberately naive — it counts braces over comment-stripped
+// text with no idea of strings or regex literals, and `stripComments` is itself
+// line-oriented and blind to a `//` inside a string. Two earlier versions tried
+// to infer the boundary better (a fixed indent, then these braces) and each was
+// wrong in a way that turned a caught defect into a green run: the capture ran
+// past the function's end, and the call the check demanded was then satisfied
+// by the *next* function's declaration line.
+//
+// So this does not try a third inference. It checks the answer instead: a
+// correct capture is exactly one function expression and parses as one, while
+// every over-capture drags in a following statement and every under-capture
+// leaves a brace or a quote open. Both fail here, whatever went wrong upstream.
+// A string- and regex-aware lexer would cost more in test-support code than the
+// guard does, and would still need checking.
+//
+// It is conservative, and that is the trade: a captured function containing a
+// `//` inside a string, or an unbalanced brace in a string or regex literal,
+// fails here even with nothing wrong in the SPA. That is a loud failure naming
+// this helper rather than a silent pass over a real defect, which is the way
+// round it should be — but if you hit it while editing one of the captured
+// functions, the code is probably fine and this file is what needs teaching.
 function bodyOf(name) {
   const at = htmlWithoutComments.indexOf('function ' + name + '(');
   assert.ok(at >= 0, 'static/index.html must define ' + name);
@@ -90,9 +107,19 @@ function bodyOf(name) {
   for (let i = open; i < htmlWithoutComments.length; i++) {
     const c = htmlWithoutComments[i];
     if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) return htmlWithoutComments.slice(at, i + 1);
+    else if (c === '}' && --depth === 0) return checked(name, htmlWithoutComments.slice(at, i + 1));
   }
-  assert.fail(name + ' has no matching close brace');
+  return assert.fail(name + ' has no matching close brace');
 }
 
-module.exports = { extract, bodyOf, stripComments, html };
+function checked(name, body) {
+  try {
+    new Function('return (' + body + ');');
+  } catch (err) {
+    assert.fail('bodyOf(' + name + ') did not capture exactly one function — ' +
+      'the brace walk ran past its end or stopped short: ' + err.message);
+  }
+  return body;
+}
+
+module.exports = { extract, bodyOf };

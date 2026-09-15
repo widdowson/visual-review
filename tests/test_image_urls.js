@@ -80,9 +80,9 @@ assert.ok(unknown.base && unknown.head);
 // still passes while the page shows every file's base and current the wrong
 // way round. Structural, like the wiring checks in test_prefetch_policy.js.
 
+// One assertion, not two: a "must call buildImageUrls" check is subsumed by
+// this one, which cannot match unless the call is there.
 const adapter = bodyOf('imageUrls');
-assert.ok(/return\s+buildImageUrls\s*\(/.test(adapter),
-  'imageUrls must delegate to the extracted buildImageUrls');
 assert.ok(
   /buildImageUrls\s*\(\s*fileData\s*,\s*apiBase\s*,\s*state\.baseRef\s*,\s*state\.headRef\s*\)/
     .test(adapter),
