@@ -1,2 +1,5 @@
 pytest>=8.0
 pytest-asyncio>=1.0
+# Pinned exactly: the hermetic browser build in MODULE.bazel is 1.57.0,
+# and Playwright refuses a browser whose revision it does not expect.
+playwright==1.57.0

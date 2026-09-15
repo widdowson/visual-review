@@ -10,6 +10,7 @@ bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.2.0")
 bazel_dep(name = "aspect_rules_py", version = "1.9.1")
 bazel_dep(name = "rules_python", version = "1.9.0")
+bazel_dep(name = "rules_playwright", version = "0.5.3")
 
 # ── Python toolchain ─────────────────────────────────────────────────────────
 
@@ -35,3 +36,23 @@ oci.pull(
     platforms = ["linux/amd64"],
 )
 use_repo(oci, "python_slim", "python_slim_linux_amd64")
+
+# ── Playwright browser binaries ──────────────────────────────────────────────
+# Hermetic Chromium for the browser-driven SPA tests (#21). browsers.json must
+# match the playwright pip package version in requirements_lock.txt.
+#
+# Pinned to the 1.57.0 browsers because Playwright 1.58 changed the CDN URL
+# format (microsoft/playwright#38573) and rules_playwright 0.5.3 still builds
+# the old paths, which now 404 (mrmeku/rules_playwright#36).
+#
+# Depend on @playwright//:chromium-headless-shell specifically, never on
+# @playwright//... — the extension declares one http_file per browser per
+# platform, so a broad fetch pulls every mac and arm64 build too: about 7 GB
+# of archives this repo will never run. The single target selects the host
+# platform and fetches one.
+playwright = use_extension("@rules_playwright//playwright:extensions.bzl", "playwright")
+playwright.repo(
+    name = "playwright",
+    browsers_json = "//:browsers.1.57.0.json",
+)
+use_repo(playwright, "playwright")

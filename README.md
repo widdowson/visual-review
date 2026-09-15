@@ -55,6 +55,18 @@ node tests/test_image_urls.js
 `pytest tests/ -v` still works for the Python tests alone, but it misses every
 `js_test`, so it is not enough before pushing.
 
+`//:test_spa_prefetch` drives the real SPA in a browser, against a fake backend
+(`tests/fixture_server.py`) rather than GitHub. Chromium is hermetic — Bazel
+downloads it, pinned in `MODULE.bazel` to the build matching the `playwright`
+pin in `requirements_lock.txt`, so the two must move together. Nothing needs to
+be installed and `playwright install` must not be run.
+
+To poke at the fixture by hand, serve it and open the URL it prints:
+
+```bash
+python3 tests/fixture_server.py
+```
+
 ### Google Cloud Run
 
 The app is stateless and scales to zero, making Cloud Run an ideal deployment target — you only pay when someone is actively reviewing a PR.

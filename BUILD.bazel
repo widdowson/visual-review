@@ -6,6 +6,7 @@ load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 
 exports_files([
+    "browsers.1.57.0.json",
     "image_extensions.json",
     "requirements_lock.txt",
 ])
@@ -59,6 +60,41 @@ py_test(
         requirement("httpx"),
         requirement("pytest"),
         requirement("pytest-asyncio"),
+    ],
+)
+
+# Browser-driven tests for the SPA (#21). Everything the page does with state —
+# adopting an in-flight prefetch, aborting an abandoned load, the hashchange
+# re-entry guard — needs a DOM, so it cannot be reached by the extraction tests
+# below. This target drives the real page in hermetic Chromium against a fake
+# backend whose request log is what the assertions read.
+#
+# static/index.html is the code under test, so it is in data for the same
+# reason it is below: without it an index.html-only edit changes no input and
+# the target takes a cache hit instead of running.
+py_test(
+    name = "test_spa_prefetch",
+    size = "medium",
+    srcs = [
+        "tests/__init__.py",
+        "tests/fixture_server.py",
+        "tests/run_tests.py",
+        "tests/spa_harness.py",
+        "tests/test_spa_prefetch.py",
+    ],
+    args = ["tests/test_spa_prefetch.py"],
+    data = [
+        "static/index.html",
+        "@playwright//:chromium-headless-shell",
+    ],
+    env = {
+        "BAZEL_PLAYWRIGHT_CHROMIUM": "$(rlocationpath @playwright//:chromium-headless-shell)",
+    },
+    main = "tests/run_tests.py",
+    tags = ["browser"],
+    deps = [
+        requirement("playwright"),
+        requirement("pytest"),
     ],
 )
 
