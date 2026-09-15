@@ -3,9 +3,9 @@
 //
 // The anchor format is GitHub's, not ours, and it is the entire feature — get
 // the hash wrong and every link lands at the top of the Files tab, which looks
-// like it worked. So the first assertion below is GitHub's own published
-// worked example rather than a value read off our implementation, and the rest
-// check the digest against node's sha256 instead of against ghDiffUrl itself.
+// exactly like it worked. So the digest is checked against node's sha256
+// rather than against ghDiffUrl's own output, and the one hard-coded pair
+// below is sourced externally rather than read off our implementation.
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -23,9 +23,17 @@ async function main() {
 
 // ── GitHub's format ─────────────────────────────────────────────────────────
 
-// GitHub documents `src/index.js` as anchoring at this hash. Both halves of
-// the pair are theirs, so this fails if GitHub ever changes the scheme — which
-// is the point: nothing else in this repo would notice.
+// This pair — `src/index.js` and its anchor — comes from GitHub Community
+// Discussion #43908, answered by a community member in January 2023, not from
+// GitHub documentation; the format is undocumented. It is worth pinning
+// precisely because of that: a second community answer describes the anchor as
+// an *md5* of the path, so the scheme has evidently changed at least once.
+//
+// Note what this assertion can and cannot do. It freezes our output against
+// an externally sourced datum, so an edit here that quietly changes the scheme
+// is red. It cannot detect a change on GitHub's side — nothing in this repo
+// observes github.com — so if GitHub moves again, this test stays green and
+// the links go quietly wrong. Only a human clicking one finds that.
 assert.strictEqual(
   await ghDiffUrl('pallets', 'flask', 7, 'src/index.js'),
   'https://github.com/pallets/flask/pull/7/files' +
@@ -34,20 +42,22 @@ assert.strictEqual(
 
 // ── The digest ──────────────────────────────────────────────────────────────
 
-// Checked against node's own sha256 over the path's exact bytes, which pins
-// the two ways this silently goes wrong: hashing something other than the
-// path, and hashing the path plus a trailing newline.
+// Checked against node's own sha256 over the path's exact bytes. That pins
+// hashing the wrong bytes in general — a trailing newline, the owner or repo
+// mixed in, a different algorithm — without a case per way of being wrong.
 for (const path of [
   'django/apps/proofing/tests/visual/cuj_proofing_06_quota_chips.bmp',
   'a.png',
   'dir/sub/file name with spaces.png',
   'accénts/café.bmp',
+  // Mixed case, because the rest of this list is lower-case and a
+  // `path.toLowerCase()` regression would otherwise be invisible. The viewer
+  // renders such paths: nothing downcases a filename on the way in.
+  'django/apps/Proofing/tests/Visual/CUJ_Quota_Chips.BMP',
 ]) {
   const url = await ghDiffUrl(OWNER, REPO, PR, path);
   assert.strictEqual(anchorOf(url), 'diff-' + sha256(path),
     'the anchor for ' + path + ' must be sha256 of exactly that path');
-  assert.notStrictEqual(anchorOf(url), 'diff-' + sha256(path + '\n'),
-    'the path must be hashed without a trailing newline');
 }
 
 // Lower-case hex, zero-padded to two characters a byte. The first path above
@@ -85,9 +95,13 @@ assert.strictEqual(odd.split('#').length, 2,
 assert.ok(!/\s/.test(odd), 'no raw path characters in ' + odd);
 
 // ── The wiring ──────────────────────────────────────────────────────────────
-// Everything above tests the pure region; the SPA reaches it from
-// renderComparison, outside the region. Structural, like the wiring checks in
-// test_image_urls.js and test_prefetch_policy.js.
+// Everything above tests the region; the SPA reaches it from renderComparison,
+// outside the region. Structural, like the wiring checks in test_image_urls.js
+// and test_prefetch_policy.js, and with the same caveat: these match source
+// text, so they pin a shape rather than a behaviour. The variable's name is
+// read out of the source rather than spelled here, so renaming it is not a
+// failure — but its declaration and the guard's shape are both matched, and a
+// refactor that changes either has to come back here.
 
 const render = bodyOf('renderComparison');
 
@@ -98,18 +112,39 @@ assert.ok(/id="gh-diff-link-container"/.test(render),
 
 // The path is read once, up front, and passed in. Reading state.currentFile
 // inside the callback instead is the defect the capture exists to prevent.
-assert.ok(/var\s+linkPath\s*=\s*state\.currentFile\s*;/.test(render),
-  'renderComparison must capture the path before awaiting the digest');
-assert.ok(/ghDiffUrl\s*\(\s*owner\s*,\s*repo\s*,\s*prNumber\s*,\s*linkPath\s*\)/.test(render),
+const capture = /(?:var|let|const)\s+(\w+)\s*=\s*state\.currentFile\s*;/.exec(render);
+assert.ok(capture,
+  'renderComparison must capture state.currentFile into a local before awaiting the digest');
+const pathVar = capture[1];
+assert.ok(
+  new RegExp('ghDiffUrl\\s*\\(\\s*owner\\s*,\\s*repo\\s*,\\s*prNumber\\s*,\\s*' + pathVar + '\\s*\\)')
+    .test(render),
   'renderComparison must pass owner, repo, prNumber and the captured path');
 
 // And re-checked on arrival: a navigation during the digest rebuilds the bar
 // with a new container of the same id, so an unguarded write labels the file
 // now on screen with the anchor of the one we left.
-assert.ok(
-  /if\s*\(\s*linkPath\s*!==\s*state\.currentFile\s*\)\s*return\s*;/.test(render) ||
-  /if\s*\(\s*state\.currentFile\s*!==\s*linkPath\s*\)\s*return\s*;/.test(render),
+//
+// Ordered, not merely present. A guard sitting *after* the write restores the
+// bug completely, and a presence check stays green on that mutant — which is
+// this suite's own recorded failure mode: see the comments in spa_source.js on
+// three checks that a plausible edit turned into green runs.
+const guardAt = render.search(new RegExp(
+  'if\\s*\\(\\s*(?:' + pathVar + '\\s*!==\\s*state\\.currentFile' +
+  '|state\\.currentFile\\s*!==\\s*' + pathVar + ')\\s*\\)\\s*return\\s*;'));
+const writeAt = render.indexOf('container.innerHTML');
+assert.ok(guardAt >= 0,
   'renderComparison must drop a digest that arrived after the viewer moved on');
+assert.ok(writeAt >= 0, 'renderComparison must write the link into the container');
+assert.ok(guardAt < writeAt,
+  'the staleness guard must run before the link is written, not after it');
+
+// The href is interpolated into an attribute, so it goes through escAttr. Not
+// exploitable as things stand — every component is encodeURIComponent'd and
+// the hash is hex — but encodeURIComponent leaves a single quote alone, so
+// without escAttr the write's safety rests on the attribute's quoting alone.
+assert.ok(/escAttr\s*\(\s*ghUrl\s*\)/.test(render),
+  'the url must be escaped before it is interpolated into the href');
 
 // A missing SubtleCrypto rejects; unhandled, that is a console error per file.
 assert.ok(/\.catch\s*\(/.test(render),

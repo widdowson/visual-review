@@ -868,7 +868,11 @@
         // ── image-urls:end ───────────────────────────────────────────────────
 
         // ── gh-diff-link:begin ───────────────────────────────────────────────
-        // Pure function: where a file sits in the GitHub PR diff (issue #15).
+        // Where a file sits in the GitHub PR diff (issue #15). Deterministic
+        // and DOM-free, so the tests can drive it — though not pure in the
+        // sense tests/spa_source.js checks for: it needs Web Crypto, which
+        // that helper's IMPURE list does not cover and should not, since the
+        // digest is the same in node as in a browser.
         // GitHub anchors a file in the Files tab as `#diff-<sha256 of the
         // file's path, lower-case hex>` — the path alone, with no trailing
         // newline and nothing about the repository or the PR mixed in. That
@@ -1163,11 +1167,13 @@
                 var container = document.getElementById('gh-diff-link-container');
                 if (!container) return;
                 container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) +
-                    '" target="_blank" title="View this file in the GitHub PR diff">GitHub diff</a>';
+                    '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
             }).catch(function(err) {
-                // SubtleCrypto is unavailable outside a secure context. Losing
-                // a convenience link there is the whole cost; without this the
-                // page also reports an unhandled rejection for every file.
+                // Anything from here: the digest itself (there is no
+                // SubtleCrypto outside a secure context, where an unhandled
+                // rejection was reported once per file) or the write above it.
+                // Either way the rest of the bar stands and only the link is
+                // lost, which is the right trade for a convenience link.
                 console.warn('visual-review: no GitHub diff link for this file', err);
             });
 
