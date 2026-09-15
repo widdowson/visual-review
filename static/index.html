@@ -343,16 +343,23 @@
         .renamed-label .renamed-arrow { color: var(--vr-accent); margin: 0 6px; }
         /* A rename that also changed the image keeps the comparison modes, so
            the viewport has to stack the label above them — its default row
-           direction would put the two side by side. Both of the other two
-           properties are restated because turning the column on swaps which
-           axis each governs: the viewport's own `justify-content: center` would
-           otherwise centre the modes vertically rather than horizontally. And
-           the children do not shrink — the viewport scrolls, and a squashed
-           capture is the one thing a visual review must not show. */
+           direction would put the two side by side. Turning the column on
+           swaps which axis each of the other two properties governs, so both
+           are set to the opposite of the viewport's own value: its
+           `justify-content: center` would otherwise centre the modes
+           vertically rather than horizontally, and its `align-items:
+           flex-start` would left-align them.
+
+           Nothing here constrains the children. A `flex-shrink: 0` was tried
+           and measured inert — a flex item's automatic minimum size is
+           content-based here, so nothing could squash them in the first place
+           — and the `max-width: 100%` beside it made the wide case worse
+           rather than safer, clamping the wrapper while its contents
+           overflowed it: 1192px of horizontal scroll against 1106px without.
+           Measured on 600x3000 and 2400x400 pairs in all four modes. */
         .viewport.with-rename-label {
             flex-direction: column; justify-content: flex-start; align-items: center;
         }
-        .viewport.with-rename-label > * { flex-shrink: 0; max-width: 100%; }
 
         /* Keyboard shortcut hint pill */
         .kbd-hint {
@@ -1119,17 +1126,40 @@
         // changes on exactly the files the comparison modes exist for.
         //
         // The decision is made from the pixels instead, which is the question a
-        // reviewer is actually asking. `rowMap` is a per-row difference map of
-        // the two sides; all-false means they are the same image and there is
-        // genuinely nothing to compare. Anything else keeps the modes —
-        // including a map that could not be computed at all, because a side is
-        // missing or zero-sized. That direction is deliberate: failing to prove
-        // two images identical must never be read as proof that they are.
+        // reviewer is actually asking. Anything short of a proven match keeps
+        // the modes — including a map that could not be computed at all,
+        // because a side is missing or zero-sized. That direction is
+        // deliberate: failing to prove two images identical must never be read
+        // as proof that they are.
+        //
+        // Proving it takes two checks, not one, because a row map alone cannot
+        // do it. `computeRowDiffMap` draws both sides onto a canvas sized to
+        // the larger of the two in each dimension, so the region a smaller
+        // image does not cover reads back as transparent black — which is
+        // indistinguishable from opaque black on the three channels the map
+        // compares. Measured in Chromium against these very functions: a
+        // 200x100 all-black image against a 200x160 all-black one came back
+        // `single`, as did 300x100 against 200x100. The dimensions are
+        // therefore checked first, structurally, before any pixel is read.
+        // (The same measurement is why the map is asked to compare alpha here:
+        // a fully transparent image against a solid black one of the same size
+        // also came back `single`, and PNG is a format this tool serves.)
         //
         // Extracted verbatim by tests/test_rename_display.js — keep the markers.
-        function renameDisplay(status, rowMap) {
+        function renameDisplay(status, baseImg, headImg, rowMap) {
             if (status !== 'renamed') return null;
-            return allRowsSame(rowMap) ? 'single' : 'compare';
+            return sameDimensions(baseImg, headImg) && allRowsSame(rowMap)
+                ? 'single' : 'compare';
+        }
+
+        // Both sides present, both non-empty, and the same size. A zero-sized
+        // image is not "the same image" as another zero-sized one for this
+        // purpose: nothing was compared, so nothing was proven.
+        function sameDimensions(a, b) {
+            if (!a || !b) return false;
+            if (!a.naturalWidth || !a.naturalHeight) return false;
+            return a.naturalWidth === b.naturalWidth &&
+                a.naturalHeight === b.naturalHeight;
         }
 
         function allRowsSame(rowMap) {
@@ -1161,13 +1191,15 @@
                 return;
             }
 
-            // Issue #14. Asked at an exact threshold, not the gutter's: a
-            // difference too small for the gutter to plot is still a
-            // difference, and the single-image view is the one view in which it
-            // could never be seen.
-            var renameMode = fileStatus === 'renamed'
-                ? renameDisplay(fileStatus, computeRowDiffMap(state.baseImg, state.headImg, 0))
+            // Issue #14. Asked at an exact threshold, not the gutter's, and
+            // with alpha: a difference too small for the gutter to plot is
+            // still a difference, and the single-image view is the one view in
+            // which it could never be seen.
+            var exactMap = fileStatus === 'renamed'
+                ? computeRowDiffMap(state.baseImg, state.headImg, 0, true)
                 : null;
+            var renameMode = renameDisplay(
+                fileStatus, state.baseImg, state.headImg, exactMap);
 
             // The gutter plots where the two sides differ, so a file that will
             // render as one image has no use for it — and building it costs two
@@ -1222,7 +1254,12 @@
         var gutterRefreshCallbacks = [];
 
         // -- Row-level diff map --
-        function computeRowDiffMap(baseImg, headImg, threshold) {
+        // `includeAlpha` is off for the diff gutter, which has always compared
+        // the three colour channels, and on for the rename check, which needs
+        // "the same image" to mean the same image. Keeping it a parameter is
+        // what stops the rename fix from silently changing what the gutter
+        // plots for every other file in the PR.
+        function computeRowDiffMap(baseImg, headImg, threshold, includeAlpha) {
             if (!baseImg || !headImg) return null;
             var w = Math.max(baseImg.naturalWidth, headImg.naturalWidth);
             var h = Math.max(baseImg.naturalHeight, headImg.naturalHeight);
@@ -1251,7 +1288,8 @@
                     var i = rowStart + x * 4;
                     if (Math.abs(bData[i] - hData[i]) > thr ||
                         Math.abs(bData[i+1] - hData[i+1]) > thr ||
-                        Math.abs(bData[i+2] - hData[i+2]) > thr) {
+                        Math.abs(bData[i+2] - hData[i+2]) > thr ||
+                        (includeAlpha && Math.abs(bData[i+3] - hData[i+3]) > thr)) {
                         map[y] = true;
                         break;
                     }
@@ -1383,7 +1421,8 @@
                 // reach here too, now that one whose base image failed to load
                 // keeps the modes instead of collapsing to a single image, and
                 // telling the reviewer it is a new file would be a lie about a
-                // fetch that failed. Mirrors the head side's own wording below.
+                // fetch that failed. Parallel to the head side's own wording
+                // below, which says "Image not available" for the same reason.
                 emL.textContent = getFileStatus(state.currentFile) === 'added'
                     ? 'No base image (new file)'
                     : 'Base image not available';
@@ -1751,22 +1790,23 @@
             var label = renameLabel();
             if (label) wrap.appendChild(label);
 
-            var img = state.headImg || state.baseImg;
-            if (img) {
-                var imgEl = document.createElement('img');
-                imgEl.src = img.src;
-                imgEl.style.maxWidth = '90vw';
-                imgEl.style.height = 'auto';
-                imgEl.style.display = 'block';
-                imgEl.style.margin = '0 auto';
-                imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
-                wrap.appendChild(imgEl);
-            } else {
-                var msg = document.createElement('div');
-                msg.className = 'empty-msg';
-                msg.textContent = 'Image not available.';
-                wrap.appendChild(msg);
-            }
+            // There is always a head image here, and it is always the one to
+            // show. Reaching this function means renameDisplay returned
+            // 'single', which needs both sides loaded, both non-empty and both
+            // the same size — so the `state.headImg || state.baseImg` fallback
+            // and the "Image not available" branch this used to carry were code
+            // no run could enter, reading as one-sided handling that is not
+            // there. Breaking that invariant now throws, which is the right
+            // way round: a view that claims there is nothing to compare must
+            // not be able to render without having compared anything.
+            var imgEl = document.createElement('img');
+            imgEl.src = state.headImg.src;
+            imgEl.style.maxWidth = '90vw';
+            imgEl.style.height = 'auto';
+            imgEl.style.display = 'block';
+            imgEl.style.margin = '0 auto';
+            imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
+            wrap.appendChild(imgEl);
 
             viewport.appendChild(wrap);
         }
