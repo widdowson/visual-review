@@ -128,13 +128,15 @@ function checked(name, body) {
 // block rather than the whole document so a `{` in a JS string cannot be walked
 // as if it opened a rule.
 function stylesheet() {
-  const open = html.indexOf('<style>');
-  const close = html.indexOf('</style>', open);
-  assert.ok(open >= 0 && close > open, 'static/index.html must contain a <style> block');
-  assert.strictEqual(html.indexOf('<style>', open + 1), -1,
-    'static/index.html must contain exactly one <style> block');
-  // CSS has no `//` comment form, so the block form is the whole strip.
-  return html.slice(open + '<style>'.length, close).replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const [open, close] = styleBounds(html);
+  // CSS has no `//` comment form, so the block form is the whole strip. String
+  // literals are blanked as well: a caller walking braces to find rule
+  // boundaries would otherwise read a `}` inside `content: "}"` as the end of a
+  // rule, which in a stylesheet with an @media block silently promotes a
+  // media-nested rule to an unconditional one.
+  return html.slice(open + '<style>'.length, close)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""');
 }
 
 // Everything outside that <style> block, with JS comments already stripped.
@@ -142,11 +144,21 @@ function stylesheet() {
 // handler is registered on an event, say — where `bodyOf` cannot reach and the
 // stylesheet would only add false matches.
 function scriptSource() {
-  const open = htmlWithoutComments.indexOf('<style>');
-  const close = htmlWithoutComments.indexOf('</style>', open);
-  assert.ok(open >= 0 && close > open, 'static/index.html must contain a <style> block');
+  const [open, close] = styleBounds(htmlWithoutComments);
   return htmlWithoutComments.slice(0, open) +
     htmlWithoutComments.slice(close + '</style>'.length);
+}
+
+// The bounds of the one <style> block, checked the same way for both callers:
+// a second block would leave scriptSource() carrying CSS that a regex looking
+// for script could match.
+function styleBounds(source) {
+  const open = source.indexOf('<style>');
+  const close = source.indexOf('</style>', open);
+  assert.ok(open >= 0 && close > open, 'static/index.html must contain a <style> block');
+  assert.strictEqual(source.indexOf('<style>', open + 1), -1,
+    'static/index.html must contain exactly one <style> block');
+  return [open, close];
 }
 
 module.exports = { extract, bodyOf, stylesheet, scriptSource };

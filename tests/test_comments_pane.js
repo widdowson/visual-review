@@ -8,6 +8,17 @@
 const assert = require('assert');
 const { extract, bodyOf, stylesheet, scriptSource } = require('./spa_source');
 
+// Rule 3 below: every key matched with the expression it must carry. Bare
+// tokens are not enough — `minPaneHeight: COMMENTS_PANE_TUNING.minViewportHeight`
+// keeps both names present, and `scrollTop: 0` keeps the key present.
+function assertPasses(fn, body, pairs) {
+  for (const [key, value] of pairs) {
+    const expr = value.replace(/[.()[\]]/g, (c) => '\\s*\\' + c + '\\s*');
+    assert.ok(new RegExp(key + '\\s*:\\s*' + expr).test(body),
+      fn + ' must pass ' + value + ' as ' + key);
+  }
+}
+
 const computeCommentsPaneHeight = extract('comments-pane', 'computeCommentsPaneHeight');
 const computeCommentsScrollTop = extract('comments-pane', 'computeCommentsScrollTop');
 
@@ -34,48 +45,80 @@ assert.ok(tuning.minViewportHeight > 0,
 
 // ── The SPA must use all of it ──────────────────────────────────────────────
 // The cases further down pass explicit arguments to the two pure functions, so
-// none of them would notice the SPA hard-coding a value, or calling neither
-// function at all. These checks are structural because the code they cover
-// touches the DOM and so cannot be extracted and run. Each one is anchored to
-// the *call site* as well as the callee, since the line this PR replaced lived
-// at a call site: a helper that is correct and never called is the same bug.
+// none of them would notice the SPA hard-coding an input, discarding a result,
+// or never calling either function. These checks are structural because the
+// code they cover touches the DOM and so cannot be extracted and run. Three
+// rules are applied to all of it uniformly, because each was first written for
+// one call site and every site it was not applied to turned out to have the
+// same hole:
+//
+//   1. Anchor the *call site*, not just the callee. A helper that is correct
+//      and never called is the same bug — and the line this PR replaced lived
+//      at a call site.
+//   2. Anchor the *assignment*, not just the call. A helper whose answer is
+//      thrown away is the same bug once more.
+//   3. Match every key with the value it must carry, never the bare key.
+//      `viewportTop: 0` satisfies a bare-key check and is exactly the bug this
+//      PR fixes.
 
-const resizeBody = bodyOf('resizeCommentsPane');
-// Each knob is matched with the option it fills, not on its own — with bare
-// tokens, `minPaneHeight: COMMENTS_PANE_TUNING.minViewportHeight` would keep
-// both present and pass.
-for (const key of ['minPaneHeight', 'minViewportHeight']) {
+// The helper that turns a pointer position into a pane height, and the drag
+// that must reach it. Every input is matched with its expression: with bare
+// keys, `viewportTop: 0` restores the window-fraction ceiling this PR replaced,
+// and at 1440x900 leaves the comparator -14px.
+assertPasses('resizeCommentsPane', bodyOf('resizeCommentsPane'), [
+  ['paneBottom', 'commentsSection.getBoundingClientRect().bottom'],
+  ['viewportTop', 'viewport.getBoundingClientRect().top'],
+  ['pointerY', 'pointerY'],
+  ['minPaneHeight', 'COMMENTS_PANE_TUNING.minPaneHeight'],
+  ['minViewportHeight', 'COMMENTS_PANE_TUNING.minViewportHeight'],
+]);
+assert.ok(
+  /commentsSection\s*\.\s*style\s*\.\s*maxHeight\s*=\s*computeCommentsPaneHeight\s*\(/
+    .test(bodyOf('resizeCommentsPane')),
+  'resizeCommentsPane must assign the clamped height to the pane');
+
+// ...and the three handlers that make the drag happen. All are named in the SPA
+// so this can read them: any one of them emptied leaves the pane unresizable,
+// which is the whole of issue #8's second requirement.
+const startBody = bodyOf('onCommentsDragStart');
+assert.ok(/dragging\s*=\s*true/.test(startBody),
+  'onCommentsDragStart must arm the drag');
+assert.ok(/resizeCommentsPane\s*\(/.test(bodyOf('onCommentsDragMove')),
+  'onCommentsDragMove must call resizeCommentsPane');
+assert.ok(/dragging\s*=\s*false/.test(bodyOf('onCommentsDragEnd')),
+  'onCommentsDragEnd must disarm the drag');
+const script = scriptSource();
+for (const [event, handler] of [
+  ['mousedown', 'onCommentsDragStart'],
+  ['mousemove', 'onCommentsDragMove'],
+  ['mouseup', 'onCommentsDragEnd'],
+]) {
   assert.ok(
-    new RegExp(key + '\\s*:\\s*COMMENTS_PANE_TUNING\\s*\\.\\s*' + key + '\\b').test(resizeBody),
-    'resizeCommentsPane must pass COMMENTS_PANE_TUNING.' + key + ' as the clamp\'s ' + key);
+    new RegExp('addEventListener\\s*\\(\\s*\'' + event + '\'\\s*,\\s*' + handler + '\\s*\\)').test(script),
+    handler + ' must be registered on ' + event);
 }
-assert.ok(/computeCommentsPaneHeight\s*\(/.test(resizeBody),
-  'resizeCommentsPane must apply the clamp rather than setting a raw height');
 
-// ...and the drag must reach it. The handler is named in the SPA precisely so
-// this can read it: emptied out, every assertion above stays green while the
-// handle does nothing.
-const dragBody = bodyOf('onCommentsDragMove');
-assert.ok(/resizeCommentsPane\s*\(/.test(dragBody),
-  'the drag handler must call resizeCommentsPane');
-assert.ok(/addEventListener\s*\(\s*'mousemove'\s*,\s*onCommentsDragMove\s*\)/.test(scriptSource()),
-  'onCommentsDragMove must be registered on mousemove');
-
+// The helper that parks the newest comment, and the measurement it is given.
 const scrollBody = bodyOf('scrollToNewestComment');
-assert.ok(/computeCommentsScrollTop\s*\(/.test(scrollBody),
-  'scrollToNewestComment must use computeCommentsScrollTop');
-// Matched with the value each one must carry, not merely present: `scrollTop: 0`
-// satisfies a bare-key check and mis-parks every re-render of a scrolled pane.
-for (const [key, value] of [
+assertPasses('scrollToNewestComment', scrollBody, [
+  ['newestCardBottom', 'newestCardBottom'],
   ['scrollTop', 'commentsScroll.scrollTop'],
   ['clientHeight', 'commentsScroll.clientHeight'],
   ['scrollHeight', 'commentsScroll.scrollHeight'],
-  ['newestCardBottom', 'newestCardBottom'],
-]) {
-  assert.ok(
-    new RegExp(key + '\\s*:\\s*' + value.replace(/\./g, '\\s*\\.\\s*') + '\\b').test(scrollBody),
-    'scrollToNewestComment must pass ' + value + ' as computeCommentsScrollTop\'s ' + key);
-}
+]);
+assert.ok(/commentsScroll\s*\.\s*scrollTop\s*=\s*computeCommentsScrollTop\s*\(/.test(scrollBody),
+  'scrollToNewestComment must assign the computed offset to the scroll container');
+// How newestCardBottom is measured, which nothing above pins: cards[0] parks the
+// *oldest* comment — the literal inverse of issue #8 — and dropping the
+// container's own top leaves the value in viewport coordinates.
+assert.ok(/querySelectorAll\s*\(\s*'\.comment-card'\s*\)/.test(scrollBody),
+  'scrollToNewestComment must find the comment cards');
+assert.ok(/cards\s*\[\s*cards\s*\.\s*length\s*-\s*1\s*\]/.test(scrollBody),
+  'scrollToNewestComment must measure the newest card, not the oldest');
+assert.ok(
+  /\.\s*getBoundingClientRect\(\)\s*\.\s*bottom\s*-\s*commentsScroll\s*\.\s*getBoundingClientRect\(\)\s*\.\s*top/
+    .test(scrollBody),
+  'newestCardBottom must be the card bottom relative to the scroll container');
 
 // ...and the render must call it. Reverting this PR means putting
 // `scrollTop = scrollHeight` back here, where it was, not inside the helper.
@@ -85,6 +128,21 @@ assert.ok(/scrollToNewestComment\s*\(/.test(renderBody),
 for (const [label, body] of [['renderComments', renderBody], ['scrollToNewestComment', scrollBody]]) {
   assert.ok(!/scrollTop\s*=\s*\w+\.scrollHeight\b/.test(body),
     label + ' must not scroll to the very bottom, which is the comment form');
+}
+
+// ── The markup the pane is built from ───────────────────────────────────────
+// The handle and the scroll body are static now, and both render paths write
+// into the scroll body rather than replacing the pane. Writing to
+// .comments-section instead is the pre-PR line, so it is the natural revert: it
+// destroys the handle on the first file open, after which #comments-scroll is a
+// detached node and no comment renders at all.
+for (const id of ['comments-resize', 'comments-scroll']) {
+  assert.ok(new RegExp('id="' + id + '"').test(script),
+    'the pane must carry a static ' + id + ' element');
+}
+for (const fn of ['loadComments', 'renderComments']) {
+  assert.ok(/commentsScroll\s*\.\s*innerHTML\s*=/.test(bodyOf(fn)),
+    fn + ' must write into the scroll body, not replace the pane');
 }
 
 // ── The initial cap is CSS, so assert it is still there ─────────────────────
@@ -100,6 +158,12 @@ const css = stylesheet();
 // this page renders. Depth is counted rather than matched, since a nested block
 // is a brace inside a brace and a regex cannot tell the two apart; the selector
 // is split on `,` so a grouped rule counts whichever position it appears in.
+// The walk is brace-counting and knows nothing of syntax, so it relies on
+// stylesheet() having blanked string literals first — a `}` inside
+// `content: "}"` would otherwise close the enclosing @media early and promote
+// the rules after it to unconditional, which is the failure this check exists
+// to catch. Anything else it gets wrong it gets wrong loudly, by not finding a
+// rule that is there.
 function unconditionalRules(sheet, selector) {
   const out = [];
   let depth = 0;
@@ -121,18 +185,24 @@ function unconditionalRules(sheet, selector) {
   return out;
 }
 
-const paneRules = unconditionalRules(css, '.comments-section');
-assert.ok(paneRules.length,
-  'static/index.html must style .comments-section outside any @media block');
-const caps = paneRules
+const caps = unconditionalRules(css, '.comments-section')
   .map((rule) => rule.match(/max-height:\s*([\d.]+)vh/))
   .filter(Boolean);
 assert.strictEqual(caps.length, 1,
   '.comments-section must cap its initial height in vh, unconditionally and ' +
   'in exactly one rule');
-assert.ok(Number(caps[0][1]) > 0 && Number(caps[0][1]) <= 50,
-  'the initial cap must be no more than half the window — the column is shorter ' +
-  'than the window, so half of it is already the minority of the column — got ' +
+// The bound is arithmetic on this file's own measured geometry, not a feel for
+// the number. The cap is a fraction of the *window*, and the pane's neighbour is
+// the column, which is shorter — at 1440x900 the window is 900 and the column
+// 766 — so a cap reads as a larger share of the column than of the window. For
+// the comparator to keep at least half the 766px column the cap must be at most
+// 383px, i.e. 42.5vh; 40 is that with margin, and the shipped 30vh (270px,
+// leaving the comparator 496px) clears it comfortably. Note what this rules out
+// and what it does not: at 50vh the pane would be 450px against a 316px
+// comparator, the majority of the column, which is why 50 is not the bound.
+assert.ok(Number(caps[0][1]) > 0 && Number(caps[0][1]) <= 40,
+  'the initial cap must leave the image comparator at least half the column at ' +
+  'the 900px window this file is measured against — above 40vh it does not — got ' +
   caps[0][1] + 'vh');
 // The body must be the thing that scrolls: a pane that scrolls as a whole puts
 // its drag handle over whatever comment it is scrolled against. Checked over
@@ -218,10 +288,11 @@ function scrollTop(overrides) {
   }, overrides));
 }
 
-// 436 is what the real page lands on, measured.
+// 436 is what the real page lands on, measured. It is also strictly less than
+// the 591 that scrolling to the very bottom would give, which is the defect
+// this PR fixes — no separate assertion for that, since it cannot fail once the
+// value is pinned.
 assert.strictEqual(scrollTop({}), 436, 'the newest comment ends at the bottom of the pane');
-assert.ok(scrollTop({}) < 854 - 263,
-  'the pane must not be scrolled to its very bottom, which is the comment form');
 
 // The card rect is relative to the container, so an already-scrolled container
 // has to add its offset back. On the one path that ships today this is a no-op:
@@ -237,6 +308,9 @@ assert.strictEqual(
 assert.strictEqual(scrollTop({ newestCardBottom: 100, scrollTop: 400 }), 237,
   'the scroll offset is added to the measured rect');
 
+// Of these three, the first is a behaviour case that the clamps would satisfy
+// on their own; the other two are what the guard is for, and both go red if it
+// is deleted.
 assert.strictEqual(scrollTop({ newestCardBottom: 0 }), 0,
   'a file with no comments shows the top of the pane');
 assert.strictEqual(scrollTop({ newestCardBottom: 0, scrollTop: 500 }), 0,

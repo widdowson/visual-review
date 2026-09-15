@@ -918,17 +918,20 @@
         // the very bottom instead — which is what this replaced — lands on the
         // post-a-comment form, which is ~119px of an initial ~269px pane, so five
         // of six comments were 0px visible and the sixth was cut off mid-sentence.
-        // Coordinates are in the scroll container's own content space, and a
-        // file with no comments passes 0 — there is nothing to park, and 0
-        // newestCardBottom is measured from the container's own top edge, which
-        // is what a rect comparison yields, so the container's current scroll
-        // offset is what converts it to content space. That addition lives here
-        // rather than at the call site so a case can cover it. It is a no-op on
-        // the path that ships today — loadComments writes a short spinner first
-        // and that resets the offset — and is here so the helper does not depend
-        // on its caller having done so. As with the clamp above, the order is
-        // what covers a pane taller than its content: a negative maxScroll
-        // passes through and the floor takes it to 0.
+        //
+        // Three of the four inputs — scrollTop, clientHeight, scrollHeight —
+        // are the scroll container's own numbers. newestCardBottom is not in
+        // content space: it is measured from the container's top edge, which is
+        // what a rect comparison yields, so adding scrollTop is what converts
+        // it. That addition lives here rather than at the call site so a case
+        // can cover it. It is a no-op on the path that ships today, since
+        // loadComments writes a short spinner first and that resets the offset;
+        // it is here so the helper does not depend on its caller having done so.
+        //
+        // A file with no comments passes 0, which the guard takes to the top of
+        // the pane. Below it the order of the clamps is what covers a pane
+        // taller than its content: a negative maxScroll passes through and the
+        // floor takes it to 0.
         function computeCommentsScrollTop(opts) {
             // A file with no comments has nothing to park, and a pane still
             // scrolled from the last file would otherwise open part-way down.
@@ -2313,12 +2316,20 @@
 
         // The handle is part of the pane's static markup rather than of the
         // comment HTML, so it is bound once here instead of after every render.
-        // The two document-level handlers are named rather than inline so the
-        // test can read the one that does the work: an anonymous handler can be
-        // emptied out with every assertion about resizeCommentsPane still green.
+        // All three handlers are named rather than inline so the test can read
+        // them: an anonymous handler can be emptied out with every assertion
+        // about resizeCommentsPane still green, and emptying the mousedown one
+        // leaves the pane no more resizable than emptying the mousemove one.
         (function() {
             var handle = document.getElementById('comments-resize');
             var dragging = false;
+            function onCommentsDragStart(e) {
+                e.preventDefault();
+                dragging = true;
+                handle.classList.add('dragging');
+                document.body.style.cursor = 'row-resize';
+                document.body.style.userSelect = 'none';
+            }
             function onCommentsDragMove(e) {
                 if (!dragging) return;
                 resizeCommentsPane(e.clientY);
@@ -2330,13 +2341,7 @@
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
             }
-            handle.addEventListener('mousedown', function(e) {
-                e.preventDefault();
-                dragging = true;
-                handle.classList.add('dragging');
-                document.body.style.cursor = 'row-resize';
-                document.body.style.userSelect = 'none';
-            });
+            handle.addEventListener('mousedown', onCommentsDragStart);
             document.addEventListener('mousemove', onCommentsDragMove);
             document.addEventListener('mouseup', onCommentsDragEnd);
         })();
