@@ -127,9 +127,14 @@ async def _gh_paginate(
 ) -> tuple[list[Any], bool]:
     """Read every page of a GitHub list endpoint.
 
-    Returns ``(items, truncated)``, where ``truncated`` is true only when the
-    walk stopped at ``max_pages`` with a full page still in hand — i.e. there
-    was more to read. Raises :class:`_GitHubError` if any page fails.
+    Returns ``(items, truncated)``. ``truncated`` is true when the walk ran
+    out of pages rather than reaching a short one, so the list may be
+    incomplete — it does not establish that more remained. Exactly
+    ``max_pages`` full pages with nothing beyond them reports true, because
+    settling it would cost a probe request that GitHub cannot answer
+    meaningfully at its own ceiling anyway. The flag errs toward "may be
+    incomplete", which is the direction that matters for the bug it exists
+    to prevent. Raises :class:`_GitHubError` if any page fails.
 
     Pages are walked by incrementing ``page`` rather than by following the
     ``Link: rel="next"`` header. Both terminate correctly; counting means the
@@ -373,8 +378,10 @@ async def pr_images(owner: str, repo: str, number: int):
             # phrased, and they went missing with nothing said (#12).
             #
             # Both endpoints diff the merge base against the head, so below
-            # the cap they agree exactly — measured on three PRs of this
-            # repo (27, 9 and 4 files): identical path sets both ways.
+            # the cap they agree exactly — measured on three apwphotos-appv2
+            # PRs (27, 9 and 4 files): identical path sets both ways. On PR
+            # 352 itself compare's 300 paths are a strict subset of the 489,
+            # so this adds files rather than exchanging one set for another.
             try:
                 files, files_truncated = await _gh_paginate(
                     client,
@@ -387,9 +394,10 @@ async def pr_images(owner: str, repo: str, number: int):
                     headers={"Cache-Control": "no-store"},
                 )
 
-            # True only if GitHub has more files than it will serve. Left in
-            # the payload so a list that really is incomplete says so, rather
-            # than repeating this bug one order of magnitude up.
+            # Set when the walk hit its page cap, i.e. when GitHub may have
+            # more files than it served. Left in the payload so a list that
+            # may be incomplete says so, rather than repeating this bug one
+            # order of magnitude up.
             result["truncated"] = files_truncated
 
             for f in files:

@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS, _gh_paginate, _GitHubError, _GH_PAGE_SIZE
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES
 
 
 @pytest.fixture(autouse=True)
@@ -414,6 +414,35 @@ class TestPrImagesPagination:
         assert instance.requested_pages == [1, 2, 3]
 
     @pytest.mark.asyncio
+    async def test_truncated_reaches_the_response(self):
+        """A capped walk is reported in the payload, not just internally.
+
+        This drives the real ``_GH_MAX_PAGES``: the cap is a default argument
+        bound at definition time, so patching the module constant would not
+        reach it. 30 full pages is what the endpoint actually stops on.
+
+        Without this, ``result["truncated"] = files_truncated`` could be cut
+        to a literal ``False`` with the whole suite green — the only other
+        endpoint test reading the key asserts ``False``, which that mutant
+        satisfies. Verified: it passed 84/84 before this test existed.
+        """
+        instance = _paged_client(_png_pages(_GH_PAGE_SIZE * _GH_MAX_PAGES))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert len(data["images"]) == _GH_PAGE_SIZE * _GH_MAX_PAGES
+        assert instance.requested_pages == list(range(1, _GH_MAX_PAGES + 1))
+
+    @pytest.mark.asyncio
     async def test_files_request_failure_is_reported(self):
         """A page that fails partway through is an error, not a short list."""
         instance = _paged_client(_png_pages(250), status_by_page={2: 500})
@@ -508,13 +537,39 @@ class TestGhPaginate:
         assert client.requested == [1, 2]
 
     @pytest.mark.asyncio
-    async def test_last_page_exactly_full_is_not_truncated(self):
-        """Stopping on the cap is only truncation if more remained."""
+    async def test_short_page_on_the_last_permitted_page_is_not_truncated(self):
+        """A short page ends the walk even when it is the last page allowed.
+
+        The cap is reached here, but the walk stopped because the sequence
+        ended, so nothing is flagged. Named for what it drives: an earlier
+        version of this test was called ...last_page_exactly_full... while
+        its fixture ended on an empty page, so it passed whatever the code
+        did at the real boundary. That case is the next test.
+        """
         client = self._client([list(range(_GH_PAGE_SIZE)), []])
         items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=2)
         assert len(items) == _GH_PAGE_SIZE
         assert truncated is False
         assert client.requested == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_exactly_max_pages_reports_truncated(self):
+        """The boundary: full pages all the way to the cap, nothing beyond.
+
+        Nothing remained, and ``truncated`` is still true. Deliberate — the
+        walk never asked for page 4, and settling it would cost a probe that
+        GitHub cannot answer meaningfully at its own 3000-file ceiling. The
+        flag means "the walk ran out of pages", not "more exists", and it
+        errs toward warning. Pinned so the semantics are a decision on the
+        record rather than something a later reader has to re-derive.
+        """
+        client = self._client([list(range(_GH_PAGE_SIZE))] * 3)
+        items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=3)
+        assert len(items) == 3 * _GH_PAGE_SIZE
+        assert truncated is True
+        # Page 4 exists in the fixture's eyes only as the empty page the walk
+        # never requested.
+        assert client.requested == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_non_200_raises(self):
