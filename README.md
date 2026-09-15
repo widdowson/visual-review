@@ -51,6 +51,7 @@ The JS tests also run standalone, which is quicker while iterating on the SPA:
 ```bash
 node tests/test_prefetch_policy.js
 node tests/test_image_urls.js
+node tests/test_hash_target.js
 ```
 
 `pytest tests/ -v` still works for the Python tests alone, but it misses every
