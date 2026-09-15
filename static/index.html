@@ -341,6 +341,18 @@
         .image-info .gh-diff-link:hover { color: var(--vr-link-hover); text-decoration: underline; }
         .renamed-label { color: var(--vr-text-muted); font-size: 0.85rem; margin-bottom: 8px; }
         .renamed-label .renamed-arrow { color: var(--vr-accent); margin: 0 6px; }
+        /* A rename that also changed the image keeps the comparison modes, so
+           the viewport has to stack the label above them — its default row
+           direction would put the two side by side. Both of the other two
+           properties are restated because turning the column on swaps which
+           axis each governs: the viewport's own `justify-content: center` would
+           otherwise centre the modes vertically rather than horizontally. And
+           the children do not shrink — the viewport scrolls, and a squashed
+           capture is the one thing a visual review must not show. */
+        .viewport.with-rename-label {
+            flex-direction: column; justify-content: flex-start; align-items: center;
+        }
+        .viewport.with-rename-label > * { flex-shrink: 0; max-width: 100%; }
 
         /* Keyboard shortcut hint pill */
         .kbd-hint {
@@ -1092,9 +1104,47 @@
             return 'modified';
         }
 
+        // ── rename-display:begin ─────────────────────────────────────────────
+        // Pure function: how a file GitHub reports as `renamed` should be
+        // displayed.
+        //
+        // `renamed` does not mean "the content is unchanged". GitHub applies
+        // the same similarity detection git does, so a file that was moved
+        // *and* edited comes back as `renamed` as well — git's own R096, of
+        // which apwphotos-appv2 has a real instance (a baseline BMP that moved
+        // and grew by 7,680 bytes in the same commit). Nothing in the API
+        // separates the two for a binary: GitHub sends no patch and reports
+        // zero additions and zero deletions for every binary file, changed or
+        // not. So treating `renamed` alone as "nothing to compare" hid real
+        // changes on exactly the files the comparison modes exist for.
+        //
+        // The decision is made from the pixels instead, which is the question a
+        // reviewer is actually asking. `rowMap` is a per-row difference map of
+        // the two sides; all-false means they are the same image and there is
+        // genuinely nothing to compare. Anything else keeps the modes —
+        // including a map that could not be computed at all, because a side is
+        // missing or zero-sized. That direction is deliberate: failing to prove
+        // two images identical must never be read as proof that they are.
+        //
+        // Extracted verbatim by tests/test_rename_display.js — keep the markers.
+        function renameDisplay(status, rowMap) {
+            if (status !== 'renamed') return null;
+            return allRowsSame(rowMap) ? 'single' : 'compare';
+        }
+
+        function allRowsSame(rowMap) {
+            if (!rowMap || !rowMap.length) return false;
+            for (var i = 0; i < rowMap.length; i++) {
+                if (rowMap[i]) return false;
+            }
+            return true;
+        }
+        // ── rename-display:end ───────────────────────────────────────────────
+
         // -- Render comparison based on current mode --
         function renderComparison() {
             viewport.innerHTML = '';
+            viewport.classList.remove('with-rename-label');
             imageInfo.style.display = '';
             hideLoupes();
             gutterRefreshCallbacks = [];
@@ -1111,7 +1161,20 @@
                 return;
             }
 
-            var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+            // Issue #14. Asked at an exact threshold, not the gutter's: a
+            // difference too small for the gutter to plot is still a
+            // difference, and the single-image view is the one view in which it
+            // could never be seen.
+            var renameMode = fileStatus === 'renamed'
+                ? renameDisplay(fileStatus, computeRowDiffMap(state.baseImg, state.headImg, 0))
+                : null;
+
+            // The gutter plots where the two sides differ, so a file that will
+            // render as one image has no use for it — and building it costs two
+            // more full-image reads.
+            var rowMap = renameMode === 'single'
+                ? null
+                : computeRowDiffMap(state.baseImg, state.headImg, 10);
             state.diffClusters = computeDiffClusters(rowMap);
 
             var infoHtml = '<span>' + escHtml(state.currentFile) + '</span>';
@@ -1137,10 +1200,15 @@
                 }
             });
 
-            // Issue #14: renamed files — show single image with rename label, no diff modes
-            if (fileStatus === 'renamed') {
+            if (renameMode === 'single') {
                 renderRenamed();
                 return;
+            }
+            if (renameMode === 'compare') {
+                // Moved *and* changed: keep the modes, and say so above them.
+                viewport.classList.add('with-rename-label');
+                var movedLabel = renameLabel();
+                if (movedLabel) viewport.appendChild(movedLabel);
             }
 
             switch (state.mode) {
@@ -1173,7 +1241,9 @@
             var hData = hCtx.getImageData(0, 0, w, h).data;
 
             var map = new Array(h);
-            var thr = threshold || 10;
+            // Not `threshold || 10`: that turns an explicit 0 back into 10, and
+            // 0 is the value the rename check below asks for — exact equality.
+            var thr = threshold == null ? 10 : threshold;
             for (var y = 0; y < h; y++) {
                 map[y] = false;
                 var rowStart = y * w * 4;
@@ -1309,7 +1379,14 @@
             } else {
                 var emL = document.createElement('div');
                 emL.className = 'empty-msg';
-                emL.textContent = 'No base image (new file)';
+                // Only an added file legitimately has no base side. A rename can
+                // reach here too, now that one whose base image failed to load
+                // keeps the modes instead of collapsing to a single image, and
+                // telling the reviewer it is a new file would be a lie about a
+                // fetch that failed. Mirrors the head side's own wording below.
+                emL.textContent = getFileStatus(state.currentFile) === 'added'
+                    ? 'No base image (new file)'
+                    : 'Base image not available';
                 emL.style.padding = '40px';
                 leftPanel.appendChild(emL);
             }
@@ -1644,23 +1721,35 @@
             setupLoupes(dw);
         }
 
-        // -- Renamed file (no diff modes) --
-        function renderRenamed() {
-            modeToolbar.style.display = 'none';
+        // -- Renamed file --
+        //
+        // The label is shared by both rename views: above the single image for a
+        // move that changed nothing, and above the ordinary comparison modes for
+        // a move that also changed the image. Returns null when GitHub reported
+        // the rename without a previous path, which it can do (see
+        // buildImageUrls) — there is then nothing to say that the sidebar badge
+        // does not already say.
+        function renameLabel() {
             var fileData = getFileData(state.currentFile);
             var prevPath = fileData && fileData.previous_filename;
+            if (!prevPath) return null;
+
+            var label = document.createElement('div');
+            label.className = 'renamed-label';
+            label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
+                '<span class="renamed-arrow">\u2192</span>' +
+                '<code>' + escHtml(state.currentFile) + '</code>';
+            return label;
+        }
+
+        function renderRenamed() {
+            modeToolbar.style.display = 'none';
 
             var wrap = document.createElement('div');
             wrap.style.textAlign = 'center';
 
-            if (prevPath) {
-                var label = document.createElement('div');
-                label.className = 'renamed-label';
-                label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
-                    '<span class="renamed-arrow">\u2192</span>' +
-                    '<code>' + escHtml(state.currentFile) + '</code>';
-                wrap.appendChild(label);
-            }
+            var label = renameLabel();
+            if (label) wrap.appendChild(label);
 
             var img = state.headImg || state.baseImg;
             if (img) {
