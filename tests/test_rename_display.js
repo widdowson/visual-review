@@ -9,10 +9,12 @@
 // and deletions either way. So the status alone cannot answer the question and
 // the pixels have to.
 //
-// The file is in three parts. The decision is a pure region, extracted and run.
-// computeRowDiffMap and the two render functions touch a DOM, so they are run
+// The file is in four parts. The decision is a pure region, extracted and run.
+// computeRowDiffMap and the render functions touch a DOM, so they are run
 // against stubs — not checked by pattern, because a regex that matches the text
-// of a call passes whether or not the call does anything.
+// of a call passes whether or not the call does anything. The last part is the
+// exception: two checks on source text, for calls whose behaviour is only
+// reachable through machinery this file deliberately does not build.
 
 const assert = require('assert');
 const { extract, bodyOf } = require('./spa_source');
@@ -52,9 +54,9 @@ assert.strictEqual(verdict('renamed', [true, true]), 'compare');
 
 // ── Not being able to tell is not the same as being identical ───────────────
 //
-// computeRowDiffMap returns null when a side is missing or zero-sized. Reading
-// that as "identical" would hide a file whose base image failed to load behind
-// a view that claims there is nothing to see.
+// computeRowDiffMap returns null when a side is missing. Reading that as
+// "identical" would hide a file whose base image failed to load behind a view
+// that claims there is nothing to see.
 
 for (const unknown of [null, undefined, [], 0, '', false]) {
   assert.strictEqual(verdict('renamed', unknown), 'compare',
@@ -87,6 +89,12 @@ assert.strictEqual(verdict('renamed', same, null, B), 'compare');
 assert.strictEqual(verdict('renamed', same, A, null), 'compare');
 
 // Nor are two zero-sized images: nothing was compared, so nothing was proven.
+// The SPA cannot hand renameDisplay one — `attach` only commits an image to
+// state from `onload`, or when it is already complete with a non-zero width, so
+// a broken image leaves `state.baseImg` null and the missing-side case above is
+// what fires. This is the pure predicate's own contract rather than a path the
+// page takes: `sameDimensions` must not answer "same" for two images that have
+// no pixels, whoever calls it.
 const empty = { naturalWidth: 0, naturalHeight: 0, src: 'e' };
 assert.strictEqual(verdict('renamed', same, empty, empty), 'compare');
 assert.strictEqual(verdict('renamed', same,
@@ -179,18 +187,26 @@ assert.strictEqual(computeRowDiffMap(null, exactHead, 0), null);
 //
 // renderComparison is what asks the decision and acts on it, and acting on it
 // is most of what a reader sees. It touches the DOM, so it is run here against
-// a stub one: the real renderComparison, the real renderDisplay, the real
+// a stub one: the real renderComparison, the real renameDisplay, the real
 // renameLabel and the real renderRenamed over stub elements, with only the
 // canvas work and the four mode renderers replaced. Checking this by pattern
 // instead would pass on an implementation that computes the label and drops it.
 
 function stubEl() {
   const el = {
-    children: [], className: '', innerHTML: '', textContent: '', style: {},
-    classes: new Set(),
+    children: [], className: '', textContent: '', style: {}, classes: new Set(),
     appendChild(child) { el.children.push(child); return child; },
     querySelectorAll() { return []; },
   };
+  // Modelled rather than stubbed flat: assigning innerHTML replaces an
+  // element's children, and renderComparison's `viewport.innerHTML = ''` is the
+  // only thing that clears the viewport between files. A stub that kept its
+  // children would make every reused-viewport assertion below meaningless.
+  let html = '';
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return html; },
+    set(v) { html = String(v); el.children.length = 0; },
+  });
   el.classList = {
     add(c) { el.classes.add(c); },
     remove(c) { el.classes.delete(c); },
@@ -199,19 +215,22 @@ function stubEl() {
   return el;
 }
 
-// rowMaps records every computeRowDiffMap call renderComparison makes, which is
-// how the exact threshold, the alpha flag and the pass count are all checked
-// without coupling the test to the shape of the expression that makes them.
-function render(file, baseImg, headImg, rowMap) {
+// One SPA's worth of stubs, reusable across renders. Reusable is the point: the
+// viewport, its class list and the mode toolbar persist from file to file in a
+// real page, and a harness that built a fresh viewport per render could not
+// observe anything renderComparison fails to reset. rowMaps records every
+// computeRowDiffMap call it makes, which is how the exact threshold, the alpha
+// flag and the pass count are checked without coupling this test to the shape
+// of the expression that makes them.
+function spa() {
   const doc = { createElement: () => stubEl(), getElementById: () => null };
   const viewport = stubEl(), imageInfo = stubEl(), modeToolbar = stubEl();
   const calls = { rowMaps: [], modes: [], renamed: 0 };
-
   const state = {
-    currentFile: file.path, images: [file],
-    baseImg: baseImg, headImg: headImg,
+    currentFile: null, images: [], baseImg: null, headImg: null,
     mode: 'side-by-side', loadError: null, diffClusters: null,
   };
+  let rowMap = null;
 
   const getFileData = p => state.images.find(i => i.path === p) || null;
   const getFileStatus = p => (getFileData(p) || { status: 'modified' }).status;
@@ -225,6 +244,14 @@ function render(file, baseImg, headImg, rowMap) {
     'modeToolbar', 'document', 'state', 'renameLabel', 'viewport',
     'return (' + bodyOf('renderRenamed') + ');')(
     modeToolbar, doc, state, renameLabel, viewport);
+
+  // A mode renderer appends its own content in the real page, so the stubs do
+  // too — that is what makes the label's position relative to the modes
+  // observable rather than assumed.
+  const mode = name => () => {
+    calls.modes.push(name);
+    viewport.appendChild({ renderedMode: name });
+  };
 
   const renderComparison = new Function(
     'viewport', 'imageInfo', 'state', 'hideLoupes', 'gutterRefreshCallbacks',
@@ -245,14 +272,23 @@ function render(file, baseImg, headImg, rowMap) {
     renameLabel, esc, esc,
     () => ({ then() {} }),
     'o', 'r', 1, doc,
-    () => calls.modes.push('side-by-side'),
-    () => calls.modes.push('crossfade'),
-    () => calls.modes.push('swipe'),
-    () => calls.modes.push('diff'));
+    mode('side-by-side'), mode('crossfade'), mode('swipe'), mode('diff'));
 
-  renderComparison();
-  return { viewport: viewport, modeToolbar: modeToolbar, calls: calls };
+  return function render(file, baseImg, headImg, map) {
+    state.currentFile = file.path;
+    state.images = [file];
+    state.baseImg = baseImg;
+    state.headImg = headImg;
+    rowMap = map;
+    calls.rowMaps.length = 0;
+    calls.modes.length = 0;
+    calls.renamed = 0;
+    renderComparison();
+    return { viewport: viewport, modeToolbar: modeToolbar, calls: calls };
+  };
 }
+
+const render = (file, baseImg, headImg, map) => spa()(file, baseImg, headImg, map);
 
 const RENAMED = { path: 'new/a.bmp', status: 'renamed', previous_filename: 'old/a.bmp' };
 const MODIFIED = { path: 'plain.bmp', status: 'modified' };
@@ -284,9 +320,11 @@ assert.strictEqual(moved.calls.renamed, 0, 'a changed rename must not collapse t
 assert.deepStrictEqual(moved.calls.modes, ['side-by-side'], 'the current mode still renders');
 assert.strictEqual(moved.viewport.classes.has('with-rename-label'), true,
   'the viewport must stack the label above the modes');
-assert.strictEqual(moved.viewport.children.length, 1,
+assert.strictEqual(moved.viewport.children.length, 2,
   'the label is appended to the viewport, not computed and dropped');
-assert.strictEqual(moved.viewport.children[0].className, 'renamed-label');
+assert.strictEqual(moved.viewport.children[0].className, 'renamed-label',
+  'and it is appended before the mode content, so it renders above it');
+assert.strictEqual(moved.viewport.children[1].renderedMode, 'side-by-side');
 assert.ok(moved.viewport.children[0].innerHTML.includes('old/a.bmp'));
 assert.deepStrictEqual(moved.calls.rowMaps,
   [{ threshold: 0, includeAlpha: true }, { threshold: 10, includeAlpha: false }],
@@ -313,7 +351,8 @@ const plain = render(MODIFIED, A, B, differs);
 assert.strictEqual(plain.calls.renamed, 0);
 assert.deepStrictEqual(plain.calls.modes, ['side-by-side']);
 assert.strictEqual(plain.viewport.classes.has('with-rename-label'), false);
-assert.strictEqual(plain.viewport.children.length, 0, 'and no rename label');
+assert.strictEqual(plain.viewport.children.length, 1, 'the mode content and no rename label');
+assert.strictEqual(plain.viewport.children[0].renderedMode, 'side-by-side');
 assert.deepStrictEqual(plain.calls.rowMaps, [{ threshold: 10, includeAlpha: false }],
   'a file that is not a rename pays for no extra pass');
 
@@ -322,6 +361,35 @@ assert.deepStrictEqual(plain.calls.rowMaps, [{ threshold: 10, includeAlpha: fals
 const plainSame = render(MODIFIED, A, B, same);
 assert.strictEqual(plainSame.calls.renamed, 0);
 assert.deepStrictEqual(plainSame.calls.modes, ['side-by-side']);
+
+// -- The stacking class does not outlive the file that needed it -------------
+//
+// The viewport is one element for the life of the page, so the class that turns
+// it into a column has to be taken off again. Nothing else removes it —
+// selectFile clears only `loading` — so a renderComparison that forgot would
+// leave every file opened after a changed rename stacked, including an ordinary
+// modification, whose two side-by-side panels would then sit one above the
+// other. This needs two renders through one viewport, which is why the harness
+// above is reusable.
+
+const session = spa();
+const first = session(RENAMED, A, B, differs);
+assert.strictEqual(first.viewport.classes.has('with-rename-label'), true,
+  'precondition: the changed rename stacked the viewport');
+const second = session(MODIFIED, A, B, differs);
+assert.strictEqual(second.viewport.classes.has('with-rename-label'), false,
+  'the next file must not inherit the stacked layout');
+assert.strictEqual(second.viewport.children.length, 1,
+  'and it must not inherit the previous file\'s rename label either');
+assert.strictEqual(second.viewport.children[0].renderedMode, 'side-by-side');
+
+// The same in the other order, since a pure rename takes an early return out of
+// renderComparison and could just as easily skip the reset.
+const session2 = spa();
+session2(RENAMED, A, B, differs);
+const afterPure = session2(RENAMED, A, B, same);
+assert.strictEqual(afterPure.viewport.classes.has('with-rename-label'), false,
+  'the single-image view must not inherit the stacked layout either');
 
 // ── The shared label ────────────────────────────────────────────────────────
 
@@ -353,19 +421,59 @@ const escaped = labelFor(
 assert.ok(!escaped.innerHTML.includes('<img'), 'the previous path goes through escHtml');
 assert.ok(!escaped.innerHTML.includes('<svg'), 'and so does the current path');
 
-// ── What an unfetchable base side says ──────────────────────────────────────
+// ── Two checks on source text ───────────────────────────────────────────────
 //
-// Keeping the modes on a rename we cannot prove identical means side-by-side
-// now renders an empty base panel for a file that is not an added one. The
-// panel used to say "(new file)" unconditionally, which for a rename is a claim
-// about the diff rather than about the fetch that failed.
+// Everything above runs. These two do not, because what they protect is only
+// reachable through machinery this file deliberately does not build — the four
+// mode renderers, which pull in loupes, the diff gutter and
+// requestAnimationFrame. Standing them up is tracked in #40; a pattern is
+// what is affordable here, so each is written to fail on the inversion of what
+// it asserts rather than on the absence of a spelling.
+
+// 1. What an unfetchable base side says. Keeping the modes on a rename we
+// cannot prove identical means side-by-side now renders an empty base panel for
+// a file that is not an added one. The panel used to say "(new file)"
+// unconditionally, which for a rename is a claim about the diff rather than
+// about the fetch that failed. Asserting the *pairing*, not the absence of the
+// old string: swapping the two arms so an added file reads "not available" and
+// a rename reads "(new file)" is a perfect inversion of this fix, and an
+// assertion anchored on the old spelling passes straight over it.
 
 const sideBySide = bodyOf('renderSideBySide');
 assert.ok(
-  /getFileStatus\(state\.currentFile\)\s*===\s*'added'/.test(sideBySide),
-  'the empty base panel must name a new file only when the file is added');
-assert.ok(
-  !/=\s*'No base image \(new file\)'\s*;/.test(sideBySide),
-  'the "new file" wording must not be unconditional');
+  /getFileStatus\(state\.currentFile\)\s*===\s*'added'\s*\?\s*'No base image \(new file\)'\s*:\s*'Base image not available'/
+    .test(sideBySide),
+  'the empty base panel must name a new file when, and only when, the file is added');
+
+// 2. The diff gutter must not start comparing alpha. `includeAlpha` is a
+// parameter precisely so the rename fix changes nothing about what the gutter
+// plots for every other file in the PR, and the harness above cannot hold it to
+// that: it stubs the mode renderers out, so their own computeRowDiffMap calls
+// are never made. Count the arguments at every call site instead. Exactly one
+// call passes a fourth, and it is the rename decision's.
+
+const spaSource = require('fs').readFileSync(
+  (process.env.RUNFILES_DIR
+    ? require('path').join(process.env.RUNFILES_DIR, '_main', 'static', 'index.html')
+    : require('path').join(__dirname, '..', 'static', 'index.html')), 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, ' ')
+  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+const callSites = [...spaSource.matchAll(/computeRowDiffMap\s*\(([^()]*)\)/g)]
+  .map(m => m[1].split(',').map(a => a.trim()))
+  .filter(args => args[0] !== 'baseImg');   // drop the declaration
+
+assert.ok(callSites.length >= 5,
+  'expected the gutter call sites plus the rename one; found ' + callSites.length +
+  ' — if the calls now nest parentheses this check needs rewriting, not deleting');
+
+const withAlpha = callSites.filter(args => args.length === 4);
+assert.strictEqual(withAlpha.length, 1,
+  'exactly one caller may ask computeRowDiffMap to compare alpha; found ' +
+  withAlpha.length + ': ' + JSON.stringify(withAlpha));
+assert.deepStrictEqual(withAlpha[0], ['state.baseImg', 'state.headImg', '0', 'true'],
+  'and it is the rename decision, at the exact threshold');
+assert.ok(callSites.filter(args => args.length === 3).every(args => args[2] === '10'),
+  'every other caller is the gutter, at the gutter tolerance');
 
 console.log('test_rename_display: all checks passed');
