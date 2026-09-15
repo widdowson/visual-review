@@ -85,6 +85,15 @@ js_test(
     ],
 )
 
+js_test(
+    name = "test_comments_pane",
+    entry_point = "tests/test_comments_pane.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
 # ── OCI container image ─────────────────────────────────────────────────────
 
 # py_image_layer splits the py_binary's runfiles into optimized tar layers:

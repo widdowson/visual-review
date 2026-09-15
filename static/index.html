@@ -279,18 +279,23 @@
         }
 
         /* Comments section */
+        /* The pane is a flex column of a fixed-height drag handle over a
+           scrolling body, so the handle stays on the pane's top edge instead
+           of riding over the comment it happens to be scrolled against. The
+           pane is content-sized up to its max-height: 30vh initially, and
+           whatever the drag sets after that. */
         .comments-section {
             border-top: 1px solid var(--vr-border);
             max-width: 800px; margin: 0 auto; width: 100%;
-            max-height: 30vh; overflow-y: auto; position: relative;
-            flex-shrink: 0;
+            max-height: 30vh; position: relative;
+            flex-shrink: 0; display: flex; flex-direction: column; min-height: 0;
         }
+        .comments-scroll { flex: 1; overflow-y: auto; min-height: 0; }
         .comments-section-inner {
             padding: 20px;
         }
         .comments-resize {
-            position: sticky; top: 0; left: 0; right: 0; height: 6px;
-            cursor: row-resize; z-index: 10;
+            height: 6px; cursor: row-resize;
             background: transparent; flex-shrink: 0;
         }
         .comments-resize:hover, .comments-resize.dragging {
@@ -493,7 +498,10 @@
             <div class="viewport" id="viewport">
                 <div class="empty-msg">Select an image from the sidebar to begin review.</div>
             </div>
-            <div class="comments-section" id="comments-section" style="display:none;"></div>
+            <div class="comments-section" id="comments-section" style="display:none;">
+                <div class="comments-resize" id="comments-resize"></div>
+                <div class="comments-scroll" id="comments-scroll"></div>
+            </div>
         </div>
     </div>
 
@@ -577,6 +585,7 @@
         var modeToolbar = document.getElementById('mode-toolbar');
         var imageInfo = document.getElementById('image-info');
         var commentsSection = document.getElementById('comments-section');
+        var commentsScroll = document.getElementById('comments-scroll');
         var prTitle = document.getElementById('pr-title');
         var imageCount = document.getElementById('image-count');
         var loupeBase = document.getElementById('loupe-base');
@@ -866,6 +875,59 @@
             };
         }
         // ── image-urls:end ───────────────────────────────────────────────────
+
+        // ── comments-pane:begin ──────────────────────────────────────────────
+        // The two pieces of arithmetic behind the comments pane, kept pure so
+        // they can be tested without a DOM. Extracted verbatim by
+        // tests/test_comments_pane.js, which evaluates this region and reads
+        // COMMENTS_PANE_TUNING out of it — keep the markers, keep the purity,
+        // and keep the tuning inside them, since a constant declared outside
+        // is one a test can only read by grepping.
+        //
+        // The pane's *initial* cap is the CSS `max-height` on .comments-section
+        // and deliberately not a constant here: a second copy in JS would be a
+        // knob nothing reads.
+        var COMMENTS_PANE_TUNING = {
+            minPaneHeight: 60,      // a dragged-shut pane still shows its top edge
+            minViewportHeight: 120, // pixels the image comparator always keeps
+        };
+
+        // Height for a drag of the pane's top edge to pointerY. Clamped at both
+        // ends: never shorter than minPaneHeight, and never so tall that the
+        // comparator above it is left with less than minViewportHeight. The
+        // ceiling is measured from the comparator's own top rather than from a
+        // fraction of the window, because the header and toolbars sit between
+        // them — 80% of the window used to leave the comparator 46px.
+        function computeCommentsPaneHeight(opts) {
+            var minPane = opts.minPaneHeight;
+            var ceiling = opts.paneBottom - opts.viewportTop - opts.minViewportHeight;
+            // A window too short to honour both floors gives up the comparator's
+            // reserve rather than the pane's minimum, so the handle stays draggable.
+            if (ceiling < minPane) ceiling = minPane;
+            var desired = opts.paneBottom - opts.pointerY;
+            if (desired > ceiling) desired = ceiling;
+            if (desired < minPane) desired = minPane;
+            return desired;
+        }
+
+        // Scroll offset that puts the newest comment's bottom edge at the bottom
+        // of the visible pane, so a pane at its initial size is full of the
+        // latest comments with the older ones scrolled off the top. Scrolling to
+        // the very bottom instead — which is what this replaced — lands on the
+        // post-a-comment form, which is ~119px of an initial ~269px pane, so five
+        // of six comments were 0px visible and the sixth was cut off mid-sentence.
+        // Coordinates are in the scroll container's own content space, and a
+        // file with no comments passes 0 — there is nothing to park, and 0
+        // falls out of the same clamp as the top of the pane.
+        function computeCommentsScrollTop(opts) {
+            var maxScroll = opts.scrollHeight - opts.clientHeight;
+            if (maxScroll < 0) maxScroll = 0;
+            var top = opts.lastCommentBottom - opts.clientHeight;
+            if (top > maxScroll) top = maxScroll;
+            if (top < 0) top = 0;
+            return top;
+        }
+        // ── comments-pane:end ────────────────────────────────────────────────
 
         function imageUrls(fileData) {
             return buildImageUrls(fileData, apiBase, state.baseRef, state.headRef);
@@ -1907,8 +1969,7 @@
         // -- Comments --
         function loadComments(path) {
             commentsSection.style.display = '';
-            commentsSection.innerHTML = '<div class="comments-resize" id="comments-resize"></div><div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
-            initCommentsResize();
+            commentsScroll.innerHTML = '<div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
 
             fetch(apiBase + '/comments?path=' + encodeURIComponent(path))
                 .then(function(r) { return r.json(); })
@@ -1923,8 +1984,7 @@
         }
 
         function renderComments(comments, path) {
-            var html = '<div class="comments-resize" id="comments-resize"></div>';
-            html += '<div class="comments-section-inner">';
+            var html = '<div class="comments-section-inner">';
             html += '<h4>Comments on this file (' + comments.length + ')</h4>';
 
             comments.forEach(function(c) {
@@ -1946,10 +2006,8 @@
             html += '</div>';
             html += '</div>'; // close .comments-section-inner
 
-            commentsSection.innerHTML = html;
-            initCommentsResize();
-            // Scroll to show latest comments (bottom of comment list, above the form)
-            commentsSection.scrollTop = commentsSection.scrollHeight;
+            commentsScroll.innerHTML = html;
+            scrollToNewestComment();
 
             var textarea = document.getElementById('comment-text');
             var submitBtn = document.getElementById('comment-submit');
@@ -1980,6 +2038,27 @@
                     submitBtn.disabled = false;
                     submitBtn.textContent = 'Post Comment';
                 });
+            });
+        }
+
+        // Park the newest comment against the bottom of the pane. The card's
+        // bottom is measured through getBoundingClientRect rather than
+        // offsetTop, which is relative to whichever ancestor is positioned —
+        // .comments-section is, so offsetTop would carry the drag handle's
+        // height. .comments-scroll has no padding or border, so its border-box
+        // top and its scroll origin are the same point.
+        function scrollToNewestComment() {
+            var cards = commentsScroll.querySelectorAll('.comment-card');
+            var lastCommentBottom = 0;
+            if (cards.length) {
+                var last = cards[cards.length - 1];
+                lastCommentBottom = commentsScroll.scrollTop +
+                    (last.getBoundingClientRect().bottom - commentsScroll.getBoundingClientRect().top);
+            }
+            commentsScroll.scrollTop = computeCommentsScrollTop({
+                lastCommentBottom: lastCommentBottom,
+                clientHeight: commentsScroll.clientHeight,
+                scrollHeight: commentsScroll.scrollHeight,
             });
         }
 
@@ -2205,36 +2284,43 @@
         });
 
         // -- Comments pane resize handle --
-        var commentsResizeDragging = false;
-        function initCommentsResize() {
+        // Set the pane's height for a drag of its top edge to pointerY. The
+        // comparator's top is the reference for the ceiling, so the reserve is
+        // measured against the space the comparator actually has.
+        function resizeCommentsPane(pointerY) {
+            commentsSection.style.maxHeight = computeCommentsPaneHeight({
+                paneBottom: commentsSection.getBoundingClientRect().bottom,
+                viewportTop: viewport.getBoundingClientRect().top,
+                pointerY: pointerY,
+                minPaneHeight: COMMENTS_PANE_TUNING.minPaneHeight,
+                minViewportHeight: COMMENTS_PANE_TUNING.minViewportHeight,
+            }) + 'px';
+        }
+
+        // The handle is part of the pane's static markup rather than of the
+        // comment HTML, so it is bound once here instead of after every render.
+        (function() {
             var handle = document.getElementById('comments-resize');
-            if (!handle) return;
+            var dragging = false;
             handle.addEventListener('mousedown', function(e) {
                 e.preventDefault();
-                commentsResizeDragging = true;
+                dragging = true;
                 handle.classList.add('dragging');
                 document.body.style.cursor = 'row-resize';
                 document.body.style.userSelect = 'none';
             });
-        }
-        document.addEventListener('mousemove', function(e) {
-            if (!commentsResizeDragging) return;
-            // Calculate new height: bottom of viewport minus mouse Y
-            var rect = commentsSection.getBoundingClientRect();
-            var newHeight = rect.bottom - e.clientY;
-            // Clamp: min 60px, max 80% of viewport height
-            var maxH = window.innerHeight * 0.8;
-            newHeight = Math.max(60, Math.min(newHeight, maxH));
-            commentsSection.style.maxHeight = newHeight + 'px';
-        });
-        document.addEventListener('mouseup', function() {
-            if (!commentsResizeDragging) return;
-            commentsResizeDragging = false;
-            var handle = document.getElementById('comments-resize');
-            if (handle) handle.classList.remove('dragging');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
-        });
+            document.addEventListener('mousemove', function(e) {
+                if (!dragging) return;
+                resizeCommentsPane(e.clientY);
+            });
+            document.addEventListener('mouseup', function() {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            });
+        })();
 
         // -- Sidebar resize handle --
         (function() {
