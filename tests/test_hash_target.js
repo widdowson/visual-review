@@ -153,7 +153,11 @@ for (let i = 0; i < ODD.length; i++) {
 // The cost is that these stubs have to keep up with the SPA. A name either
 // function starts closing over and this file does not supply is a
 // ReferenceError naming it, which is a loud failure pointing here — the same
-// trade, and the same way round, as the brace walk in spa_source.js.
+// trade, and the same way round, as the brace walk in spa_source.js. That
+// holds only for code the driver actually reaches, which is why the sidebar
+// stub below returns rows rather than an empty list: with nothing to iterate,
+// the one callback in selectFile never ran, and a name unstubbed *there* was
+// silently fine while this paragraph promised otherwise.
 
 function driver(opts) {
   const state = {
@@ -176,8 +180,18 @@ function driver(opts) {
   const element = () => ({
     style: {}, innerHTML: '',
     classList: {add: noop, remove: noop, toggle: noop},
-    querySelectorAll: () => [],
   });
+
+  // One sidebar row per file, each answering data-path and recording whether
+  // it was marked active, so the loop that highlights the selection runs and
+  // is assertable rather than iterating over nothing.
+  const rows = opts.images.map(function(img) {
+    const row = {active: null};
+    row.getAttribute = name => (name === 'data-path' ? img.path : null);
+    row.classList = {toggle: (cls, on) => { if (cls === 'active') row.active = on; }};
+    return row;
+  });
+  const fileList = {querySelectorAll: () => rows};
 
   const loaded = [];
   const selectFile = new Function(
@@ -185,7 +199,7 @@ function driver(opts) {
     'viewport', 'imageInfo', 'loadImagePair', 'loadComments',
     'hashTargetFor', 'encodeHashTarget',
     bodyOf('selectFile') + '\nreturn selectFile;')(
-      state, location, noop, element(), element(), element(), element(),
+      state, location, noop, fileList, element(), element(), element(),
       p => loaded.push(p), noop, hashTargetFor, encodeHashTarget);
 
   // Wrapped rather than replaced: the read side has to reach the real
@@ -202,7 +216,7 @@ function driver(opts) {
       state, location, spy, resolveHashTarget);
 
   return {
-    state: state, selected: selected, loaded: loaded,
+    state: state, selected: selected, loaded: loaded, rows: rows,
     selectFile: selectFile, selectFileFromHash: selectFileFromHash,
     hash: () => stored,
   };
@@ -219,6 +233,22 @@ function driver(opts) {
   assert.deepStrictEqual(d.loaded, [COLLIDING[2].path],
     'and must load the file that was asked for');
   assert.strictEqual(d.state.currentFile, COLLIDING[2].path);
+  assert.deepStrictEqual(d.rows.map(r => r.active), [false, false, true],
+    'and must mark that row active and no other — the two colliding rows are '
+    + 'told apart by their path, which is the only thing that distinguishes them');
+}
+
+// The write must encode. No other write case can see this: every path in
+// COLLIDING and ROOT_COLLIDING is ASCII, where encodeHashTarget is the
+// identity, and the percent-encoding case further down is a read. Round 2 of
+// this PR's review measured the gap — dropping encodeHashTarget from the write
+// was green — and it is the write half of the feature. A raw `%` reaching the
+// fragment is a URIError on the next read, on a hash the app wrote itself.
+{
+  const d = driver({images: files(['dir/a b%c.png'])});
+  d.selectFile('dir/a b%c.png');
+  assert.strictEqual(d.hash(), '#a%20b%25c.png',
+    'the written hash must be encoded, not the raw name');
 }
 
 // An uncollided file still gets the short form, which is the common case.
