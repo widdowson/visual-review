@@ -686,25 +686,77 @@
             });
         }
 
+        // -- Deep-link: the hash a file is named by ------------------------
+        //
+        // A hash is written from a path and read back into a selection, so the
+        // two halves have to agree about what names a file. Writing the
+        // basename alone does not, whenever a PR carries that basename in two
+        // directories: the write fires hashchange, the read scans from the top,
+        // and the first of them wins however far down the one you clicked was.
+        // That is the normal case for these baselines, whose per-app
+        // directories repeat names like cuj_01_login.bmp.
+
+        // ── hash-target:begin ──────────────────────────────────────────
+        // Naming a file in the hash, and reading that name back. Pure, so it
+        // can be tested without a DOM; extracted verbatim by
+        // tests/test_hash_target.js, which is what the markers are for.
+
+        function basenameOf(path) {
+            var parts = path.split('/');
+            return parts[parts.length - 1];
+        }
+
+        // The name to write for `path`: its basename while no other file in
+        // `images` shares it, and the whole path otherwise. So the short form
+        // stays the common case and the long one appears only where the short
+        // one would be a lie.
+        function hashTargetFor(path, images) {
+            var name = basenameOf(path);
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].path !== path && basenameOf(images[i].path) === name) {
+                    return path;
+                }
+            }
+            return name;
+        }
+
+        // The index `target` names, or -1. A whole path is matched before any
+        // basename, which is what keeps an unambiguous link off the ambiguous
+        // fallback: the basename pass alone would answer index 0 for a target
+        // that names a file further down exactly.
+        function resolveHashTarget(target, images) {
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].path === target) return i;
+            }
+            for (var i = 0; i < images.length; i++) {
+                if (basenameOf(images[i].path) === target) return i;
+            }
+            return -1;
+        }
+
+        // Per segment, because a fragment may hold a literal `/` and these
+        // URLs are read and pasted by people. decodeURIComponent on the way
+        // back leaves those slashes alone, so the round trip still holds.
+        function encodeHashTarget(target) {
+            return target.split('/').map(function(seg) {
+                return encodeURIComponent(seg);
+            }).join('/');
+        }
+        // ── hash-target:end ────────────────────────────────────────────
+
         // -- Deep-link: select file from URL hash --
         function selectFileFromHash() {
             var hash = location.hash.replace(/^#/, '');
             if (!hash || !state.images.length) return false;
-            var target = decodeURIComponent(hash);
-            for (var i = 0; i < state.images.length; i++) {
-                var parts = state.images[i].path.split('/');
-                var fname = parts[parts.length - 1];
-                if (fname === target || state.images[i].path === target) {
-                    // selectFile writes the hash, so its own hashchange lands
-                    // back here. Reloading the current file would double every
-                    // request and discard the images already decoded.
-                    if (state.images[i].path !== state.currentFile) {
-                        selectFile(state.images[i].path, true);
-                    }
-                    return true;
-                }
+            var idx = resolveHashTarget(decodeURIComponent(hash), state.images);
+            if (idx < 0) return false;
+            // selectFile writes the hash, so its own hashchange lands back
+            // here. Reloading the current file would double every request and
+            // discard the images already decoded.
+            if (state.images[idx].path !== state.currentFile) {
+                selectFile(state.images[idx].path, true);
             }
-            return false;
+            return true;
         }
 
         window.addEventListener('hashchange', function() {
@@ -742,8 +794,7 @@
 
             // Update URL hash
             if (!skipHash) {
-                var parts = path.split('/');
-                location.hash = encodeURIComponent(parts[parts.length - 1]);
+                location.hash = encodeHashTarget(hashTargetFor(path, state.images));
             }
 
             // Show toolbar
