@@ -279,18 +279,23 @@
         }
 
         /* Comments section */
+        /* The pane is a flex column of a fixed-height drag handle over a
+           scrolling body, so the handle stays on the pane's top edge instead
+           of riding over the comment it happens to be scrolled against. The
+           pane is content-sized up to its max-height: 30vh initially, and
+           whatever the drag sets after that. */
         .comments-section {
             border-top: 1px solid var(--vr-border);
             max-width: 800px; margin: 0 auto; width: 100%;
-            max-height: 30vh; overflow-y: auto; position: relative;
-            flex-shrink: 0;
+            max-height: 30vh; position: relative;
+            flex-shrink: 0; display: flex; flex-direction: column; min-height: 0;
         }
+        .comments-scroll { flex: 1; overflow-y: auto; min-height: 0; }
         .comments-section-inner {
             padding: 20px;
         }
         .comments-resize {
-            position: sticky; top: 0; left: 0; right: 0; height: 6px;
-            cursor: row-resize; z-index: 10;
+            height: 6px; cursor: row-resize;
             background: transparent; flex-shrink: 0;
         }
         .comments-resize:hover, .comments-resize.dragging {
@@ -512,7 +517,10 @@
             <div class="viewport" id="viewport">
                 <div class="empty-msg">Select an image from the sidebar to begin review.</div>
             </div>
-            <div class="comments-section" id="comments-section" style="display:none;"></div>
+            <div class="comments-section" id="comments-section" style="display:none;">
+                <div class="comments-resize" id="comments-resize"></div>
+                <div class="comments-scroll" id="comments-scroll"></div>
+            </div>
         </div>
     </div>
 
@@ -596,6 +604,7 @@
         var modeToolbar = document.getElementById('mode-toolbar');
         var imageInfo = document.getElementById('image-info');
         var commentsSection = document.getElementById('comments-section');
+        var commentsScroll = document.getElementById('comments-scroll');
         var prTitle = document.getElementById('pr-title');
         var imageCount = document.getElementById('image-count');
         var loupeBase = document.getElementById('loupe-base');
@@ -692,8 +701,7 @@
 
                 var fname = document.createElement('span');
                 fname.className = 'filename';
-                var parts = img.path.split('/');
-                fname.textContent = parts[parts.length - 1];
+                fname.textContent = basenameOf(img.path);
                 fname.title = img.path;
                 li.appendChild(fname);
 
@@ -705,25 +713,77 @@
             });
         }
 
+        // -- Deep-link: the hash a file is named by ------------------------
+        //
+        // A hash is written from a path and read back into a selection, so the
+        // two halves have to agree about what names a file. Writing the
+        // basename alone does not, whenever a PR carries that basename in two
+        // directories: the write fires hashchange, the read scans from the top,
+        // and the first of them wins however far down the one you clicked was.
+        // That is the normal case for these baselines, whose per-app
+        // directories repeat names like cuj_01_login.bmp.
+
+        // ── hash-target:begin ──────────────────────────────────────────
+        // Naming a file in the hash, and reading that name back. Pure, so it
+        // can be tested without a DOM; extracted verbatim by
+        // tests/test_hash_target.js, which is what the markers are for.
+
+        function basenameOf(path) {
+            var parts = path.split('/');
+            return parts[parts.length - 1];
+        }
+
+        // The name to write for `path`: its basename while no other file in
+        // `images` shares it, and the whole path otherwise. So the short form
+        // stays the common case and the long one appears only where the short
+        // one would be a lie.
+        function hashTargetFor(path, images) {
+            var name = basenameOf(path);
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].path !== path && basenameOf(images[i].path) === name) {
+                    return path;
+                }
+            }
+            return name;
+        }
+
+        // The index `target` names, or -1. A whole path is matched before any
+        // basename, which is what keeps an unambiguous link off the ambiguous
+        // fallback: the basename pass alone would answer index 0 for a target
+        // that names a file further down exactly.
+        function resolveHashTarget(target, images) {
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].path === target) return i;
+            }
+            for (var i = 0; i < images.length; i++) {
+                if (basenameOf(images[i].path) === target) return i;
+            }
+            return -1;
+        }
+
+        // Per segment, because a fragment may hold a literal `/` and these
+        // URLs are read and pasted by people. decodeURIComponent on the way
+        // back leaves those slashes alone, so the round trip still holds.
+        function encodeHashTarget(target) {
+            return target.split('/').map(function(seg) {
+                return encodeURIComponent(seg);
+            }).join('/');
+        }
+        // ── hash-target:end ────────────────────────────────────────────
+
         // -- Deep-link: select file from URL hash --
         function selectFileFromHash() {
             var hash = location.hash.replace(/^#/, '');
             if (!hash || !state.images.length) return false;
-            var target = decodeURIComponent(hash);
-            for (var i = 0; i < state.images.length; i++) {
-                var parts = state.images[i].path.split('/');
-                var fname = parts[parts.length - 1];
-                if (fname === target || state.images[i].path === target) {
-                    // selectFile writes the hash, so its own hashchange lands
-                    // back here. Reloading the current file would double every
-                    // request and discard the images already decoded.
-                    if (state.images[i].path !== state.currentFile) {
-                        selectFile(state.images[i].path, true);
-                    }
-                    return true;
-                }
+            var idx = resolveHashTarget(decodeURIComponent(hash), state.images);
+            if (idx < 0) return false;
+            // selectFile writes the hash, so its own hashchange lands back
+            // here. Reloading the current file would double every request and
+            // discard the images already decoded.
+            if (state.images[idx].path !== state.currentFile) {
+                selectFile(state.images[idx].path, true);
             }
-            return false;
+            return true;
         }
 
         window.addEventListener('hashchange', function() {
@@ -761,8 +821,7 @@
 
             // Update URL hash
             if (!skipHash) {
-                var parts = path.split('/');
-                location.hash = encodeURIComponent(parts[parts.length - 1]);
+                location.hash = encodeHashTarget(hashTargetFor(path, state.images));
             }
 
             // Show toolbar
@@ -885,6 +944,106 @@
             };
         }
         // ── image-urls:end ───────────────────────────────────────────────────
+
+        // ── gh-diff-link:begin ───────────────────────────────────────────────
+        // Where a file sits in the GitHub PR diff (issue #15). Deterministic
+        // and DOM-free, so the tests can drive it — though not pure in the
+        // sense tests/spa_source.js checks for: it needs Web Crypto, which
+        // that helper's IMPURE list does not cover and should not, since the
+        // digest is the same in node as in a browser.
+        // GitHub anchors a file in the Files tab as `#diff-<sha256 of the
+        // file's path, lower-case hex>` — the path alone, with no trailing
+        // newline and nothing about the repository or the PR mixed in. That
+        // format is GitHub's and it is undocumented: the pair
+        // tests/test_gh_diff_link.js pins comes from a community answer, an
+        // older answer describes the anchor as an md5, and nothing here
+        // observes github.com. So take it as the best-sourced reading rather
+        // than as fact, read that test's comment for where it came from, and
+        // see #34 for what is still unverified — including which side of a
+        // rename GitHub hashes, where this uses the new path.
+        //
+        // Takes owner, repo and the number as arguments rather than closing
+        // over them so it can be tested without a DOM, like buildImageUrls
+        // above — keep the markers.
+        async function ghDiffUrl(owner, repo, prNumber, path) {
+            var bytes = new TextEncoder().encode(path);
+            var digest = await crypto.subtle.digest('SHA-256', bytes);
+            var hash = Array.from(new Uint8Array(digest)).map(function(b) {
+                return b.toString(16).padStart(2, '0');
+            }).join('');
+            return 'https://github.com/' + encodeURIComponent(owner) + '/' +
+                encodeURIComponent(repo) + '/pull/' + encodeURIComponent(prNumber) +
+                '/files#diff-' + hash;
+        }
+        // ── gh-diff-link:end ─────────────────────────────────────────────────
+
+        // ── comments-pane:begin ──────────────────────────────────────────────
+        // The two pieces of arithmetic behind the comments pane, kept pure so
+        // they can be tested without a DOM. Extracted verbatim by
+        // tests/test_comments_pane.js, which evaluates this region and reads
+        // COMMENTS_PANE_TUNING out of it — keep the markers, keep the purity,
+        // and keep the tuning inside them, since a constant declared outside
+        // is one a test can only read by grepping.
+        //
+        // The pane's *initial* cap is the CSS `max-height` on .comments-section
+        // and deliberately not a constant here: a second copy in JS would be a
+        // knob nothing reads.
+        var COMMENTS_PANE_TUNING = {
+            minPaneHeight: 60,      // a dragged-shut pane still shows its top edge
+            minViewportHeight: 120, // pixels the image comparator always keeps
+        };
+
+        // Height for a drag of the pane's top edge to pointerY. Clamped at both
+        // ends: never shorter than minPaneHeight, and never so tall that the
+        // comparator above it is left with less than minViewportHeight. The
+        // ceiling is measured from the comparator's own top rather than from a
+        // fraction of the window, because the header and toolbars sit between
+        // them — 80% of the window used to leave the comparator 46px.
+        // The order of the two clamps is load-bearing and there is deliberately
+        // no third guard: applying the floor last is what makes a window too
+        // short to honour both — a ceiling below minPaneHeight — give up the
+        // comparator's reserve rather than the pane's minimum, so the handle
+        // stays draggable. Raising such a ceiling to minPaneHeight first would
+        // be a branch no input can distinguish.
+        function computeCommentsPaneHeight(opts) {
+            var ceiling = opts.paneBottom - opts.viewportTop - opts.minViewportHeight;
+            var desired = opts.paneBottom - opts.pointerY;
+            if (desired > ceiling) desired = ceiling;
+            if (desired < opts.minPaneHeight) desired = opts.minPaneHeight;
+            return desired;
+        }
+
+        // Scroll offset that puts the newest comment's bottom edge at the bottom
+        // of the visible pane, so a pane at its initial size is full of the
+        // latest comments with the older ones scrolled off the top. Scrolling to
+        // the very bottom instead — which is what this replaced — lands on the
+        // post-a-comment form, which is ~119px of an initial ~269px pane, so five
+        // of six comments were 0px visible and the sixth was cut off mid-sentence.
+        //
+        // Three of the four inputs — scrollTop, clientHeight, scrollHeight —
+        // are the scroll container's own numbers. newestCardBottom is not in
+        // content space: it is measured from the container's top edge, which is
+        // what a rect comparison yields, so adding scrollTop is what converts
+        // it. That addition lives here rather than at the call site so a case
+        // can cover it. It is a no-op on the path that ships today, since
+        // loadComments writes a short spinner first and that resets the offset;
+        // it is here so the helper does not depend on its caller having done so.
+        //
+        // A file with no comments passes 0, which the guard takes to the top of
+        // the pane. Below it the order of the clamps is what covers a pane
+        // taller than its content: a negative maxScroll passes through and the
+        // floor takes it to 0.
+        function computeCommentsScrollTop(opts) {
+            // A file with no comments has nothing to park, and a pane still
+            // scrolled from the last file would otherwise open part-way down.
+            if (opts.newestCardBottom <= 0) return 0;
+            var maxScroll = opts.scrollHeight - opts.clientHeight;
+            var top = opts.scrollTop + opts.newestCardBottom - opts.clientHeight;
+            if (top > maxScroll) top = maxScroll;
+            if (top < 0) top = 0;
+            return top;
+        }
+        // ── comments-pane:end ────────────────────────────────────────────────
 
         function imageUrls(fileData) {
             return buildImageUrls(fileData, apiBase, state.baseRef, state.headRef);
@@ -1229,13 +1388,25 @@
             }
             imageInfo.innerHTML = infoHtml;
 
-            // Add GitHub diff link asynchronously
-            sha256Hex(state.currentFile).then(function(hash) {
+            // Fill that placeholder once the digest is in. The path is
+            // captured here and re-checked on arrival: a navigation during
+            // the digest rebuilds this bar with a new container of the same
+            // id, so an unguarded write puts the file we have left under the
+            // name of the one now on screen.
+            var linkPath = state.currentFile;
+            ghDiffUrl(owner, repo, prNumber, linkPath).then(function(ghUrl) {
+                if (linkPath !== state.currentFile) return;
                 var container = document.getElementById('gh-diff-link-container');
-                if (container) {
-                    var ghUrl = 'https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/pull/' + prNumber + '/files#diff-' + hash;
-                    container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) + '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
-                }
+                if (!container) return;
+                container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) +
+                    '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
+            }).catch(function(err) {
+                // Anything from here: the digest itself (there is no
+                // SubtleCrypto outside a secure context, where an unhandled
+                // rejection was reported once per file) or the write above it.
+                // Either way the rest of the bar stands and only the link is
+                // lost, which is the right trade for a convenience link.
+                console.warn('visual-review: no GitHub diff link for this file', err);
             });
 
             if (renameMode === 'single') {
@@ -2042,8 +2213,7 @@
         // -- Comments --
         function loadComments(path) {
             commentsSection.style.display = '';
-            commentsSection.innerHTML = '<div class="comments-resize" id="comments-resize"></div><div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
-            initCommentsResize();
+            commentsScroll.innerHTML = '<div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
 
             fetch(apiBase + '/comments?path=' + encodeURIComponent(path))
                 .then(function(r) { return r.json(); })
@@ -2058,8 +2228,7 @@
         }
 
         function renderComments(comments, path) {
-            var html = '<div class="comments-resize" id="comments-resize"></div>';
-            html += '<div class="comments-section-inner">';
+            var html = '<div class="comments-section-inner">';
             html += '<h4>Comments on this file (' + comments.length + ')</h4>';
 
             comments.forEach(function(c) {
@@ -2081,10 +2250,8 @@
             html += '</div>';
             html += '</div>'; // close .comments-section-inner
 
-            commentsSection.innerHTML = html;
-            initCommentsResize();
-            // Scroll to show latest comments (bottom of comment list, above the form)
-            commentsSection.scrollTop = commentsSection.scrollHeight;
+            commentsScroll.innerHTML = html;
+            scrollToNewestComment();
 
             var textarea = document.getElementById('comment-text');
             var submitBtn = document.getElementById('comment-submit');
@@ -2115,6 +2282,29 @@
                     submitBtn.disabled = false;
                     submitBtn.textContent = 'Post Comment';
                 });
+            });
+        }
+
+        // Park the newest comment against the bottom of the pane. The card's
+        // bottom is measured through getBoundingClientRect rather than
+        // offsetTop, which is relative to whichever ancestor is positioned —
+        // .comments-section is, so offsetTop would carry the drag handle's
+        // height and its border. .comments-scroll has no padding or border, so
+        // its border-box top and its scroll origin are the same point, which is
+        // what lets computeCommentsScrollTop add the scroll offset back.
+        function scrollToNewestComment() {
+            var cards = commentsScroll.querySelectorAll('.comment-card');
+            var newestCardBottom = 0;
+            if (cards.length) {
+                var last = cards[cards.length - 1];
+                newestCardBottom = last.getBoundingClientRect().bottom -
+                    commentsScroll.getBoundingClientRect().top;
+            }
+            commentsScroll.scrollTop = computeCommentsScrollTop({
+                newestCardBottom: newestCardBottom,
+                scrollTop: commentsScroll.scrollTop,
+                clientHeight: commentsScroll.clientHeight,
+                scrollHeight: commentsScroll.scrollHeight,
             });
         }
 
@@ -2181,13 +2371,6 @@
 
         function escAttr(s) {
             return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
-
-        // SHA-256 hash for GitHub diff anchors (async, uses SubtleCrypto)
-        async function sha256Hex(str) {
-            var data = new TextEncoder().encode(str);
-            var buf = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
         }
 
         function getFileData(path) {
@@ -2340,36 +2523,50 @@
         });
 
         // -- Comments pane resize handle --
-        var commentsResizeDragging = false;
-        function initCommentsResize() {
+        // Set the pane's height for a drag of its top edge to pointerY. The
+        // comparator's top is the reference for the ceiling, so the reserve is
+        // measured against the space the comparator actually has.
+        function resizeCommentsPane(pointerY) {
+            commentsSection.style.maxHeight = computeCommentsPaneHeight({
+                paneBottom: commentsSection.getBoundingClientRect().bottom,
+                viewportTop: viewport.getBoundingClientRect().top,
+                pointerY: pointerY,
+                minPaneHeight: COMMENTS_PANE_TUNING.minPaneHeight,
+                minViewportHeight: COMMENTS_PANE_TUNING.minViewportHeight,
+            }) + 'px';
+        }
+
+        // The handle is part of the pane's static markup rather than of the
+        // comment HTML, so it is bound once here instead of after every render.
+        // All three handlers are named rather than inline so the test can read
+        // them: an anonymous handler can be emptied out with every assertion
+        // about resizeCommentsPane still green, and emptying the mousedown one
+        // leaves the pane no more resizable than emptying the mousemove one.
+        (function() {
             var handle = document.getElementById('comments-resize');
-            if (!handle) return;
-            handle.addEventListener('mousedown', function(e) {
+            var dragging = false;
+            function onCommentsDragStart(e) {
                 e.preventDefault();
-                commentsResizeDragging = true;
+                dragging = true;
                 handle.classList.add('dragging');
                 document.body.style.cursor = 'row-resize';
                 document.body.style.userSelect = 'none';
-            });
-        }
-        document.addEventListener('mousemove', function(e) {
-            if (!commentsResizeDragging) return;
-            // Calculate new height: bottom of viewport minus mouse Y
-            var rect = commentsSection.getBoundingClientRect();
-            var newHeight = rect.bottom - e.clientY;
-            // Clamp: min 60px, max 80% of viewport height
-            var maxH = window.innerHeight * 0.8;
-            newHeight = Math.max(60, Math.min(newHeight, maxH));
-            commentsSection.style.maxHeight = newHeight + 'px';
-        });
-        document.addEventListener('mouseup', function() {
-            if (!commentsResizeDragging) return;
-            commentsResizeDragging = false;
-            var handle = document.getElementById('comments-resize');
-            if (handle) handle.classList.remove('dragging');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
-        });
+            }
+            function onCommentsDragMove(e) {
+                if (!dragging) return;
+                resizeCommentsPane(e.clientY);
+            }
+            function onCommentsDragEnd() {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+            handle.addEventListener('mousedown', onCommentsDragStart);
+            document.addEventListener('mousemove', onCommentsDragMove);
+            document.addEventListener('mouseup', onCommentsDragEnd);
+        })();
 
         // -- Sidebar resize handle --
         (function() {

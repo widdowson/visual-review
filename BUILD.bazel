@@ -77,6 +77,15 @@ js_test(
 )
 
 js_test(
+    name = "test_hash_target",
+    entry_point = "tests/test_hash_target.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+js_test(
     name = "test_image_urls",
     entry_point = "tests/test_image_urls.js",
     data = [
@@ -86,8 +95,26 @@ js_test(
 )
 
 js_test(
+    name = "test_gh_diff_link",
+    entry_point = "tests/test_gh_diff_link.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+js_test(
     name = "test_rename_display",
     entry_point = "tests/test_rename_display.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+js_test(
+    name = "test_comments_pane",
+    entry_point = "tests/test_comments_pane.js",
     data = [
         "static/index.html",
         "tests/spa_source.js",

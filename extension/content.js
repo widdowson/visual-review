@@ -1,7 +1,9 @@
 // Visual Review — Chrome extension content script for GitHub
 //
-// Adds "Visual Review" links to open PRs that contain image files
-// (.png, .bmp, .jpg, .jpeg). Works on PR list and PR detail pages.
+// Adds "Visual Review" links to open PRs that contain image files. Which
+// extensions count is the server's answer, fetched from /api/extensions and
+// cached; see the vr:extensions region below. Works on PR list and PR detail
+// pages.
 //
 // Goggles icon: Font Awesome Free (CC BY 4.0) — fa-vr-cardboard
 
@@ -31,13 +33,151 @@
   const MAX_FILES = 100;
   const OWNER_FILTER = 'widdowson';
 
+  /* ─── Supported image extensions ─── */
+  //
+  // The server owns the list. IMAGE_EXTENSIONS is the copy baked into this
+  // bundle at build time from image_extensions.json, and it is what the
+  // extension matches against until the server's answer arrives — and
+  // whatever happens, if that answer never does. So a format added on the
+  // server reaches an already-installed extension without a rebuild, and a
+  // server that is down, refusing, answering nonsense, or accepting the
+  // connection and never answering — the request is bounded, see
+  // fetchTimeoutSignal — leaves the extension behaving exactly as it did
+  // before this was added.
+  //
+  // The region below is marked because extension/test_extensions_fetch.js
+  // extracts and runs this source rather than keeping its own copy of it.
+  //
+  // vr:extensions:begin
+  var EXT_CACHE_KEY = 'vr_image_extensions';
+  var EXT_CACHE_DURATION_MS = 24 * 60 * 60 * 1000;
+  var EXT_FETCH_TIMEOUT_MS = 5000;
+
+  var _extensions = IMAGE_EXTENSIONS.slice();
+  var _extensionsPromise = null;
+
+  // Returns the list to adopt, or null to keep the one we have. An empty array
+  // is rejected rather than adopted: it is what a half-configured server would
+  // answer, and adopting it would stop the extension matching anything at all
+  // — which on a PR page is indistinguishable from "this PR has no images",
+  // so nobody would notice the links had quietly stopped appearing.
+  function normalizeExtensions(value) {
+    if (!Array.isArray(value) || value.length === 0) return null;
+    var out = [];
+    for (var i = 0; i < value.length; i++) {
+      var ext = value[i];
+      if (typeof ext !== 'string') return null;
+      if (ext.length < 2 || ext.charAt(0) !== '.') return null;
+      out.push(ext.toLowerCase());
+    }
+    return out;
+  }
+
+  function readCachedExtensions() {
+    try {
+      var raw = localStorage.getItem(EXT_CACHE_KEY);
+      if (!raw) return null;
+      var entry = JSON.parse(raw);
+      if (!entry || typeof entry.ts !== 'number') return null;
+      if (Date.now() - entry.ts > EXT_CACHE_DURATION_MS) return null;
+      return normalizeExtensions(entry.extensions);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeCachedExtensions(list) {
+    try {
+      localStorage.setItem(EXT_CACHE_KEY,
+        JSON.stringify({ extensions: list, ts: Date.now() }));
+    } catch (e) {}
+  }
+
+  // Memoized: one fetch per page however many PR rows ask, since a list page
+  // calls prHasImageFiles once per row. A failure memoizes the bundled list
+  // too, so an unreachable server costs one request rather than one per row.
+  //
+  // The request has to be bounded, because prHasImageFiles awaits it before it
+  // looks at anything and a PR list page awaits that once per row. A VR server
+  // that refuses or errors falls back below; one that accepts the connection
+  // and never answers — a blackholing proxy, a captive portal, a wedged host
+  // — would otherwise block the first row forever and inject nothing at all,
+  // on the list page, the detail page and the hovercard alike, for the life of
+  // that page. fetchTimeoutSignal below is what bounds it, and the abort lands
+  // in the same catch as any other failure.
+  //
+  // credentials:'omit' is not about cookies: fetch defaults to 'same-origin'
+  // and this is cross-origin, so none would be sent either way. It is there to
+  // keep the response readable. The server answers
+  // Access-Control-Allow-Origin: *, and a wildcard cannot satisfy a
+  // credentialed request — so a later 'include' here would make every
+  // response unreadable and pin the extension to the bundled list forever,
+  // silently. That is what the assertion on this option is protecting.
+  // AbortSignal.timeout is Chrome 103+. The manifest sets no
+  // minimum_chrome_version and MV3 loads from Chrome 88, and this is evaluated
+  // while building fetch's options — before _extensionsPromise is assigned and
+  // outside the catch below. So calling it unguarded means that on a browser
+  // without it, a TypeError escapes ensureExtensions, then prHasImageFiles
+  // (which awaits it ahead of its own try), then the row loop and run(), and
+  // the extension injects nothing at all on any surface. That is precisely the
+  // failure the timeout was added to prevent, so it must not be the way the
+  // timeout is added.
+  //
+  // undefined is a valid `signal`, so a browser without it gets the unbounded
+  // request it would have had before any of this — which is the fallback
+  // behaviour this whole region promises.
+  //
+  // Only .timeout is checked. AbortSignal itself has existed since Chrome 66
+  // and MV3 loads from 88, so there is no browser that can run this extension
+  // and lack it — a `typeof AbortSignal !== 'undefined'` conjunct would be a
+  // branch no run could enter, here or in a test.
+  function fetchTimeoutSignal() {
+    return (typeof AbortSignal.timeout === 'function')
+      ? AbortSignal.timeout(EXT_FETCH_TIMEOUT_MS)
+      : undefined;
+  }
+
+  function ensureExtensions() {
+    if (_extensionsPromise) return _extensionsPromise;
+
+    var cached = readCachedExtensions();
+    if (cached) {
+      _extensions = cached;
+      _extensionsPromise = Promise.resolve(cached);
+      return _extensionsPromise;
+    }
+
+    _extensionsPromise = fetch(VR_BASE_URL + '/api/extensions', {
+      credentials: 'omit',
+      signal: fetchTimeoutSignal(),
+    })
+      .then(function(resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function(data) {
+        var list = normalizeExtensions(data && data.extensions);
+        if (!list) throw new Error('malformed /api/extensions response');
+        _extensions = list;
+        writeCachedExtensions(list);
+        return list;
+      })
+      .catch(function(e) {
+        console.warn('[VR] Using the bundled image extensions:', e);
+        return _extensions;
+      });
+
+    return _extensionsPromise;
+  }
+
   function hasImageExtension(path) {
     var lower = path.toLowerCase();
-    for (var i = 0; i < IMAGE_EXTENSIONS.length; i++) {
-      if (lower.endsWith(IMAGE_EXTENSIONS[i])) return true;
+    for (var i = 0; i < _extensions.length; i++) {
+      if (lower.endsWith(_extensions[i])) return true;
     }
     return false;
   }
+  // vr:extensions:end
 
   /* ─── Cache helpers ─── */
 
@@ -68,6 +208,10 @@
   async function prHasImageFiles(owner, repo, prNumber) {
     const cached = getCachedResult(owner, repo, prNumber);
     if (cached === true) return true;
+
+    // Every caller reaches hasImageExtension through here, so this one await
+    // covers the list page, the detail page and the hovercard.
+    await ensureExtensions();
 
     try {
       const resp = await fetch('/' + owner + '/' + repo + '/pull/' + prNumber + '/files', {

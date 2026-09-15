@@ -50,6 +50,7 @@ The JS tests also run standalone, which is quicker while iterating on the SPA:
 ```bash
 node tests/test_prefetch_policy.js
 node tests/test_image_urls.js
+node tests/test_hash_target.js
 ```
 
 `pytest tests/ -v` still works for the Python tests alone, but it misses every
@@ -107,6 +108,7 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 | GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file |
 | POST | `/api/{owner}/{repo}/pr/{number}/comments` | Post a review comment on a file |
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
+| GET | `/api/extensions` | Image extensions this server understands, for clients that would otherwise hardcode them |
 | GET | `/health` | Liveness check |
 
 ## Configuration

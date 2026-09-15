@@ -17,7 +17,13 @@
 // reachable through machinery this file deliberately does not build.
 
 const assert = require('assert');
-const { extract, bodyOf, sourceWithoutComments } = require('./spa_source');
+const { extract, bodyOf, scriptSource } = require('./spa_source');
+
+// The SPA's inline script with comments stripped and the <style> block removed,
+// for the two source-text checks below. Shared from spa_source.js rather than
+// re-derived: a check reading differently-stripped source than bodyOf() does
+// would be wrong in a way nothing would report.
+const spaScript = scriptSource();
 
 const renameDisplay = extract('rename-display', 'renameDisplay');
 
@@ -256,7 +262,7 @@ function spa() {
   const renderComparison = new Function(
     'viewport', 'imageInfo', 'state', 'hideLoupes', 'gutterRefreshCallbacks',
     'getFileStatus', 'computeRowDiffMap', 'computeDiffClusters', 'renameDisplay',
-    'renderRenamed', 'renameLabel', 'escHtml', 'escAttr', 'sha256Hex',
+    'renderRenamed', 'renameLabel', 'escHtml', 'escAttr', 'ghDiffUrl',
     'owner', 'repo', 'prNumber', 'document',
     'renderSideBySide', 'renderCrossfade', 'renderSwipe', 'renderDiffOverlay',
     'return (' + bodyOf('renderComparison') + ');')(
@@ -270,7 +276,11 @@ function spa() {
     renameDisplay,
     () => { calls.renamed++; renderRenamed(); },
     renameLabel, esc, esc,
-    () => ({ then() {} }),
+    // The GitHub-diff-link fill (main's #30) is asynchronous and writes into a
+    // container this stub document does not have, so it resolves and then
+    // returns early. It is injected because renderComparison calls it, not
+    // because anything here asserts on it.
+    () => Promise.resolve('https://example.invalid/diff'),
     'o', 'r', 1, doc,
     mode('side-by-side'), mode('crossfade'), mode('swipe'), mode('diff'));
 
@@ -462,14 +472,14 @@ assert.ok(
 // below, in place of the floor: the name still appears, every occurrence of it
 // parsed, and exactly one of those is the declaration.
 
-const occurrences = (sourceWithoutComments.match(/computeRowDiffMap\s*\(/g) || []).length;
+const occurrences = (spaScript.match(/computeRowDiffMap\s*\(/g) || []).length;
 assert.ok(occurrences >= 7,
   'expected the declaration, the rename call and five gutter calls; found ' +
   occurrences + '. Fewer means a call site went away — check it was meant to, ' +
   'and lower this floor deliberately. This check also reads static/index.html ' +
   'by name, so renaming computeRowDiffMap makes it vacuous — rename it here too.');
 
-const uses = [...sourceWithoutComments.matchAll(
+const uses = [...spaScript.matchAll(
   /(function\s+)?computeRowDiffMap\s*\(([^()]*)\)/g)];
 assert.strictEqual(uses.length, occurrences,
   (occurrences - uses.length) + ' computeRowDiffMap occurrence(s) did not parse as a ' +

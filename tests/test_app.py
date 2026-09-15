@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +65,131 @@ class TestVisualReviewPage:
         assert "text/html" in resp.headers.get("content-type", "")
 
 
+# -- Supported extensions endpoint --------------------------------------------
+
+class TestExtensionsEndpoint:
+    @pytest.mark.asyncio
+    async def test_returns_the_servers_own_list(self):
+        """The endpoint answers the same list the server matches with.
+
+        Asserted against ``_EXT_MIME`` rather than a literal, so adding a
+        format to image_extensions.json does not need this test edited. Note
+        what it does *not* establish: ``_EXT_MIME`` is the constant the
+        endpoint itself reads, so this pins the value the two share and not
+        where the answer came from. An endpoint carrying a frozen copy of
+        today's list passes here. ``test_serves_whatever_the_file_says``
+        below is what rules that out.
+        """
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"extensions": list(_EXT_MIME.keys())}
+
+    @pytest.mark.asyncio
+    async def test_serves_whatever_the_file_says(self):
+        """The answer is derived, not a second copy of the list.
+
+        This is the one defect #13 exists to remove, so it needs a case that
+        can see it: reintroducing the duplication on the server — a literal
+        list in the handler instead of ``IMAGE_EXTENSIONS`` — leaves every
+        other case in this class green, and the next format added to
+        image_extensions.json silently stops being served.
+
+        ``IMAGE_EXTENSIONS`` is ``_EXT_MIME.keys()``, a live view, so adding a
+        key to the dict reaches the response with no production change.
+        """
+        with patch.dict("app._EXT_MIME", {".webp": "image/webp"}):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/extensions")
+
+        assert ".webp" in resp.json()["extensions"]
+
+    @pytest.mark.asyncio
+    async def test_every_entry_is_a_lowercase_dotted_extension(self):
+        """The shape the browser extension validates against before adopting it."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        extensions = resp.json()["extensions"]
+        assert extensions, "an empty list is rejected by the client, so never serve one"
+        for ext in extensions:
+            assert isinstance(ext, str)
+            assert ext.startswith("."), ext
+            assert len(ext) >= 2, ext
+            assert ext == ext.lower(), ext
+
+    @pytest.mark.asyncio
+    async def test_needs_no_github_token(self):
+        """Every other API endpoint degrades without a token; this one must not."""
+        with patch("app.GITHUB_TOKEN", ""):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/extensions")
+
+        assert resp.status_code == 200
+        assert resp.json()["extensions"] == list(_EXT_MIME.keys())
+
+    @pytest.mark.asyncio
+    async def test_is_publicly_cacheable(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        cache_control = resp.headers.get("cache-control", "")
+        assert "public" in cache_control, cache_control
+        # The value, not just its presence. The docstring on the endpoint
+        # gives this hour a job — it is the only thing bounding the request
+        # rate of a client whose localStorage never holds — so it can no more
+        # move unnoticed than the client's own 5s budget can.
+        assert "max-age=3600" in cache_control, cache_control
+
+    @pytest.mark.asyncio
+    async def test_answers_cross_origin(self):
+        """Load-bearing, not incidental.
+
+        The browser extension reads this from a content script running on
+        github.com. A Manifest V3 content script's fetch carries the page's
+        origin and is subject to CORS, and ``host_permissions`` cannot exempt
+        it — that moved to the service worker in V3 — so losing this header
+        makes the endpoint unreachable from the only client it has.
+        """
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(
+                "/api/extensions", headers={"Origin": "https://github.com"}
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
+    @pytest.mark.asyncio
+    async def test_no_earlier_route_claims_a_two_segment_path(self):
+        """A tripwire for a future route, not a pin on a live hazard.
+
+        No dynamic route in app.py is two segments today — the short-URL
+        resolver is ``/{identifier}/pr/{number}``, three — so this endpoint is
+        unshadowable at any registration position, and moving it to the end of
+        the file leaves this green. What it guards is the day someone adds a
+        two-segment pattern above it: FastAPI matches in registration order, so
+        such a route would claim ``/api/extensions`` and the extension would
+        get that route's answer instead of the list.
+        """
+        route_paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/api/extensions" in route_paths
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        # A short-URL match would 404 or redirect rather than answer the list.
+        assert resp.status_code == 200
+        assert "extensions" in resp.json()
+
+
 # -- PR images endpoint -------------------------------------------------------
 
 class TestPrImages:
@@ -89,26 +214,25 @@ class TestPrImages:
             "html_url": "http://gh/pr/1",
         }
 
-        mock_compare_resp = MagicMock()
-        mock_compare_resp.status_code = 200
-        mock_compare_resp.json.return_value = {
-            "files": [
-                {"filename": "tests/screenshots/baseline/test.png", "status": "modified"},
-                {"filename": "src/main.py", "status": "modified"},
-                {"filename": "tests/screenshots/baseline/new.PNG", "status": "added"},
-                {"filename": "photos/hero.jpg", "status": "modified"},
-                {"filename": "photos/banner.jpeg", "status": "added"},
-                {"filename": "photos/thumb.JPG", "status": "modified"},
-                {"filename": "tests/screenshots/baseline/page.bmp", "status": "added"},
-                {"filename": "docs/readme.txt", "status": "modified"},
-            ]
-        }
+        mock_files_resp = MagicMock()
+        mock_files_resp.status_code = 200
+        mock_files_resp.json.return_value = [
+            {"filename": "tests/screenshots/baseline/test.png", "status": "modified"},
+            {"filename": "src/main.py", "status": "modified"},
+            {"filename": "tests/screenshots/baseline/new.PNG", "status": "added"},
+            {"filename": "photos/hero.jpg", "status": "modified"},
+            {"filename": "photos/banner.jpeg", "status": "added"},
+            {"filename": "photos/thumb.JPG", "status": "modified"},
+            {"filename": "tests/screenshots/baseline/page.bmp", "status": "added"},
+            {"filename": "docs/readme.txt", "status": "modified"},
+        ]
 
         async def mock_get(url, **kwargs):
+            # /files before /pulls/: the files endpoint is nested under it.
+            if url.endswith("/files"):
+                return mock_files_resp
             if "/pulls/" in url:
                 return mock_pr_resp
-            if "/compare/" in url:
-                return mock_compare_resp
             return MagicMock(status_code=404)
 
         with (
@@ -150,28 +274,27 @@ class TestPrImages:
             "html_url": "http://gh/pr/1",
         }
 
-        mock_compare_resp = MagicMock()
-        mock_compare_resp.status_code = 200
-        mock_compare_resp.json.return_value = {
-            "files": [
-                {
-                    "filename": "screenshots/new_name.png",
-                    "status": "renamed",
-                    "previous_filename": "screenshots/old_name.png",
-                },
-                {
-                    "filename": "photos/moved.jpg",
-                    "status": "renamed",
-                    "previous_filename": "old_photos/moved.jpg",
-                },
-            ]
-        }
+        mock_files_resp = MagicMock()
+        mock_files_resp.status_code = 200
+        mock_files_resp.json.return_value = [
+            {
+                "filename": "screenshots/new_name.png",
+                "status": "renamed",
+                "previous_filename": "screenshots/old_name.png",
+            },
+            {
+                "filename": "photos/moved.jpg",
+                "status": "renamed",
+                "previous_filename": "old_photos/moved.jpg",
+            },
+        ]
 
         async def mock_get(url, **kwargs):
+            # /files before /pulls/: the files endpoint is nested under it.
+            if url.endswith("/files"):
+                return mock_files_resp
             if "/pulls/" in url:
                 return mock_pr_resp
-            if "/compare/" in url:
-                return mock_compare_resp
             return MagicMock(status_code=404)
 
         with (
@@ -206,19 +329,18 @@ class TestPrImages:
             "html_url": "http://gh/pr/1",
         }
 
-        mock_compare_resp = MagicMock()
-        mock_compare_resp.status_code = 200
-        mock_compare_resp.json.return_value = {
-            "files": [
-                {"filename": "test.png", "status": "modified"},
-            ]
-        }
+        mock_files_resp = MagicMock()
+        mock_files_resp.status_code = 200
+        mock_files_resp.json.return_value = [
+            {"filename": "test.png", "status": "modified"},
+        ]
 
         async def mock_get(url, **kwargs):
+            # /files before /pulls/: the files endpoint is nested under it.
+            if url.endswith("/files"):
+                return mock_files_resp
             if "/pulls/" in url:
                 return mock_pr_resp
-            if "/compare/" in url:
-                return mock_compare_resp
             return MagicMock(status_code=404)
 
         with (
@@ -261,6 +383,345 @@ class TestPrImages:
         data = resp.json()
         assert "error" in data
         assert data["images"] == []
+
+
+# -- Paginated file listing (#12) ---------------------------------------------
+
+def _paged_client(pages, pr_data=None, status_by_page=None):
+    """Mock an httpx.AsyncClient serving ``pages`` from pulls/{n}/files.
+
+    ``pages`` is a list of per-page payloads, 1-indexed by request. A request
+    for a page past the end gets ``[]``, which is what GitHub answers. Every
+    requested page number is recorded on ``instance.requested_pages`` so a test
+    can assert which requests the walk actually made — a walk that stops one
+    page early and one that never stops both return plausible lists.
+
+    ``status_by_page`` maps a 1-indexed page number to an HTTP status, for
+    driving a failure partway through the walk.
+    """
+    pr_data = pr_data or {
+        "base": {"sha": "aaa", "label": "main", "repo": {"id": 12345}},
+        "head": {"sha": "bbb", "label": "feature"},
+        "title": "Big PR",
+        "html_url": "http://gh/pr/352",
+    }
+    mock_pr_resp = MagicMock()
+    mock_pr_resp.status_code = 200
+    mock_pr_resp.json.return_value = pr_data
+
+    requested_pages = []
+
+    async def mock_get(url, **kwargs):
+        if url.endswith("/files"):
+            params = kwargs.get("params", {})
+            page = params.get("page")
+            requested_pages.append(page)
+            status = (status_by_page or {}).get(page, 200)
+            resp = MagicMock()
+            resp.status_code = status
+            if status == 200:
+                resp.json.return_value = pages[page - 1] if 1 <= page <= len(pages) else []
+            return resp
+        if "/pulls/" in url:
+            return mock_pr_resp
+        return MagicMock(status_code=404)
+
+    instance = AsyncMock()
+    instance.get = mock_get
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=False)
+    instance.requested_pages = requested_pages
+    return instance
+
+
+def _png_pages(total, per_page=_GH_PAGE_SIZE):
+    """Split ``total`` synthetic .png file entries into full pages."""
+    files = [
+        {"filename": f"baselines/shot_{i:04d}.png", "status": "added"}
+        for i in range(total)
+    ]
+    return [files[i:i + per_page] for i in range(0, len(files), per_page)] or [[]]
+
+
+class TestPrImagesPagination:
+    """#12: a 300+ file PR lost every file past the first page, silently."""
+
+    @pytest.mark.asyncio
+    async def test_all_files_returned_past_the_compare_cap(self):
+        """489 image files — PR 352's real shape — all come back.
+
+        The compare endpoint this replaced answered that PR with exactly 300
+        files and no next page, so 189 went missing with nothing said.
+        """
+        instance = _paged_client(_png_pages(489))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/352/images")
+
+        data = resp.json()
+        assert len(data["images"]) == 489
+        assert data["images"][0]["path"] == "baselines/shot_0000.png"
+        assert data["images"][-1]["path"] == "baselines/shot_0488.png"
+        assert data["truncated"] is False
+        # Five pages: four full, then an 89-entry page that ends the walk.
+        assert instance.requested_pages == [1, 2, 3, 4, 5]
+
+    @pytest.mark.asyncio
+    async def test_hits_the_files_endpoint_not_compare(self):
+        """The compare endpoint cannot serve this, so nothing may call it."""
+        seen = []
+
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {
+            "base": {"sha": "aaa", "label": "main", "repo": {"id": 12345}},
+            "head": {"sha": "bbb", "label": "feature"},
+            "title": "Test PR",
+            "html_url": "http://gh/pr/1",
+        }
+
+        async def mock_get(url, **kwargs):
+            seen.append(url)
+            if url.endswith("/files"):
+                r = MagicMock(status_code=200)
+                r.json.return_value = [{"filename": "a.png", "status": "added"}]
+                return r
+            if "/pulls/" in url:
+                return mock_pr_resp
+            return MagicMock(status_code=404)
+
+        instance = AsyncMock()
+        instance.get = mock_get
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        assert resp.json()["images"] == [
+            {"path": "a.png", "status": "added", "additions": 0, "deletions": 0}
+        ]
+        assert not any("/compare/" in url for url in seen)
+        assert any(url.endswith("/pulls/1/files") for url in seen)
+
+    @pytest.mark.asyncio
+    async def test_exact_page_multiple_needs_the_empty_page(self):
+        """A full last page is indistinguishable from a middle one.
+
+        200 files is two full pages; only the empty third page ends the walk,
+        so the response must not stop at 100.
+        """
+        instance = _paged_client(_png_pages(200))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert len(data["images"]) == 200
+        assert instance.requested_pages == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_truncated_reaches_the_response(self):
+        """A capped walk is reported in the payload, not just internally.
+
+        This drives the real ``_GH_MAX_PAGES``: the cap is a default argument
+        bound at definition time, so patching the module constant would not
+        reach it. 30 full pages is what the endpoint actually stops on.
+
+        Without this, ``result["truncated"] = files_truncated`` could be cut
+        to a literal ``False`` with the whole suite green — the only other
+        endpoint test reading the key asserts ``False``, which that mutant
+        satisfies. Verified: it passed 84/84 before this test existed.
+        """
+        instance = _paged_client(_png_pages(_GH_PAGE_SIZE * _GH_MAX_PAGES))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert len(data["images"]) == _GH_PAGE_SIZE * _GH_MAX_PAGES
+        assert instance.requested_pages == list(range(1, _GH_MAX_PAGES + 1))
+
+    @pytest.mark.asyncio
+    async def test_files_request_failure_is_reported(self):
+        """A page that fails partway through is an error, not a short list."""
+        instance = _paged_client(_png_pages(250), status_by_page={2: 500})
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/images")
+
+        data = resp.json()
+        assert data["images"] == []
+        assert "500" in data["error"]
+        # It stopped at the failure rather than walking on past it.
+        assert instance.requested_pages == [1, 2]
+
+
+class TestGhPaginate:
+    """The walk itself, driven directly so every branch is reachable."""
+
+    def _client(self, pages, status_by_page=None):
+        requested = []
+
+        async def mock_get(url, **kwargs):
+            page = kwargs.get("params", {}).get("page")
+            requested.append(page)
+            status = (status_by_page or {}).get(page, 200)
+            resp = MagicMock()
+            resp.status_code = status
+            if status == 200:
+                resp.json.return_value = pages[page - 1] if 1 <= page <= len(pages) else []
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        client.requested = requested
+        return client
+
+    @pytest.mark.asyncio
+    async def test_single_short_page(self):
+        client = self._client([[1, 2, 3]])
+        items, truncated = await _gh_paginate(client, "http://gh/list", {})
+        assert items == [1, 2, 3]
+        assert truncated is False
+        assert client.requested == [1]
+
+    @pytest.mark.asyncio
+    async def test_requests_per_page_100(self):
+        """Asking for more than 100 is clamped by GitHub, so ask for 100."""
+        captured = {}
+
+        async def mock_get(url, **kwargs):
+            captured.update(kwargs.get("params", {}))
+            resp = MagicMock(status_code=200)
+            resp.json.return_value = []
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        await _gh_paginate(client, "http://gh/list", {})
+        assert captured["per_page"] == 100
+
+    @pytest.mark.asyncio
+    async def test_caller_params_survive_paging(self):
+        """A caller's params ride every page, not just the first.
+
+        The fixture has to page for this to mean anything: an earlier
+        version answered ``[]`` on page 1, so the walk stopped after one
+        request and dropping the caller's params from page 2 onward left
+        the suite green.
+        """
+        captured = []
+
+        async def mock_get(url, **kwargs):
+            params = dict(kwargs.get("params", {}))
+            captured.append(params)
+            resp = MagicMock(status_code=200)
+            # Full page 1 forces a second request; short page 2 ends the walk.
+            resp.json.return_value = list(range(_GH_PAGE_SIZE)) if params["page"] == 1 else []
+            return resp
+
+        client = AsyncMock()
+        client.get = mock_get
+        await _gh_paginate(client, "http://gh/list", {}, params={"state": "all"})
+        assert [p["page"] for p in captured] == [1, 2]
+        assert [p["state"] for p in captured] == ["all", "all"]
+        assert [p["per_page"] for p in captured] == [_GH_PAGE_SIZE] * 2
+
+    @pytest.mark.asyncio
+    async def test_truncates_at_max_pages(self):
+        """max_pages is a parameter so this block is reachable at all.
+
+        Three full pages with max_pages=2 stops with more still to read.
+        """
+        client = self._client([list(range(_GH_PAGE_SIZE))] * 3)
+        items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=2)
+        assert len(items) == 2 * _GH_PAGE_SIZE
+        assert truncated is True
+        assert client.requested == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_short_page_on_the_last_permitted_page_is_not_truncated(self):
+        """A short page ends the walk even when it is the last page allowed.
+
+        The cap is reached here, but the walk stopped because the sequence
+        ended, so nothing is flagged. Named for what it drives: an earlier
+        version of this test was called ...last_page_exactly_full... while
+        its fixture ended on an empty page, so it passed whatever the code
+        did at the real boundary. That case is the next test.
+        """
+        client = self._client([list(range(_GH_PAGE_SIZE)), []])
+        items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=2)
+        assert len(items) == _GH_PAGE_SIZE
+        assert truncated is False
+        assert client.requested == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_exactly_max_pages_reports_truncated(self):
+        """The boundary: full pages all the way to the cap, nothing beyond.
+
+        Nothing remained, and ``truncated`` is still true. Deliberate — the
+        walk never asked for page 4, and settling it would cost a probe that
+        GitHub cannot answer meaningfully at its own 3000-file ceiling. The
+        flag means "the walk ran out of pages", not "more exists", and it
+        errs toward warning. Pinned so the semantics are a decision on the
+        record rather than something a later reader has to re-derive.
+        """
+        client = self._client([list(range(_GH_PAGE_SIZE))] * 3)
+        items, truncated = await _gh_paginate(client, "http://gh/list", {}, max_pages=3)
+        assert len(items) == 3 * _GH_PAGE_SIZE
+        assert truncated is True
+        # Page 4 exists in the fixture's eyes only as the empty page the walk
+        # never requested.
+        assert client.requested == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_non_200_raises(self):
+        client = self._client([[1]], status_by_page={1: 404})
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {})
+        assert exc.value.status_code == 404
+        assert "404" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_non_list_body_raises(self):
+        """A dict body would otherwise extend the result with its keys."""
+        client = self._client([{"message": "Not Found"}])
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {})
+        assert exc.value.status_code is None
+        assert "dict" in str(exc.value)
 
 
 # -- PR image proxy endpoint --------------------------------------------------
@@ -1423,3 +1884,276 @@ class TestPrImageCacheHeader:
         # Not merely "not immutable": the error path attaches no image headers
         # at all, so a file that appears later is not shadowed by a cached 404.
         assert resp.headers.get("cache-control") is None
+
+
+# -- Client disconnect ---------------------------------------------------------
+
+class TestPrImageClientDisconnect:
+    """A request the browser has cancelled must stop costing GitHub API calls.
+
+    These drive the ASGI app directly rather than going through
+    ``ASGITransport``. That transport does deliver ``http.disconnect``, but
+    only after ``response_complete`` and only from behind an ``await`` that
+    ``is_disconnected()``'s already-cancelled scope can never get past —
+    measured: it reports False before the response and False after it. So the
+    transport cannot express this case at all, which is equally why none of
+    the other tests in this file change behaviour because of these checks.
+    """
+
+    @staticmethod
+    def _scope(path: str = "test.png", ref: str = "a" * 40):
+        from urllib.parse import urlencode
+        return {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/owner/repo/pr/1/image",
+            "raw_path": b"/api/owner/repo/pr/1/image",
+            "query_string": urlencode({"path": path, "ref": ref}).encode(),
+            "root_path": "",
+            "headers": [(b"host", b"test")],
+            "client": ("1.2.3.4", 1234),
+            "server": ("test", 80),
+        }
+
+    @classmethod
+    async def _drive(cls, gone: str, *, contents: dict, blob: dict | None = None,
+                     blob_status: int = 200, path: str = "test.png",
+                     ref: str = "a" * 40):
+        """Run pr_image against a stub GitHub, aborting when ``gone`` says.
+
+        ``gone`` is "never", "at_start" (already gone when the handler ran),
+        "during_contents" (gone while the contents call was in flight, which
+        is where the SPA's aborts land) or "during_blob". The trigger is the
+        stub upstream seeing that call, not a count of channel reads: a count
+        would silently mean "the Nth check" and would move whenever a check
+        was added or removed, which is exactly when these tests need to keep
+        meaning what their names say.
+
+        Returns (status, headers, body, upstream_urls). The URLs are the whole
+        point — an assertion on the status alone would pass against a handler
+        that made every call and threw the results away.
+        """
+        disconnected = {"now": gone == "at_start"}
+
+        async def receive():
+            if disconnected["now"]:
+                return {"type": "http.disconnect"}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        contents_resp = MagicMock()
+        contents_resp.status_code = 200
+        contents_resp.json.return_value = contents
+
+        blob_resp = MagicMock()
+        blob_resp.status_code = blob_status
+        blob_resp.json.return_value = blob or {}
+
+        download_resp = MagicMock()
+        download_resp.status_code = 200
+        download_resp.content = b"downloaded-png-data"
+
+        urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            urls.append(url)
+            if "/contents/" in url:
+                if gone == "during_contents":
+                    disconnected["now"] = True
+                return contents_resp
+            if "/git/blobs/" in url:
+                if gone == "during_blob":
+                    disconnected["now"] = True
+                return blob_resp
+            return download_resp
+
+        sent: list[dict] = []
+
+        async def send(message):
+            sent.append(message)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            await app(cls._scope(path=path, ref=ref), receive, send)
+
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body = b"".join(
+            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+        )
+        headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+        return start["status"], headers, body, urls
+
+    # The contents-call shapes, named so a failure says which case it was in
+    # rather than which dict literal it was handed.
+    _B64 = base64.b64encode(b"fake-png-data").decode()
+    SMALL = {"encoding": "base64", "content": _B64}
+    LARGE = {"sha": "deadbeef123", "size": 2_000_000,
+             "download_url": "https://raw.githubusercontent.com/o/r/abc/test.png"}
+    NO_SHA = {"size": 2_000_000,
+              "download_url": "https://raw.githubusercontent.com/o/r/abc/test.png"}
+    BLOB = {"encoding": "base64", "content": _B64}
+
+    @staticmethod
+    def _kinds(urls):
+        return [
+            "contents" if "/contents/" in u
+            else "blob" if "/git/blobs/" in u
+            else "download"
+            for u in urls
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_contents_call_skips_the_blob_call(self):
+        """The check with the most to save: the bytes fetch is never made.
+
+        The contents call is spent — nothing can refund a call already sent —
+        but the blob call that would have transferred the file is not made.
+        """
+        status, _, body, urls = await self._drive(
+            "during_contents", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
+        assert body == b""
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_contents_call_skips_the_download_fallback(self):
+        """Case 3 reached directly: no sha, so download_url is the next call."""
+        status, _, _, urls = await self._drive(
+            "during_contents", contents=self.NO_SHA
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_blob_call_skips_the_download_fallback(self):
+        """Case 3 reached *after* case 2, which the entry check cannot cover.
+
+        A blob response that is not base64 falls through to download_url, so
+        without a check of its own this request would spend a third upstream
+        call and write a 200 into a socket that has gone.
+        """
+        status, _, body, urls = await self._drive(
+            "during_blob", contents=self.LARGE, blob={"encoding": "utf-8"}
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents", "blob"]
+        assert body == b""
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_blob_call_after_a_failed_blob_call(self):
+        """The same fall-through, reached by a non-200 blob response."""
+        status, _, _, urls = await self._drive(
+            "during_blob", contents=self.LARGE, blob={}, blob_status=404
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents", "blob"]
+
+    @pytest.mark.asyncio
+    async def test_no_check_precedes_the_contents_call(self):
+        """Deliberate, and measured: there is no check before the first call.
+
+        One was written and removed — it fired in none of 900 aborted
+        requests, and uvicorn will not dispatch a queued pipelined cycle on a
+        closing connection, which was the only case that could have reached
+        it. So a client already gone still spends the contents call, and is
+        stopped at the next one. If this starts returning no upstream calls at
+        all, a pre-contents check has come back and needs its own evidence.
+        """
+        status, _, _, urls = await self._drive(
+            "at_start", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_small_file_already_in_hand_is_still_returned(self):
+        """Deliberate: both checks sit below the inline-content case.
+
+        A small file's bytes arrived with the contents call, so stopping short
+        of returning them would save nothing. If this ever returns 499 a
+        check has been moved above case 1.
+        """
+        status, headers, body, urls = await self._drive(
+            "during_contents", contents=self.SMALL
+        )
+        assert status == 200
+        assert body == b"fake-png-data"
+        assert headers["cache-control"] == "private, max-age=31536000, immutable"
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_connected_client_still_gets_every_call(self):
+        """The checks must not fire on a client that is still there."""
+        status, _, body, urls = await self._drive(
+            "never", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 200
+        assert body == b"fake-png-data"
+        assert self._kinds(urls) == ["contents", "blob"]
+
+    @pytest.mark.asyncio
+    async def test_connected_client_reaches_the_download_fallback(self):
+        """The full three-call path, so the added check cannot be a blanket."""
+        status, _, body, urls = await self._drive(
+            "never", contents=self.LARGE, blob={"encoding": "utf-8"}
+        )
+        assert status == 200
+        assert body == b"downloaded-png-data"
+        assert self._kinds(urls) == ["contents", "blob", "download"]
+
+    @pytest.mark.asyncio
+    async def test_client_gone_response_is_not_cached(self):
+        """A cached 499 would shadow the image on the next request for it."""
+        cases = (
+            ("during_contents", self.LARGE, self.BLOB),
+            ("during_blob", self.LARGE, {"encoding": "utf-8"}),
+        )
+        for gone, contents, blob in cases:
+            status, headers, _, _ = await self._drive(
+                gone, contents=contents, blob=blob
+            )
+            assert status == 499, gone
+            assert headers.get("cache-control") is None, gone
+
+    @pytest.mark.asyncio
+    async def test_each_check_logs_the_call_it_skipped(self, caplog):
+        """The log line is the only thing that tells the checks apart.
+
+        Without this, swapping the two label strings is a mutation the whole
+        suite passes — so each one is pinned to the call it actually guards.
+        """
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_contents", contents=self.LARGE,
+                              blob=self.BLOB)
+        assert "client gone before the blob call" in caplog.text
+        assert "download_url" not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_blob", contents=self.LARGE,
+                              blob={"encoding": "utf-8"})
+        assert "client gone before the download_url fetch" in caplog.text
+        assert "before the blob call" not in caplog.text
+
+        # The third shape, and the one that makes this an invariant rather
+        # than two spot checks: no sha, so the call skipped is the
+        # download_url fetch even though the abort landed during the contents
+        # call. A check placed at the case-2/3 entry point instead of
+        # immediately before each call saves the same calls and mislabels
+        # this one, which is a mutant the rest of the suite passes.
+        caplog.clear()
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_contents", contents=self.NO_SHA)
+        assert "client gone before the download_url fetch" in caplog.text
+        assert "before the blob call" not in caplog.text

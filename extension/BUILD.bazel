@@ -77,11 +77,26 @@ js_test(
     ] + glob(["icons/*.png"]),
 )
 
+# content.js and content_source.js are real inputs, not just companions: the
+# test extracts the live source out of content.js rather than keeping a copy of
+# it, so without them here a content.js-only edit changes no input of this
+# target, takes a cache hit, and never runs against the change.
 js_test(
     name = "test_content_logic",
     entry_point = "test_content_logic.js",
     data = [
+        "content.js",
+        "content_source.js",
         ":image_config",
         "//:image_extensions_json",
+    ],
+)
+
+js_test(
+    name = "test_extensions_fetch",
+    entry_point = "test_extensions_fetch.js",
+    data = [
+        "content.js",
+        "content_source.js",
     ],
 )
