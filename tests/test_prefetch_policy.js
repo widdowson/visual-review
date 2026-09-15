@@ -6,52 +6,28 @@
 // if they go missing this test fails rather than silently testing nothing.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
+const { extract, constant } = require('./spa_source');
 
-const runfiles = process.env.RUNFILES_DIR || '';
-const htmlPath = runfiles
-  ? path.join(runfiles, '_main', 'static', 'index.html')
-  : path.join(__dirname, '..', 'static', 'index.html');
+const computePrefetchPlan = extract('prefetch-policy', 'computePrefetchPlan');
 
-const html = fs.readFileSync(htmlPath, 'utf8');
+// ── The shipped defaults ────────────────────────────────────────────────────
+// Asserted because the policy below is exercised with explicit arguments, so
+// every case here would still pass with the feature switched off in the SPA.
 
-const BEGIN = 'prefetch-policy:begin';
-const END = 'prefetch-policy:end';
-const from = html.indexOf(BEGIN);
-const to = html.indexOf(END);
-assert.ok(from > 0, 'static/index.html must contain the ' + BEGIN + ' marker');
-assert.ok(to > from, 'static/index.html must contain the ' + END + ' marker after the begin marker');
+const AHEAD = constant('PREFETCH_AHEAD');
+const BEHIND = constant('PREFETCH_BEHIND');
+const DELAY = constant('PREFETCH_DELAY_MS');
+const RADIUS = constant('CACHE_RADIUS');
 
-const source = html.slice(html.indexOf('\n', from) + 1, html.lastIndexOf('\n', to));
-assert.ok(/function computePrefetchPlan\s*\(/.test(source),
-  'the marked region must define computePrefetchPlan');
-
-// The region must be pure — no DOM, no network, no module state. If it grows
-// a dependency on any of those it stops being testable here, so say so loudly.
-// Comments are stripped first: the prose around the policy is allowed to use
-// these words, and a purity check that trips on a comment gets deleted.
-const code = source
-  .replace(/\/\*[\s\S]*?\*\//g, ' ')
-  .replace(/(^|[^:])\/\/.*$/gm, '$1');
-const IMPURE = [
-  [/\bdocument\b/, 'document'],
-  [/\bwindow\b/, 'window'],
-  [/\blocalStorage\b/, 'localStorage'],
-  [/\bnew\s+Image\b/, 'new Image'],
-  [/\bfetch\s*\(/, 'fetch('],
-  [/\bstate\s*\./, 'state.'],
-  [/\bsetTimeout\b/, 'setTimeout'],
-  [/\bnew\s+Date\b/, 'new Date'],
-  [/\bDate\s*\.\s*now\b/, 'Date.now'],
-  [/\bMath\s*\.\s*random\b/, 'Math.random'],
-];
-for (const [pattern, label] of IMPURE) {
-  assert.ok(!pattern.test(code),
-    'the prefetch policy must stay pure; found "' + label + '" in the marked region');
-}
-
-const computePrefetchPlan = new Function(source + '\nreturn computePrefetchPlan;')();
+assert.ok(AHEAD >= 1, 'the SPA must prefetch at least the next file, got ' + AHEAD);
+assert.ok(BEHIND >= 1, 'the SPA must prefetch at least the previous file, got ' + BEHIND);
+assert.ok(DELAY > 0, 'prefetching must be debounced, got ' + DELAY);
+assert.ok(RADIUS >= AHEAD && RADIUS >= BEHIND,
+  'the retained window must cover what is prefetched: radius ' + RADIUS +
+  ' against ahead ' + AHEAD + ' / behind ' + BEHIND);
+// Speculation is a guess paid for in proxy round trips; a deep window is a
+// change to argue for, not to drift into.
+assert.ok(AHEAD + BEHIND <= 4, 'prefetch window unexpectedly wide: ' + (AHEAD + BEHIND));
 
 // Defaults matching the SPA's constants, so each case states only what it varies.
 function plan(overrides) {
@@ -133,5 +109,36 @@ assert.strictEqual(JSON.stringify(cached), snapshot, 'input must not be mutated'
 const second = plan({current: 5, cached: cached});
 assert.strictEqual(JSON.stringify(cached), snapshot, 'input must not be mutated');
 assert.deepStrictEqual(first, second, 'same input, same plan');
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
+// A structural check, not a behavioural one: the policy above is pure, so
+// every case in this file still passes if the SPA computes a plan and then
+// ignores it. There is no browser harness in this repo to assert the real
+// thing, so assert instead that each half of the plan is consumed and that
+// prefetching is armed from the loader's ready path.
+
+const { html } = require('./spa_source');
+
+function bodyOf(name) {
+  const at = html.indexOf('function ' + name + '(');
+  assert.ok(at > 0, 'static/index.html must define ' + name);
+  // Functions here are indented eight spaces and closed at that indent.
+  const close = html.indexOf('\n        }', at);
+  assert.ok(close > at, name + ' must be closed at the expected indent');
+  return html.slice(at, close);
+}
+
+const runPrefetch = bodyOf('runPrefetch');
+assert.ok(/plan\.fetch\b[\s\S]*startPrefetch\s*\(/.test(runPrefetch),
+  'runPrefetch must start a prefetch for each index the plan asks for');
+assert.ok(/plan\.evict\b[\s\S]*dropCached\s*\(/.test(runPrefetch),
+  'runPrefetch must drop each index the plan evicts');
+
+assert.ok(/schedulePrefetch\s*\(\s*\)/.test(bodyOf('loadImagePair')),
+  'loadImagePair must arm the prefetch once the current pair is ready');
+assert.ok(/cancelPrefetchTimer\s*\(\s*\)/.test(bodyOf('selectFile')),
+  'selectFile must disarm any armed prefetch before loading the new pair');
+assert.ok(/clearTimeout\s*\(/.test(bodyOf('cancelPrefetchTimer')),
+  'cancelPrefetchTimer must actually clear the timer');
 
 console.log('test_prefetch_policy: all checks passed');

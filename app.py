@@ -64,7 +64,7 @@ def _mime_for_path(path: str) -> str:
 
 # -- Helpers -------------------------------------------------------------------
 
-_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def _image_cache_control(ref: str) -> str:
@@ -75,10 +75,15 @@ def _image_cache_control(ref: str) -> str:
     files, and the SPA's speculative prefetch, cost nothing after the first
     fetch. Any other ref (a branch name someone typed into the URL) can move,
     so it keeps a short TTL.
+
+    ``private`` rather than ``public``: the whole benefit is browser-side, and
+    these bytes may come from a private repository, so there is nothing to gain
+    from letting an intermediary hold them for a year. ``fullmatch`` rather
+    than ``match`` because ``$`` also matches before a trailing newline.
     """
-    if _FULL_SHA_RE.match(ref or ""):
-        return "public, max-age=31536000, immutable"
-    return "public, max-age=300"
+    if _FULL_SHA_RE.fullmatch(ref or ""):
+        return "private, max-age=31536000, immutable"
+    return "private, max-age=300"
 
 
 def _gh_headers() -> dict[str, str]:

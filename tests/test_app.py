@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _EXT_MIME, IMAGE_EXTENSIONS
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS
 
 
 @pytest.fixture(autouse=True)
@@ -1189,3 +1189,110 @@ class TestBase36:
 
     def test_decode_zero(self):
         assert _base36_decode("0") == 0
+
+
+class TestImageCacheControl:
+    """A proxied image is addressed by (path, commit sha), so it can never
+    change. Saying so is what lets a revisited file — and one the SPA
+    prefetched — cost the proxy nothing."""
+
+    def test_full_sha_is_immutable(self):
+        assert _image_cache_control("a" * 40) == "private, max-age=31536000, immutable"
+
+    def test_real_sha_is_immutable(self):
+        assert "immutable" in _image_cache_control("fc7c062a72c551c192bac3ad09482f0825812978")
+
+    def test_branch_name_keeps_short_ttl(self):
+        # A branch moves, so a long TTL would pin a stale image.
+        assert _image_cache_control("main") == "private, max-age=300"
+
+    def test_short_sha_keeps_short_ttl(self):
+        assert _image_cache_control("fc7c062") == "private, max-age=300"
+
+    def test_uppercase_sha_keeps_short_ttl(self):
+        # GitHub hands us lowercase; anything else did not come from the API.
+        assert _image_cache_control("A" * 40) == "private, max-age=300"
+
+    def test_overlong_ref_keeps_short_ttl(self):
+        assert _image_cache_control("a" * 41) == "private, max-age=300"
+
+    def test_sha_with_trailing_text_keeps_short_ttl(self):
+        assert _image_cache_control("a" * 40 + "/x") == "private, max-age=300"
+
+    def test_sha_with_trailing_newline_keeps_short_ttl(self):
+        # re.match(r"...$") would accept this; fullmatch does not.
+        assert _image_cache_control("a" * 40 + "\n") == "private, max-age=300"
+
+    def test_empty_ref_keeps_short_ttl(self):
+        assert _image_cache_control("") == "private, max-age=300"
+
+    def test_never_public(self):
+        # These bytes can come from a private repository; no intermediary
+        # should be invited to hold them.
+        for ref in ("a" * 40, "main", "", "fc7c062"):
+            assert "public" not in _image_cache_control(ref)
+
+
+class TestPrImageCacheHeader:
+    """The header the endpoint actually sends, not just the helper's opinion."""
+
+    @staticmethod
+    def _client_with_image(img_data: bytes):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "encoding": "base64",
+            "content": base64.b64encode(img_data).decode(),
+        }
+        instance = AsyncMock()
+        instance.get.return_value = mock_resp
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+        return instance
+
+    async def _cache_control_for(self, ref: str) -> tuple[int, str | None]:
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = self._client_with_image(b"fake-png-data")
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(f"/api/owner/repo/pr/1/image?path=test.png&ref={ref}")
+        return resp.status_code, resp.headers.get("cache-control")
+
+    @pytest.mark.asyncio
+    async def test_sha_ref_response_is_immutable(self):
+        status, cache_control = await self._cache_control_for("a" * 40)
+        assert status == 200
+        assert cache_control == "private, max-age=31536000, immutable"
+
+    @pytest.mark.asyncio
+    async def test_branch_ref_response_keeps_short_ttl(self):
+        status, cache_control = await self._cache_control_for("main")
+        assert status == 200
+        assert cache_control == "private, max-age=300"
+
+    @pytest.mark.asyncio
+    async def test_error_response_is_not_cached(self):
+        """A 404 must not be pinned for a year — the file may appear later."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(
+                    "/api/owner/repo/pr/1/image?path=missing.png&ref=" + "a" * 40
+                )
+
+        assert resp.status_code == 404
+        assert "immutable" not in (resp.headers.get("cache-control") or "")
