@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS
 
 
 @pytest.fixture(autouse=True)
@@ -452,6 +452,131 @@ class TestPrImage:
                 resp = await ac.get("/api/owner/repo/pr/1/image?path=missing.png&ref=abc123")
 
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_pr_image_traversal_is_rejected_before_any_request(self):
+        """A `..` traversal path is rejected with 400, and no upstream GitHub
+        request is made — httpx collapses `../` segments before sending, which
+        would otherwise retarget the call at another repository and return its
+        bytes under the deployment token (issue #37)."""
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(
+                    "/api/owner/repo/pr/1/image"
+                    "?path=../../../victim/priv/contents/s.png&ref=deadbeef"
+                )
+
+        assert resp.status_code == 400
+        # The endpoint must never have reached out to GitHub with the crafted path.
+        instance.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pr_image_percent_encoded_traversal_is_rejected(self):
+        """`..%2F` decodes to `../` during query parsing, so the decoded value
+        this endpoint sees is a literal `..` segment and is rejected."""
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(
+                    "/api/owner/repo/pr/1/image"
+                    "?path=..%2F..%2F..%2Fvictim/priv/contents/s.png&ref=deadbeef"
+                )
+
+        assert resp.status_code == 400
+        instance.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pr_image_ordinary_nested_path_still_works(self):
+        """A legitimate deep path like the ones the images list returns is
+        served normally."""
+        img_data = b"nested-png-data"
+        b64_data = base64.b64encode(img_data).decode()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"encoding": "base64", "content": b64_data}
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(
+                    "/api/owner/repo/pr/1/image"
+                    "?path=django/apps/home/tests/visual/x.png&ref=abc123"
+                )
+
+        assert resp.status_code == 200
+        assert resp.content == img_data
+
+
+# -- Image path validation ----------------------------------------------------
+
+class TestSafeImagePath:
+    def test_ordinary_nested_path(self):
+        assert _is_safe_image_path("django/apps/home/tests/visual/x.png")
+
+    def test_bare_filename(self):
+        assert _is_safe_image_path("x.png")
+
+    def test_all_image_extensions_accepted(self):
+        for ext in IMAGE_EXTENSIONS:
+            assert _is_safe_image_path(f"a/b{ext}"), ext
+
+    def test_parent_traversal_rejected(self):
+        assert not _is_safe_image_path("../../../victim/priv/contents/s.png")
+
+    def test_mid_path_traversal_rejected(self):
+        assert not _is_safe_image_path("a/b/../../../victim/s.png")
+
+    def test_leading_slash_rejected(self):
+        assert not _is_safe_image_path("/etc/passwd.png")
+
+    def test_absolute_url_like_rejected(self):
+        # A protocol-relative-looking value collapses to an empty segment.
+        assert not _is_safe_image_path("//evil.example/x.png")
+
+    def test_double_slash_rejected(self):
+        assert not _is_safe_image_path("a//b.png")
+
+    def test_single_dot_segment_rejected(self):
+        assert not _is_safe_image_path("./x.png")
+
+    def test_backslash_rejected(self):
+        assert not _is_safe_image_path("a\\..\\b.png")
+
+    def test_empty_rejected(self):
+        assert not _is_safe_image_path("")
+
+    def test_non_image_extension_rejected(self):
+        assert not _is_safe_image_path("secrets/config.yml")
+
+    def test_no_extension_rejected(self):
+        assert not _is_safe_image_path("django/apps/home/README")
 
 
 # -- PR comments endpoints ----------------------------------------------------
