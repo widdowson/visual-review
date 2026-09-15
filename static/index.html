@@ -346,6 +346,25 @@
         .image-info .gh-diff-link:hover { color: var(--vr-link-hover); text-decoration: underline; }
         .renamed-label { color: var(--vr-text-muted); font-size: 0.85rem; margin-bottom: 8px; }
         .renamed-label .renamed-arrow { color: var(--vr-accent); margin: 0 6px; }
+        /* A rename that also changed the image keeps the comparison modes, so
+           the viewport has to stack the label above them — its default row
+           direction would put the two side by side. Turning the column on
+           swaps which axis each of the other two properties governs, so both
+           are set to the opposite of the viewport's own value: its
+           `justify-content: center` would otherwise centre the modes
+           vertically rather than horizontally, and its `align-items:
+           flex-start` would left-align them.
+
+           Nothing here constrains the children. A `flex-shrink: 0` was tried
+           and measured inert — a flex item's automatic minimum size is
+           content-based here, so nothing could squash them in the first place
+           — and the `max-width: 100%` beside it made the wide case worse
+           rather than safer, clamping the wrapper while its contents
+           overflowed it: 1192px of horizontal scroll against 1106px without.
+           Measured on 600x3000 and 2400x400 pairs in all four modes. */
+        .viewport.with-rename-label {
+            flex-direction: column; justify-content: flex-start; align-items: center;
+        }
 
         /* Keyboard shortcut hint pill */
         .kbd-hint {
@@ -1251,9 +1270,76 @@
             return 'modified';
         }
 
+        // ── rename-display:begin ─────────────────────────────────────────────
+        // Pure function: how a file GitHub reports as `renamed` should be
+        // displayed.
+        //
+        // `renamed` does not mean "the content is unchanged". GitHub applies
+        // the same similarity detection git does, so a file that was moved
+        // *and* edited comes back as `renamed` as well — git's own R096, of
+        // which apwphotos-appv2 has a real instance (a baseline BMP that moved
+        // and grew by 7,680 bytes in the same commit). Nothing in the API
+        // separates the two for a binary: GitHub sends no patch and reports
+        // zero additions and zero deletions for every binary file, changed or
+        // not. So treating `renamed` alone as "nothing to compare" hid real
+        // changes on exactly the files the comparison modes exist for.
+        //
+        // The decision is made from the pixels instead, which is the question a
+        // reviewer is actually asking. Anything short of a proven match keeps
+        // the modes — including a map that could not be computed at all,
+        // because a side is missing. That direction is deliberate: failing to
+        // prove two images identical must never be read as proof that they are.
+        //
+        // Proving it takes two checks, not one, because a row map alone cannot
+        // do it. `computeRowDiffMap` draws both sides onto a canvas sized to
+        // the larger of the two in each dimension, so the region a smaller
+        // image does not cover reads back as transparent black — which is
+        // indistinguishable from opaque black on the three channels the map
+        // compares. That is what an earlier version of this function got
+        // wrong: measured in Chromium against it, a 200x100 all-black image
+        // against a 200x160 all-black one came back `single`, as did 300x100
+        // against 200x100. So the dimensions are checked first, structurally,
+        // before any pixel is read. (The same measurement is why the map is
+        // asked to compare alpha here: a fully transparent image against a
+        // solid black one of the same size also came back `single`, and PNG is
+        // a format this tool serves. Two images that are *fully* transparent
+        // still compare equal, correctly — the colour under alpha 0 does not
+        // survive the decode, so there is nothing on screen to tell apart.)
+        //
+        // Extracted verbatim by tests/test_rename_display.js — keep the markers.
+        function renameDisplay(status, baseImg, headImg, rowMap) {
+            if (status !== 'renamed') return null;
+            return sameDimensions(baseImg, headImg) && allRowsSame(rowMap)
+                ? 'single' : 'compare';
+        }
+
+        // Both sides present, both non-empty, and the same size. The SPA cannot
+        // reach the zero-sized case — `attach` commits an image to state only
+        // from `onload` or when it is already complete with a non-zero width,
+        // so a broken image leaves `state.baseImg` null and the missing-side
+        // branch fires instead. It is here because this is a pure predicate
+        // and that is its own contract: nothing was compared between two
+        // images with no pixels, so nothing was proven, whoever is asking.
+        function sameDimensions(a, b) {
+            if (!a || !b) return false;
+            if (!a.naturalWidth || !a.naturalHeight) return false;
+            return a.naturalWidth === b.naturalWidth &&
+                a.naturalHeight === b.naturalHeight;
+        }
+
+        function allRowsSame(rowMap) {
+            if (!rowMap || !rowMap.length) return false;
+            for (var i = 0; i < rowMap.length; i++) {
+                if (rowMap[i]) return false;
+            }
+            return true;
+        }
+        // ── rename-display:end ───────────────────────────────────────────────
+
         // -- Render comparison based on current mode --
         function renderComparison() {
             viewport.innerHTML = '';
+            viewport.classList.remove('with-rename-label');
             imageInfo.style.display = '';
             hideLoupes();
             gutterRefreshCallbacks = [];
@@ -1270,7 +1356,22 @@
                 return;
             }
 
-            var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+            // Issue #14. Asked at an exact threshold, not the gutter's, and
+            // with alpha: a difference too small for the gutter to plot is
+            // still a difference, and the single-image view is the one view in
+            // which it could never be seen.
+            var exactMap = fileStatus === 'renamed'
+                ? computeRowDiffMap(state.baseImg, state.headImg, 0, true)
+                : null;
+            var renameMode = renameDisplay(
+                fileStatus, state.baseImg, state.headImg, exactMap);
+
+            // The gutter plots where the two sides differ, so a file that will
+            // render as one image has no use for it — and building it costs two
+            // more full-image reads.
+            var rowMap = renameMode === 'single'
+                ? null
+                : computeRowDiffMap(state.baseImg, state.headImg, 10);
             state.diffClusters = computeDiffClusters(rowMap);
 
             var infoHtml = '<span>' + escHtml(state.currentFile) + '</span>';
@@ -1308,10 +1409,15 @@
                 console.warn('visual-review: no GitHub diff link for this file', err);
             });
 
-            // Issue #14: renamed files — show single image with rename label, no diff modes
-            if (fileStatus === 'renamed') {
+            if (renameMode === 'single') {
                 renderRenamed();
                 return;
+            }
+            if (renameMode === 'compare') {
+                // Moved *and* changed: keep the modes, and say so above them.
+                viewport.classList.add('with-rename-label');
+                var movedLabel = renameLabel();
+                if (movedLabel) viewport.appendChild(movedLabel);
             }
 
             switch (state.mode) {
@@ -1325,7 +1431,12 @@
         var gutterRefreshCallbacks = [];
 
         // -- Row-level diff map --
-        function computeRowDiffMap(baseImg, headImg, threshold) {
+        // `includeAlpha` is off for the diff gutter, which has always compared
+        // the three colour channels, and on for the rename check, which needs
+        // "the same image" to mean the same image. Keeping it a parameter is
+        // what stops the rename fix from silently changing what the gutter
+        // plots for every other file in the PR.
+        function computeRowDiffMap(baseImg, headImg, threshold, includeAlpha) {
             if (!baseImg || !headImg) return null;
             var w = Math.max(baseImg.naturalWidth, headImg.naturalWidth);
             var h = Math.max(baseImg.naturalHeight, headImg.naturalHeight);
@@ -1344,7 +1455,9 @@
             var hData = hCtx.getImageData(0, 0, w, h).data;
 
             var map = new Array(h);
-            var thr = threshold || 10;
+            // Not `threshold || 10`: that turns an explicit 0 back into 10, and
+            // 0 is the value the rename check below asks for — exact equality.
+            var thr = threshold == null ? 10 : threshold;
             for (var y = 0; y < h; y++) {
                 map[y] = false;
                 var rowStart = y * w * 4;
@@ -1352,7 +1465,8 @@
                     var i = rowStart + x * 4;
                     if (Math.abs(bData[i] - hData[i]) > thr ||
                         Math.abs(bData[i+1] - hData[i+1]) > thr ||
-                        Math.abs(bData[i+2] - hData[i+2]) > thr) {
+                        Math.abs(bData[i+2] - hData[i+2]) > thr ||
+                        (includeAlpha && Math.abs(bData[i+3] - hData[i+3]) > thr)) {
                         map[y] = true;
                         break;
                     }
@@ -1480,7 +1594,15 @@
             } else {
                 var emL = document.createElement('div');
                 emL.className = 'empty-msg';
-                emL.textContent = 'No base image (new file)';
+                // Only an added file legitimately has no base side. A rename can
+                // reach here too, now that one whose base image failed to load
+                // keeps the modes instead of collapsing to a single image, and
+                // telling the reviewer it is a new file would be a lie about a
+                // fetch that failed. Parallel to the head side's own wording
+                // below, which says "Image not available" for the same reason.
+                emL.textContent = getFileStatus(state.currentFile) === 'added'
+                    ? 'No base image (new file)'
+                    : 'Base image not available';
                 emL.style.padding = '40px';
                 leftPanel.appendChild(emL);
             }
@@ -1815,40 +1937,53 @@
             setupLoupes(dw);
         }
 
-        // -- Renamed file (no diff modes) --
-        function renderRenamed() {
-            modeToolbar.style.display = 'none';
+        // -- Renamed file --
+        //
+        // The label is shared by both rename views: above the single image for a
+        // move that changed nothing, and above the ordinary comparison modes for
+        // a move that also changed the image. Returns null when GitHub reported
+        // the rename without a previous path, which it can do (see
+        // buildImageUrls) — there is then nothing to say that the sidebar badge
+        // does not already say.
+        function renameLabel() {
             var fileData = getFileData(state.currentFile);
             var prevPath = fileData && fileData.previous_filename;
+            if (!prevPath) return null;
+
+            var label = document.createElement('div');
+            label.className = 'renamed-label';
+            label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
+                '<span class="renamed-arrow">\u2192</span>' +
+                '<code>' + escHtml(state.currentFile) + '</code>';
+            return label;
+        }
+
+        function renderRenamed() {
+            modeToolbar.style.display = 'none';
 
             var wrap = document.createElement('div');
             wrap.style.textAlign = 'center';
 
-            if (prevPath) {
-                var label = document.createElement('div');
-                label.className = 'renamed-label';
-                label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
-                    '<span class="renamed-arrow">\u2192</span>' +
-                    '<code>' + escHtml(state.currentFile) + '</code>';
-                wrap.appendChild(label);
-            }
+            var label = renameLabel();
+            if (label) wrap.appendChild(label);
 
-            var img = state.headImg || state.baseImg;
-            if (img) {
-                var imgEl = document.createElement('img');
-                imgEl.src = img.src;
-                imgEl.style.maxWidth = '90vw';
-                imgEl.style.height = 'auto';
-                imgEl.style.display = 'block';
-                imgEl.style.margin = '0 auto';
-                imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
-                wrap.appendChild(imgEl);
-            } else {
-                var msg = document.createElement('div');
-                msg.className = 'empty-msg';
-                msg.textContent = 'Image not available.';
-                wrap.appendChild(msg);
-            }
+            // There is always a head image here, and it is always the one to
+            // show. Reaching this function means renameDisplay returned
+            // 'single', which needs both sides loaded, both non-empty and both
+            // the same size — so the `state.headImg || state.baseImg` fallback
+            // and the "Image not available" branch this used to carry were code
+            // no run could enter, reading as one-sided handling that is not
+            // there. Breaking that invariant now throws, which is the right
+            // way round: a view that claims there is nothing to compare must
+            // not be able to render without having compared anything.
+            var imgEl = document.createElement('img');
+            imgEl.src = state.headImg.src;
+            imgEl.style.maxWidth = '90vw';
+            imgEl.style.height = 'auto';
+            imgEl.style.display = 'block';
+            imgEl.style.margin = '0 auto';
+            imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
+            wrap.appendChild(imgEl);
 
             viewport.appendChild(wrap);
         }

@@ -104,6 +104,15 @@ js_test(
 )
 
 js_test(
+    name = "test_rename_display",
+    entry_point = "tests/test_rename_display.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+js_test(
     name = "test_comments_pane",
     entry_point = "tests/test_comments_pane.js",
     data = [
