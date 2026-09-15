@@ -63,8 +63,9 @@ assert.ok(tuning.minViewportHeight > 0,
 
 // The helper that turns a pointer position into a pane height, and the drag
 // that must reach it. Every input is matched with its expression: with bare
-// keys, `viewportTop: 0` restores the window-fraction ceiling this PR replaced,
-// and at 1440x900 leaves the comparator -14px.
+// keys, `viewportTop: 0` measures the ceiling from the window's top rather than
+// the comparator's — 780px at 1440x900, against the 720px the replaced
+// window-fraction ceiling gave — and leaves the comparator -14px.
 assertPasses('resizeCommentsPane', bodyOf('resizeCommentsPane'), [
   ['paneBottom', 'commentsSection.getBoundingClientRect().bottom'],
   ['viewportTop', 'viewport.getBoundingClientRect().top'],
@@ -168,8 +169,13 @@ const css = stylesheet();
 // stylesheet() having blanked string literals first — a `}` inside
 // `content: "}"` would otherwise close the enclosing @media early and promote
 // the rules after it to unconditional, which is the failure this check exists
-// to catch. Anything else it gets wrong it gets wrong loudly, by not finding a
-// rule that is there.
+// to catch. String literals are not the only way a stray brace reaches the
+// walk, though, and the remaining one fails silently rather than loudly: a
+// url-token is not a string, so `background: url(a}b)` is untouched by the
+// blanking and closes the @media exactly as `content: "}"` used to. Measured,
+// with the cap moved into the real mobile query and that rule ahead of it: this
+// file stays green while every desktop window is uncapped. Filed as #42 item 2,
+// which is the inventory of what a source-text check cannot see here.
 function unconditionalRules(sheet, selector) {
   const out = [];
   let depth = 0;
@@ -224,6 +230,11 @@ assert.ok(Number(caps[0][1]) > 0 && Number(caps[0][1]) <= 40,
 // spills out of the 30vh box, which no longer clips. In row direction the
 // handle is laid out beside the body at its content width, 800px -> 0px, and
 // cannot be grabbed at all.
+// Both are positive matches, so neither can see a later rule of equal
+// specificity overriding it — `.comments-section { display: block }` appended to
+// the stylesheet leaves this green. That is general to every positive check in
+// this file and is inventoried in #42; the cap above is the one case with a
+// count check, which catches a second cap but not an override either.
 for (const [label, declaration] of [
   ['display: flex', /display:\s*flex/],
   ['flex-direction: column', /flex-direction:\s*column/],
