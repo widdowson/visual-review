@@ -30,18 +30,50 @@ function fakeStore(initial) {
   };
 }
 
-// `respond` is called with no arguments and returns what the fetch should do:
-// a Response-ish object to resolve with, or an Error to reject with.
+// A server that accepts the connection and never answers. Returned by
+// `respond` to get a fetch that settles only when its signal aborts.
+const HANGS = Symbol('never settles');
+
+// `respond` is called with the call number and returns what the fetch should
+// do: a Response-ish object to resolve with, an Error to reject with, or
+// HANGS.
 function fakeFetch(respond) {
   const calls = [];
   const fn = (url, opts) => {
     calls.push({ url, opts });
     const outcome = respond(calls.length);
+    if (outcome === HANGS) {
+      const signal = opts && opts.signal;
+      // With no signal nothing could ever settle this, and a test that hangs
+      // is a worse failure than one that fails. The case that uses HANGS
+      // asserts the signal is there, so this only ever fires as a backstop.
+      if (!signal) return Promise.reject(new Error('no AbortSignal was passed'));
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort',
+          () => reject(signal.reason || new Error('aborted')));
+      });
+    }
     if (outcome instanceof Error) return Promise.reject(outcome);
     return Promise.resolve(outcome);
   };
   fn.calls = calls;
   return fn;
+}
+
+// Stands in for the AbortSignal global, recording each timeout the region asks
+// for and letting a case fire them on demand rather than waiting out a real
+// five seconds.
+function fakeAbortSignal() {
+  const asked = [];
+  return {
+    timeout: (ms) => {
+      const controller = new AbortController();
+      asked.push({ ms, controller });
+      return controller.signal;
+    },
+    fire: () => asked.forEach((a) => a.controller.abort(new Error('TimeoutError'))),
+    asked,
+  };
 }
 
 function jsonResponse(body, ok = true, status = 200) {
@@ -52,6 +84,7 @@ function setup(opts = {}) {
   const warnings = [];
   const fetchStub = opts.fetch || fakeFetch(() => jsonResponse({ extensions: ['.png', '.webp'] }));
   const store = opts.store || fakeStore();
+  const signals = opts.AbortSignal || fakeAbortSignal();
   const now = opts.now === undefined ? NOW : opts.now;
   const mod = loadExtensions({
     IMAGE_EXTENSIONS: opts.bundled || BUNDLED,
@@ -60,8 +93,9 @@ function setup(opts = {}) {
     localStorage: store,
     Date: { now: () => now },
     console: { warn: (...args) => warnings.push(args) },
+    AbortSignal: signals,
   });
-  return { mod, fetch: fetchStub, store, warnings };
+  return { mod, fetch: fetchStub, store, warnings, signals };
 }
 
 // A cache entry the region should accept, unless `ts` says otherwise.
@@ -99,8 +133,10 @@ test('adopts the server list, replacing the bundled one', async () => {
 
   assert.strictEqual(fetch.calls.length, 1);
   assert.strictEqual(fetch.calls[0].url, BASE_URL + '/api/extensions');
-  assert.deepStrictEqual(fetch.calls[0].opts, { credentials: 'omit' },
-    'the request must not carry github.com cookies to a third-party host');
+  assert.strictEqual(fetch.calls[0].opts.credentials, 'omit',
+    "must stay 'omit': the server answers Access-Control-Allow-Origin: *, " +
+    'which cannot satisfy a credentialed request, so an \'include\' here ' +
+    'would make every response unreadable and pin the bundled list forever');
 });
 
 test('lowercases what the server sends', async () => {
@@ -224,6 +260,37 @@ test('a malformed payload keeps the bundled list and caches nothing', async () =
   }
 });
 
+test('the request is bounded, so a wedged server cannot block the page', async () => {
+  // The failure this closes is not a slow page. prHasImageFiles awaits this
+  // before it looks at anything and a list page awaits that once per row, with
+  // run() holding _running throughout — so an unanswered request means no VR
+  // link is injected anywhere on that page, ever, on any of the three surfaces.
+  const { mod, fetch, signals } = setup({ fetch: fakeFetch(() => HANGS) });
+  const pending = mod.ensureExtensions();
+
+  assert.ok(fetch.calls[0].opts.signal,
+    'the request must carry an AbortSignal; without one a server that accepts ' +
+    'and never answers blocks the whole injection path for the life of the page');
+  assert.deepStrictEqual(signals.asked.map((a) => a.ms), [5000],
+    'the signal must be a timeout, and this is its budget');
+
+  signals.fire();
+  assert.deepStrictEqual(await pending, BUNDLED,
+    'a timed-out request must land in the same fallback as any other failure');
+  assert.ok(mod.hasImageExtension('shot.png'));
+});
+
+test('a timeout caches nothing and is not retried per caller', async () => {
+  const { mod, fetch, store, signals } = setup({ fetch: fakeFetch(() => HANGS) });
+  const pending = mod.ensureExtensions();
+  signals.fire();
+  await pending;
+
+  assert.strictEqual(store.read(CACHE_KEY), null);
+  await mod.ensureExtensions();
+  assert.strictEqual(fetch.calls.length, 1);
+});
+
 // ── One fetch per page ──────────────────────────────────────────────────────
 
 test('overlapping callers share one request', async () => {
@@ -275,6 +342,16 @@ test('prHasImageFiles awaits the list before matching against it', () => {
   const awaited = body.indexOf('await ensureExtensions()');
   const matched = body.indexOf('hasImageExtension(');
 
+  // Statement position, not just presence. A substring match is satisfied by
+  // `if (false) { await ensureExtensions(); }`, and worse by
+  // `if (_extensionsPromise) await ensureExtensions();` — which reads like a
+  // tidy-up, is never truthy on the first call since only ensureExtensions
+  // sets it, and so would stop the endpoint being fetched on any page at all.
+  // Both of those pass every other case in this file, because every other case
+  // runs the region in isolation. This is the check that has to catch them.
+  assert.ok(body.split('\n').some((line) => line.trim() === 'await ensureExtensions();'),
+    'prHasImageFiles must await ensureExtensions() as a statement of its own, ' +
+    'not inside a branch that may never be taken');
   assert.ok(awaited > 0,
     'prHasImageFiles must await ensureExtensions(); without it the fetched ' +
     'list is never asked for and the endpoint might as well not exist');

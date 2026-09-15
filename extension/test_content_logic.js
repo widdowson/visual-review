@@ -54,6 +54,7 @@ const { hasImageExtension } = loadExtensions({
   localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
   Date: Date,
   console: console,
+  AbortSignal: AbortSignal,
 });
 
 // Positive cases

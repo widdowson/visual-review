@@ -70,12 +70,15 @@ class TestVisualReviewPage:
 class TestExtensionsEndpoint:
     @pytest.mark.asyncio
     async def test_returns_the_servers_own_list(self):
-        """The endpoint is the same list the server matches with.
+        """The endpoint answers the same list the server matches with.
 
         Asserted against ``_EXT_MIME`` rather than a literal, so adding a
-        format to image_extensions.json does not need this test edited — and
-        so an endpoint that answered a hardcoded list of its own would fail
-        here, which is the whole defect this endpoint exists to remove.
+        format to image_extensions.json does not need this test edited. Note
+        what it does *not* establish: ``_EXT_MIME`` is the constant the
+        endpoint itself reads, so this pins the value the two share and not
+        where the answer came from. An endpoint carrying a frozen copy of
+        today's list passes here. ``test_serves_whatever_the_file_says``
+        below is what rules that out.
         """
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -83,6 +86,26 @@ class TestExtensionsEndpoint:
 
         assert resp.status_code == 200
         assert resp.json() == {"extensions": list(_EXT_MIME.keys())}
+
+    @pytest.mark.asyncio
+    async def test_serves_whatever_the_file_says(self):
+        """The answer is derived, not a second copy of the list.
+
+        This is the one defect #13 exists to remove, so it needs a case that
+        can see it: reintroducing the duplication on the server — a literal
+        list in the handler instead of ``IMAGE_EXTENSIONS`` — leaves every
+        other case in this class green, and the next format added to
+        image_extensions.json silently stops being served.
+
+        ``IMAGE_EXTENSIONS`` is ``_EXT_MIME.keys()``, a live view, so adding a
+        key to the dict reaches the response with no production change.
+        """
+        with patch.dict("app._EXT_MIME", {".webp": "image/webp"}):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/extensions")
+
+        assert ".webp" in resp.json()["extensions"]
 
     @pytest.mark.asyncio
     async def test_every_entry_is_a_lowercase_dotted_extension(self):
@@ -140,11 +163,16 @@ class TestExtensionsEndpoint:
         assert resp.headers.get("access-control-allow-origin") == "*"
 
     @pytest.mark.asyncio
-    async def test_is_not_shadowed_by_the_short_url_route(self):
-        """``/api/extensions`` is two segments and the dynamic routes are three
-        or more, so nothing should claim it first. Pinned because the route
-        that resolves a short identifier is registered ahead of it and a
-        future ``/{identifier}/{thing}`` pattern would silently take it.
+    async def test_no_earlier_route_claims_a_two_segment_path(self):
+        """A tripwire for a future route, not a pin on a live hazard.
+
+        No dynamic route in app.py is two segments today — the short-URL
+        resolver is ``/{identifier}/pr/{number}``, three — so this endpoint is
+        unshadowable at any registration position, and moving it to the end of
+        the file leaves this green. What it guards is the day someone adds a
+        two-segment pattern above it: FastAPI matches in registration order, so
+        such a route would claim ``/api/extensions`` and the extension would
+        get that route's answer instead of the list.
         """
         route_paths = [getattr(r, "path", None) for r in app.routes]
         assert "/api/extensions" in route_paths

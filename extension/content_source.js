@@ -50,7 +50,29 @@ function region(name) {
 // it defines. Both lists are asserted rather than assumed: a region that stops
 // defining one of these fails here, instead of the tests below quietly
 // exercising `undefined`.
-const INJECTED = ['IMAGE_EXTENSIONS', 'VR_BASE_URL', 'fetch', 'localStorage', 'Date', 'console'];
+const INJECTED = [
+  'IMAGE_EXTENSIONS', 'VR_BASE_URL', 'fetch', 'localStorage', 'Date', 'console', 'AbortSignal',
+];
+
+// tests/spa_source.js asserts its region is pure and fails if it touches the
+// clock, the network or a store. This region is deliberately all three, so
+// that guard cannot apply — but dropping it and putting nothing in its place
+// leaves the region free to reach for any global INJECTED does not name, get
+// Node's own, and quietly stop being deterministic under test. INJECTED is
+// what the region may reach for; this is the part of the rest that would do
+// real damage if it were reached silently. A region that needs one of these
+// adds it to INJECTED and stubs it.
+const MUST_BE_INJECTED = [
+  [/\bsetTimeout\b/, 'setTimeout'],
+  [/\bsetInterval\b/, 'setInterval'],
+  [/\bMath\s*\.\s*random\b/, 'Math.random'],
+  [/\bnew\s+Date\b/, 'new Date'],
+  [/\bprocess\b/, 'process'],
+  [/\bXMLHttpRequest\b/, 'XMLHttpRequest'],
+  [/\bdocument\b/, 'document'],
+  [/\bwindow\b/, 'window'],
+  [/\bchrome\b/, 'chrome'],
+];
 const EXPORTED = [
   'normalizeExtensions',
   'readCachedExtensions',
@@ -72,6 +94,15 @@ function loadExtensions(env) {
   for (const name of INJECTED) {
     assert.ok(Object.prototype.hasOwnProperty.call(env, name),
       'loadExtensions needs a stub for ' + name);
+  }
+
+  // Checked against the region with comments stripped, since the prose around
+  // the code may name any of these.
+  const withoutComments = stripComments(src);
+  for (const [pattern, label] of MUST_BE_INJECTED) {
+    assert.ok(!pattern.test(withoutComments),
+      'the vr:extensions region reaches for "' + label + '", which no test stubs; ' +
+      'add it to INJECTED and stub it, or the region stops being deterministic here');
   }
 
   const body = "'use strict';\n" + src +

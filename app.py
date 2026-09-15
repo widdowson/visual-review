@@ -259,6 +259,12 @@ async def supported_extensions():
     it is the same for every caller and there is nothing to keep an
     intermediary from holding.
 
+    The hour here is for callers that have no cache of their own, and is
+    deliberately not the day the browser extension keeps its copy for. The
+    extension does not re-request inside its own window, so this header never
+    governs it; the two numbers are independent rather than one of them being
+    a leftover of the other.
+
     The CORS header the middleware adds is part of the contract rather than
     incidental. A Manifest V3 content script's ``fetch`` carries the page's
     origin (github.com) and is subject to CORS — ``host_permissions`` cannot

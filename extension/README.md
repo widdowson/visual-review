@@ -71,7 +71,7 @@ Requires `rsvg-convert` (`brew install librsvg`).
 
 ## Configuration
 
-Constants at the top of `content.js`:
+Constants in `content.js` — the first three in the `Configuration` block at the top, `EXT_CACHE_DURATION_MS` in the `vr:extensions` region below it:
 
 | Constant | Default | Description |
 |----------|---------|-------------|

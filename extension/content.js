@@ -49,6 +49,7 @@
   // vr:extensions:begin
   var EXT_CACHE_KEY = 'vr_image_extensions';
   var EXT_CACHE_DURATION_MS = 24 * 60 * 60 * 1000;
+  var EXT_FETCH_TIMEOUT_MS = 5000;
 
   var _extensions = IMAGE_EXTENSIONS.slice();
   var _extensionsPromise = null;
@@ -94,8 +95,21 @@
   // calls prHasImageFiles once per row. A failure memoizes the bundled list
   // too, so an unreachable server costs one request rather than one per row.
   //
-  // credentials:'omit' because the endpoint needs no auth and this runs on
-  // github.com — there is no reason to send cookies to a third-party host.
+  // The request is bounded because prHasImageFiles awaits it before it looks
+  // at anything, and a PR list page awaits that once per row. A VR server that
+  // refuses or errors falls back below; one that accepts the connection and
+  // never answers — a blackholing proxy, a captive portal, a wedged host —
+  // would otherwise block the first row forever and inject nothing at all, on
+  // the list page, the detail page and the hovercard alike, for the life of
+  // that page. The abort lands in the same catch as any other failure.
+  //
+  // credentials:'omit' is not about cookies: fetch defaults to 'same-origin'
+  // and this is cross-origin, so none would be sent either way. It is there to
+  // keep the response readable. The server answers
+  // Access-Control-Allow-Origin: *, and a wildcard cannot satisfy a
+  // credentialed request — so a later 'include' here would make every
+  // response unreadable and pin the extension to the bundled list forever,
+  // silently. That is what the assertion on this option is protecting.
   function ensureExtensions() {
     if (_extensionsPromise) return _extensionsPromise;
 
@@ -106,7 +120,10 @@
       return _extensionsPromise;
     }
 
-    _extensionsPromise = fetch(VR_BASE_URL + '/api/extensions', { credentials: 'omit' })
+    _extensionsPromise = fetch(VR_BASE_URL + '/api/extensions', {
+      credentials: 'omit',
+      signal: AbortSignal.timeout(EXT_FETCH_TIMEOUT_MS),
+    })
       .then(function(resp) {
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         return resp.json();
