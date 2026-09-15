@@ -83,7 +83,6 @@ const url = await ghDiffUrl(OWNER, REPO, PR, 'a/b.png');
 assert.ok(url.startsWith('https://github.com/' + OWNER + '/' + REPO + '/pull/' + PR + '/files#'),
   'the link must open the PR\'s Files tab on github.com, got ' + url);
 assert.strictEqual(url.split('#').length, 2, 'exactly one fragment');
-assert.ok(!/undefined|null|NaN/.test(url), 'no placeholder leaked into ' + url);
 
 // The path reaches GitHub only as a hash, so a path full of URL metacharacters
 // cannot break the link — and a future edit that helpfully appends the path
@@ -97,18 +96,39 @@ assert.ok(!/\s/.test(odd), 'no raw path characters in ' + odd);
 // ── The wiring ──────────────────────────────────────────────────────────────
 // Everything above tests the region; the SPA reaches it from renderComparison,
 // outside the region. Structural, like the wiring checks in test_image_urls.js
-// and test_prefetch_policy.js, and with the same caveat: these match source
-// text, so they pin a shape rather than a behaviour. The variable's name is
-// read out of the source rather than spelled here, so renaming it is not a
-// failure — but its declaration and the guard's shape are both matched, and a
-// refactor that changes either has to come back here.
+// and test_prefetch_policy.js.
+//
+// Read the limit of that before adding to it. These match source text, so they
+// pin a *shape*: that a call and a guard exist, in a given order. They cannot
+// reach whether a statement executes. Measured on this head: a guard wrapped in
+// `if (false)` passes every assertion below, and so would writing the href from
+// something other than ghUrl while `escAttr(ghUrl)` still appears somewhere.
+// Closing that needs a browser driving the race, which is the harness tracked
+// in #21 — that issue already names this exact category. Two assertions here
+// are also brittle by choice: a rewrite to createElement/setAttribute is a
+// strictly safer write and fails the writeAt anchor, and the capture below
+// takes the *first* `X = state.currentFile;` in the function, so an unrelated
+// earlier one fails with a message blaming the wrong line. Both fail loudly
+// rather than passing quietly, which is the way round it should be. Do not
+// replace any of this with a real lexer; add a driven test instead.
 
 const render = bodyOf('renderComparison');
+const at = (needle, what) => {
+  const i = render.indexOf(needle);
+  assert.ok(i >= 0, 'renderComparison must ' + what);
+  return i;
+};
 
-// The container the link is written into has to exist in the info bar before
-// the digest arrives, or there is nowhere to put it.
-assert.ok(/id="gh-diff-link-container"/.test(render),
-  'renderComparison must emit the placeholder the link lands in');
+// Where the link lands, which is the one thing issue #15 specifies: "right
+// after the filename and right before Current:". Presence alone does not pin
+// it — the placeholder moved to the end of the bar keeps a presence check
+// green while putting the link after the dimensions.
+const barAt = at('var infoHtml', 'build the info bar');
+const placeholderAt = at('id="gh-diff-link-container"', 'emit the placeholder the link lands in');
+const baseAt = at('Base:', 'show the base dimensions');
+const currentAt = at('Current:', 'show the current dimensions');
+assert.ok(barAt < placeholderAt && placeholderAt < baseAt && placeholderAt < currentAt,
+  'the link must sit after the filename and before the Base/Current fields');
 
 // The path is read once, up front, and passed in. Reading state.currentFile
 // inside the callback instead is the defect the capture exists to prevent.
@@ -125,17 +145,21 @@ assert.ok(
 // with a new container of the same id, so an unguarded write labels the file
 // now on screen with the anchor of the one we left.
 //
-// Ordered, not merely present. A guard sitting *after* the write restores the
-// bug completely, and a presence check stays green on that mutant — which is
-// this suite's own recorded failure mode: see the comments in spa_source.js on
-// three checks that a plausible edit turned into green runs.
+// Three positions, not one, because two reorderings each restore the bug while
+// leaving the guard in the file. Below the write, it guards nothing. Hoisted
+// above the digest call, it compares a local against the field it was assigned
+// from one statement earlier, so it can never fire — which is the same bug and
+// the harder one to see, since the guard still reads correctly in isolation.
 const guardAt = render.search(new RegExp(
   'if\\s*\\(\\s*(?:' + pathVar + '\\s*!==\\s*state\\.currentFile' +
   '|state\\.currentFile\\s*!==\\s*' + pathVar + ')\\s*\\)\\s*return\\s*;'));
-const writeAt = render.indexOf('container.innerHTML');
+const thenAt = at('.then(', 'handle the digest asynchronously');
+const writeAt = at('container.innerHTML', 'write the link into the container');
 assert.ok(guardAt >= 0,
   'renderComparison must drop a digest that arrived after the viewer moved on');
-assert.ok(writeAt >= 0, 'renderComparison must write the link into the container');
+assert.ok(thenAt < guardAt,
+  'the staleness guard must sit inside the digest callback: before it, the two ' +
+  'sides cannot differ and the guard never fires');
 assert.ok(guardAt < writeAt,
   'the staleness guard must run before the link is written, not after it');
 

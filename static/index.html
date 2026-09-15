@@ -876,9 +876,13 @@
         // GitHub anchors a file in the Files tab as `#diff-<sha256 of the
         // file's path, lower-case hex>` — the path alone, with no trailing
         // newline and nothing about the repository or the PR mixed in. That
-        // is the whole feature, and it is a format nothing in this repo
-        // controls, so tests/test_gh_diff_link.js pins it against GitHub's
-        // own published worked example rather than against our own output.
+        // format is GitHub's and it is undocumented: the pair
+        // tests/test_gh_diff_link.js pins comes from a community answer, an
+        // older answer describes the anchor as an md5, and nothing here
+        // observes github.com. So take it as the best-sourced reading rather
+        // than as fact, read that test's comment for where it came from, and
+        // see #34 for what is still unverified — including which side of a
+        // rename GitHub hashes, where this uses the new path.
         //
         // Takes owner, repo and the number as arguments rather than closing
         // over them so it can be tested without a DOM, like buildImageUrls
