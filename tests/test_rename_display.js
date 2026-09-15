@@ -465,8 +465,9 @@ assert.ok(
 const occurrences = (sourceWithoutComments.match(/computeRowDiffMap\s*\(/g) || []).length;
 assert.ok(occurrences >= 7,
   'expected the declaration, the rename call and five gutter calls; found ' +
-  occurrences + '. This check reads static/index.html by name, so renaming ' +
-  'computeRowDiffMap makes it vacuous — rename it here too.');
+  occurrences + '. Fewer means a call site went away — check it was meant to, ' +
+  'and lower this floor deliberately. This check also reads static/index.html ' +
+  'by name, so renaming computeRowDiffMap makes it vacuous — rename it here too.');
 
 const uses = [...sourceWithoutComments.matchAll(
   /(function\s+)?computeRowDiffMap\s*\(([^()]*)\)/g)];
@@ -479,6 +480,11 @@ assert.strictEqual(uses.length, occurrences,
 // parameters happen to be called.
 assert.strictEqual(uses.filter(u => u[1]).length, 1, 'exactly one declaration');
 const callSites = uses.filter(u => !u[1]).map(u => u[2].split(',').map(a => a.trim()));
+
+assert.ok(callSites.every(args => args.length === 3 || args.length === 4),
+  'every call site must pass 3 or 4 arguments; a call whose textual argument list '
+  + 'is neither is inspected by neither census below: '
+  + JSON.stringify(callSites.filter(a => a.length !== 3 && a.length !== 4)));
 
 const withAlpha = callSites.filter(args => args.length === 4);
 assert.strictEqual(withAlpha.length, 1,

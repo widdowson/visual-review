@@ -122,8 +122,10 @@ function checked(name, body) {
   return body;
 }
 
-// `sourceWithoutComments` is the same stripped text extract() and bodyOf() read.
-// Exported rather than re-derived by callers: a second copy of stripComments
-// could drift from this one, and a check reading differently-stripped source
-// than bodyOf() does would be wrong in a way nothing would report.
+// `sourceWithoutComments` is the whole file with comments stripped — exactly the
+// string bodyOf() walks. (extract() slices the *raw* html and strips its region
+// afterwards, so it reads the same text through a different route.) Exported
+// rather than re-derived by callers: a second copy of stripComments could drift
+// from this one, and a check reading differently-stripped source than bodyOf()
+// does would be wrong in a way nothing would report.
 module.exports = { extract, bodyOf, sourceWithoutComments: htmlWithoutComments };
