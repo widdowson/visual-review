@@ -1295,4 +1295,6 @@ class TestPrImageCacheHeader:
                 )
 
         assert resp.status_code == 404
-        assert "immutable" not in (resp.headers.get("cache-control") or "")
+        # Not merely "not immutable": the error path attaches no image headers
+        # at all, so a file that appears later is not shadowed by a cached 404.
+        assert resp.headers.get("cache-control") is None

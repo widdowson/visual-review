@@ -4,7 +4,7 @@
 // renamed file prefetched a 404 and then had to be fetched again on arrival.
 
 const assert = require('assert');
-const { extract } = require('./spa_source');
+const { extract, bodyOf } = require('./spa_source');
 
 const buildImageUrls = extract('image-urls', 'buildImageUrls');
 
@@ -72,5 +72,20 @@ assert.deepStrictEqual(buildImageUrls({status: 'modified'}, API, BASE, HEAD),
 // own getFileStatus fallback assumes.
 const unknown = urls({path: 'a.png', status: 'copied'});
 assert.ok(unknown.base && unknown.head);
+
+// ── The adapter ─────────────────────────────────────────────────────────────
+// Everything above tests the pure region. The SPA reaches it through a
+// one-line adapter that supplies apiBase and the two refs, and that line is
+// outside the region — swap its last two arguments and every assertion above
+// still passes while the page shows every file's base and current the wrong
+// way round. Structural, like the wiring checks in test_prefetch_policy.js.
+
+const adapter = bodyOf('imageUrls');
+assert.ok(/return\s+buildImageUrls\s*\(/.test(adapter),
+  'imageUrls must delegate to the extracted buildImageUrls');
+assert.ok(
+  /buildImageUrls\s*\(\s*fileData\s*,\s*apiBase\s*,\s*state\.baseRef\s*,\s*state\.headRef\s*\)/
+    .test(adapter),
+  'imageUrls must pass the refs in base, head order');
 
 console.log('test_image_urls: all checks passed');

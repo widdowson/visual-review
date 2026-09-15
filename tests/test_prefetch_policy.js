@@ -6,28 +6,23 @@
 // if they go missing this test fails rather than silently testing nothing.
 
 const assert = require('assert');
-const { extract, constant } = require('./spa_source');
+const { extract, constant, bodyOf } = require('./spa_source');
 
 const computePrefetchPlan = extract('prefetch-policy', 'computePrefetchPlan');
 
 // ── The shipped defaults ────────────────────────────────────────────────────
 // Asserted because the policy below is exercised with explicit arguments, so
 // every case here would still pass with the feature switched off in the SPA.
+// Each is a floor on the feature existing, not an opinion about its tuning:
+// raising any of these constants is a judgement call and must not fail here.
 
-const AHEAD = constant('PREFETCH_AHEAD');
-const BEHIND = constant('PREFETCH_BEHIND');
-const DELAY = constant('PREFETCH_DELAY_MS');
-const RADIUS = constant('CACHE_RADIUS');
-
-assert.ok(AHEAD >= 1, 'the SPA must prefetch at least the next file, got ' + AHEAD);
-assert.ok(BEHIND >= 1, 'the SPA must prefetch at least the previous file, got ' + BEHIND);
-assert.ok(DELAY > 0, 'prefetching must be debounced, got ' + DELAY);
-assert.ok(RADIUS >= AHEAD && RADIUS >= BEHIND,
-  'the retained window must cover what is prefetched: radius ' + RADIUS +
-  ' against ahead ' + AHEAD + ' / behind ' + BEHIND);
-// Speculation is a guess paid for in proxy round trips; a deep window is a
-// change to argue for, not to drift into.
-assert.ok(AHEAD + BEHIND <= 4, 'prefetch window unexpectedly wide: ' + (AHEAD + BEHIND));
+assert.ok(constant('PREFETCH_AHEAD') >= 1, 'the SPA must prefetch at least the next file');
+assert.ok(constant('PREFETCH_BEHIND') >= 1, 'the SPA must prefetch at least the previous file');
+assert.ok(constant('PREFETCH_DELAY_MS') > 0, 'prefetching must be debounced');
+// Only that the retained window reaches past the current file. Deliberately
+// not tied to the prefetch depth: the policy keeps `want` in `keep` whatever
+// the radius, and a case below pins that at radius 0.
+assert.ok(constant('CACHE_RADIUS') >= 1, 'the retained window must extend beyond the current file');
 
 // Defaults matching the SPA's constants, so each case states only what it varies.
 function plan(overrides) {
@@ -117,17 +112,6 @@ assert.deepStrictEqual(first, second, 'same input, same plan');
 // thing, so assert instead that each half of the plan is consumed and that
 // prefetching is armed from the loader's ready path.
 
-const { html } = require('./spa_source');
-
-function bodyOf(name) {
-  const at = html.indexOf('function ' + name + '(');
-  assert.ok(at > 0, 'static/index.html must define ' + name);
-  // Functions here are indented eight spaces and closed at that indent.
-  const close = html.indexOf('\n        }', at);
-  assert.ok(close > at, name + ' must be closed at the expected indent');
-  return html.slice(at, close);
-}
-
 const runPrefetch = bodyOf('runPrefetch');
 assert.ok(/plan\.fetch\b[\s\S]*startPrefetch\s*\(/.test(runPrefetch),
   'runPrefetch must start a prefetch for each index the plan asks for');
@@ -136,6 +120,8 @@ assert.ok(/plan\.evict\b[\s\S]*dropCached\s*\(/.test(runPrefetch),
 
 assert.ok(/schedulePrefetch\s*\(\s*\)/.test(bodyOf('loadImagePair')),
   'loadImagePair must arm the prefetch once the current pair is ready');
+assert.ok(/setTimeout\s*\(\s*runPrefetch\s*,/.test(bodyOf('schedulePrefetch')),
+  'schedulePrefetch must arm runPrefetch itself, not some other callback');
 assert.ok(/cancelPrefetchTimer\s*\(\s*\)/.test(bodyOf('selectFile')),
   'selectFile must disarm any armed prefetch before loading the new pair');
 assert.ok(/clearTimeout\s*\(/.test(bodyOf('cancelPrefetchTimer')),
