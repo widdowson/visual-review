@@ -1306,10 +1306,12 @@ class TestPrImageClientDisconnect:
     """A request the browser has cancelled must stop costing GitHub API calls.
 
     These drive the ASGI app directly rather than going through
-    ``ASGITransport``, because that transport never delivers
-    ``http.disconnect`` — measured: ``is_disconnected()`` is False for its
-    whole lifetime. So it cannot express this case at all, which is also why
-    every other test in this file is unaffected by the checks.
+    ``ASGITransport``. That transport does deliver ``http.disconnect``, but
+    only after ``response_complete`` and only from behind an ``await`` that
+    ``is_disconnected()``'s already-cancelled scope can never get past —
+    measured: it reports False before the response and False after it. So the
+    transport cannot express this case at all, which is equally why none of
+    the other tests in this file change behaviour because of these checks.
     """
 
     @staticmethod
@@ -1332,22 +1334,23 @@ class TestPrImageClientDisconnect:
 
     @classmethod
     async def _drive(cls, gone: str, *, contents: dict, blob: dict | None = None,
-                     path: str = "test.png", ref: str = "a" * 40):
+                     blob_status: int = 200, path: str = "test.png",
+                     ref: str = "a" * 40):
         """Run pr_image against a stub GitHub, aborting when ``gone`` says.
 
-        ``gone`` is "never", "before" (the client was already gone when the
-        handler started) or "during_contents" (it went while the contents call
-        was in flight, which is where the SPA's aborts actually land). The
-        trigger is the stub upstream noticing the contents call, not a count
-        of channel reads: a count would silently mean "the Nth check" and so
-        would move whenever a check was added or removed, which is exactly
-        when these tests need to keep meaning what their names say.
+        ``gone`` is "never", "at_start" (already gone when the handler ran),
+        "during_contents" (gone while the contents call was in flight, which
+        is where the SPA's aborts land) or "during_blob". The trigger is the
+        stub upstream seeing that call, not a count of channel reads: a count
+        would silently mean "the Nth check" and would move whenever a check
+        was added or removed, which is exactly when these tests need to keep
+        meaning what their names say.
 
         Returns (status, headers, body, upstream_urls). The URLs are the whole
         point — an assertion on the status alone would pass against a handler
         that made every call and threw the results away.
         """
-        disconnected = {"now": gone == "before"}
+        disconnected = {"now": gone == "at_start"}
 
         async def receive():
             if disconnected["now"]:
@@ -1359,8 +1362,12 @@ class TestPrImageClientDisconnect:
         contents_resp.json.return_value = contents
 
         blob_resp = MagicMock()
-        blob_resp.status_code = 200
+        blob_resp.status_code = blob_status
         blob_resp.json.return_value = blob or {}
+
+        download_resp = MagicMock()
+        download_resp.status_code = 200
+        download_resp.content = b"downloaded-png-data"
 
         urls: list[str] = []
 
@@ -1370,7 +1377,11 @@ class TestPrImageClientDisconnect:
                 if gone == "during_contents":
                     disconnected["now"] = True
                 return contents_resp
-            return blob_resp
+            if "/git/blobs/" in url:
+                if gone == "during_blob":
+                    disconnected["now"] = True
+                return blob_resp
+            return download_resp
 
         sent: list[dict] = []
 
@@ -1396,8 +1407,8 @@ class TestPrImageClientDisconnect:
         headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
         return start["status"], headers, body, urls
 
-    # The three shapes the contents call can return, named so a failure says
-    # which case it was in rather than which dict literal it was handed.
+    # The contents-call shapes, named so a failure says which case it was in
+    # rather than which dict literal it was handed.
     _B64 = base64.b64encode(b"fake-png-data").decode()
     SMALL = {"encoding": "base64", "content": _B64}
     LARGE = {"sha": "deadbeef123", "size": 2_000_000,
@@ -1406,46 +1417,85 @@ class TestPrImageClientDisconnect:
               "download_url": "https://raw.githubusercontent.com/o/r/abc/test.png"}
     BLOB = {"encoding": "base64", "content": _B64}
 
-    @pytest.mark.asyncio
-    async def test_gone_before_the_contents_call_spends_nothing(self):
-        """The first check: a request abandoned before the handler reached it."""
-        status, _, body, urls = await self._drive("before", contents=self.SMALL)
-        assert status == 499
-        assert urls == []
-        assert body == b""
+    @staticmethod
+    def _kinds(urls):
+        return [
+            "contents" if "/contents/" in u
+            else "blob" if "/git/blobs/" in u
+            else "download"
+            for u in urls
+        ]
 
     @pytest.mark.asyncio
     async def test_gone_during_the_contents_call_skips_the_blob_call(self):
-        """The second check, which is the one with something left to save.
+        """The check with the most to save: the bytes fetch is never made.
 
-        The contents call is spent — nothing can refund it — but the blob
-        fetch that would have transferred the bytes is never made.
+        The contents call is spent — nothing can refund a call already sent —
+        but the blob call that would have transferred the file is not made.
         """
         status, _, body, urls = await self._drive(
             "during_contents", contents=self.LARGE, blob=self.BLOB
         )
         assert status == 499
-        assert len(urls) == 1
-        assert "/contents/test.png" in urls[0]
-        assert not any("/git/blobs/" in u for u in urls)
+        assert self._kinds(urls) == ["contents"]
         assert body == b""
 
     @pytest.mark.asyncio
     async def test_gone_during_the_contents_call_skips_the_download_fallback(self):
-        """Case 3 shares the second check: no sha, so download_url is next."""
+        """Case 3 reached directly: no sha, so download_url is the next call."""
         status, _, _, urls = await self._drive(
             "during_contents", contents=self.NO_SHA
         )
         assert status == 499
-        assert len(urls) == 1
-        assert not any("raw.githubusercontent.com" in u for u in urls)
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_blob_call_skips_the_download_fallback(self):
+        """Case 3 reached *after* case 2, which the entry check cannot cover.
+
+        A blob response that is not base64 falls through to download_url, so
+        without a check of its own this request would spend a third upstream
+        call and write a 200 into a socket that has gone.
+        """
+        status, _, body, urls = await self._drive(
+            "during_blob", contents=self.LARGE, blob={"encoding": "utf-8"}
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents", "blob"]
+        assert body == b""
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_blob_call_after_a_failed_blob_call(self):
+        """The same fall-through, reached by a non-200 blob response."""
+        status, _, _, urls = await self._drive(
+            "during_blob", contents=self.LARGE, blob={}, blob_status=404
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents", "blob"]
+
+    @pytest.mark.asyncio
+    async def test_no_check_precedes_the_contents_call(self):
+        """Deliberate, and measured: there is no check before the first call.
+
+        One was written and removed — it fired in none of 900 aborted
+        requests, and uvicorn will not dispatch a queued pipelined cycle on a
+        closing connection, which was the only case that could have reached
+        it. So a client already gone still spends the contents call, and is
+        stopped at the next one. If this starts returning no upstream calls at
+        all, a pre-contents check has come back and needs its own evidence.
+        """
+        status, _, _, urls = await self._drive(
+            "at_start", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
 
     @pytest.mark.asyncio
     async def test_small_file_already_in_hand_is_still_returned(self):
-        """Deliberate: the second check sits below the inline-content case.
+        """Deliberate: both checks sit below the inline-content case.
 
         A small file's bytes arrived with the contents call, so stopping short
-        of returning them would save nothing. If this ever returns 499 the
+        of returning them would save nothing. If this ever returns 499 a
         check has been moved above case 1.
         """
         status, headers, body, urls = await self._drive(
@@ -1454,25 +1504,34 @@ class TestPrImageClientDisconnect:
         assert status == 200
         assert body == b"fake-png-data"
         assert headers["cache-control"] == "private, max-age=31536000, immutable"
-        assert len(urls) == 1
+        assert self._kinds(urls) == ["contents"]
 
     @pytest.mark.asyncio
-    async def test_connected_client_still_gets_both_calls(self):
+    async def test_connected_client_still_gets_every_call(self):
         """The checks must not fire on a client that is still there."""
         status, _, body, urls = await self._drive(
             "never", contents=self.LARGE, blob=self.BLOB
         )
         assert status == 200
         assert body == b"fake-png-data"
-        assert len(urls) == 2
-        assert any("/git/blobs/" in u for u in urls)
+        assert self._kinds(urls) == ["contents", "blob"]
+
+    @pytest.mark.asyncio
+    async def test_connected_client_reaches_the_download_fallback(self):
+        """The full three-call path, so the added check cannot be a blanket."""
+        status, _, body, urls = await self._drive(
+            "never", contents=self.LARGE, blob={"encoding": "utf-8"}
+        )
+        assert status == 200
+        assert body == b"downloaded-png-data"
+        assert self._kinds(urls) == ["contents", "blob", "download"]
 
     @pytest.mark.asyncio
     async def test_client_gone_response_is_not_cached(self):
         """A cached 499 would shadow the image on the next request for it."""
         cases = (
-            ("before", self.SMALL, None),
             ("during_contents", self.LARGE, self.BLOB),
+            ("during_blob", self.LARGE, {"encoding": "utf-8"}),
         )
         for gone, contents, blob in cases:
             status, headers, _, _ = await self._drive(
@@ -1480,3 +1539,23 @@ class TestPrImageClientDisconnect:
             )
             assert status == 499, gone
             assert headers.get("cache-control") is None, gone
+
+    @pytest.mark.asyncio
+    async def test_each_check_logs_the_call_it_skipped(self, caplog):
+        """The log line is the only thing that tells the checks apart.
+
+        Without this, swapping the two label strings is a mutation the whole
+        suite passes — so each one is pinned to the call it actually guards.
+        """
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_contents", contents=self.LARGE,
+                              blob=self.BLOB)
+        assert "client gone before the blob call" in caplog.text
+        assert "download_url" not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_blob", contents=self.LARGE,
+                              blob={"encoding": "utf-8"})
+        assert "client gone before the download_url fetch" in caplog.text
+        assert "before the blob call" not in caplog.text

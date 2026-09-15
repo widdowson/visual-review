@@ -338,41 +338,52 @@ async def pr_images(owner: str, repo: str, number: int):
 # The SPA aborts an image load the moment the user navigates away from a file,
 # so a fast scroll leaves requests in flight that nobody is waiting for. Each
 # one still costs a GitHub API call against a rate limit shared by everyone on
-# the deployment, and a proxied image can need two.
+# the deployment, and a proxied image can need up to three.
 #
-# Whether a check is worth making at all depends on the server reporting the
-# abort while there is still a call left to skip, so that was measured before
-# any of this was built, against the real endpoint under real uvicorn 0.42
-# with a stubbed upstream and raw sockets aborted mid-flight.
+# Whether a check is worth making depends on the server reporting the abort
+# while there is still a call left to skip, so that was measured before any of
+# this was built, against this endpoint under real uvicorn 0.42 with a stubbed
+# upstream and raw sockets aborted mid-flight.
 #
-# Detection is prompt: on both the httptools and the h11 implementation, and
+# Detection is prompt. On both the httptools and the h11 implementation, and
 # for an abort delivered as a FIN, as an RST and as a half-close,
 # ``is_disconnected()`` returned True at the first poll after the abort landed
 # — six runs, all six inside one 5ms poll, which is the harness's resolution
 # rather than a latency figure.
 #
-# What no check can do is refund a call already sent. So the two checks below
-# are not two tries at the same saving; they cover disjoint cases and their
-# yields were measured separately, against a control build with both checks
-# removed. One request per connection, which is the only shape a browser
-# produces, 50 aborted mid-contents: 100 upstream calls became 50, the second
-# check skipping every blob fetch. The first check fired not once there, nor
-# in 900 aborted requests across every timing and concurrency tried,
-# including with the event loop blocked for 1.5s while the requests were both
-# sent and aborted. It is still not dead code, but what reaches it is
-# pipelining rather than load: a disconnect cannot be processed ahead of the
-# request bytes that preceded it on the same socket, so only a request
-# dispatched from behind another one can begin already disconnected. Four
-# pipelined, aborted at 50ms: uvicorn parsed only two of the four either way,
-# and across those two the checks took 4 upstream calls to 2 — one request
-# skipped whole by the first check, the other's blob fetch by the second.
-# Browsers ship with pipelining off, so the SPA's own traffic is the first
-# case and the second is why the check stays.
+# The yield, against a control build with the checks removed: 50 requests one
+# per connection, which is the only shape a browser produces, all aborted
+# while the contents call was in flight — 100 upstream calls became 50. Every
+# second call was skipped.
+#
+# What no check can do is refund a call already sent, which is why there is
+# deliberately no check before the *first* upstream call. One was written and
+# then removed on the measurement: it fired in none of 900 aborted requests
+# across every timing and concurrency tried, including with the event loop
+# blocked for 1.5s while requests were both sent and aborted, and it cannot
+# fire on the case that looked most promising. A disconnect is never processed
+# ahead of the request bytes that preceded it on the same socket, so only a
+# request dispatched from behind another one could begin already
+# disconnected — and uvicorn does not dispatch one: ``on_response_complete``
+# opens with ``if self.transport.is_closing(): return`` in both
+# implementations, so a queued pipelined cycle on a closing connection is
+# dropped rather than run.
+#
+# Pipelining does save calls here, and it is worth knowing that the saving is
+# not a check firing, because the obvious reading of the call counts is wrong.
+# Four pipelined and aborted at 50ms cost 4 upstream calls with no checks and
+# 2 with them — but a third arm that polls ``is_disconnected()`` and *throws
+# the verdict away* also costs 2, with both checks evaluating False. The poll
+# itself is what does it: it calls ``receive()``, which resumes reading, which
+# lets uvicorn notice the pending EOF and abandon the queued request. Either
+# check's poll alone produces it, so the removed one bought nothing the
+# remaining ones do not.
+#
+# Unverified from here: in production the browser talks to Cloud Run's front
+# end, which talks HTTP/1.1 to this container. Whether it closes that backend
+# connection when the client cancels decides whether any of this fires in the
+# deployment. The checks are inert, not harmful, if it does not.
 
-# nginx's "Client Closed Request". Nobody reads it: the socket is gone, so the
-# status only ever reaches the log and the tests. Deliberately carries none of
-# the image cache headers — a cached 499 would shadow the image when the same
-# file is asked for again.
 CLIENT_GONE_STATUS = 499
 
 
@@ -409,13 +420,6 @@ async def pr_image(
     img_headers = {"Cache-Control": _image_cache_control(ref)}
     mime = _mime_for_path(path)
 
-    # Skips both calls, for a request that was already abandoned when the
-    # handler got to it. Measured above: that needs the request to have been
-    # dispatched from behind another one on the same connection, so this is
-    # the pipelined case and nothing a browser does reaches it.
-    if await _client_gone(request, "the contents call", path):
-        return _client_gone_response()
-
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
@@ -444,19 +448,20 @@ async def pr_image(
                     headers=img_headers,
                 )
 
-            # Both remaining cases need a second upstream call — the blob
-            # API below, or the download_url fallback under it — and an abort
-            # issued while the contents call was in flight lands exactly here.
-            # That first call is spent either way; the second, which is the
-            # one that transfers the bytes, is not. Placed below case 1 on
-            # purpose: a small file's bytes are already in hand, so there is
-            # nothing left to save by stopping short of returning them.
-            if await _client_gone(request, "the second upstream call", path):
-                return _client_gone_response()
+            # Everything from here needs a further upstream call, and an
+            # abort issued while the contents call was in flight lands exactly
+            # here. That first call is spent either way; the ones that
+            # transfer the bytes are not. Both checks sit below case 1 on
+            # purpose — a small file's bytes came back with the contents call,
+            # so there is nothing left to save by not returning them — and
+            # each sits immediately before a single call, so the call it
+            # skips is the one its log line names.
 
             # Case 2: Large file — use Git Blob API
             file_sha = data.get("sha")
             if file_sha:
+                if await _client_gone(request, "the blob call", path):
+                    return _client_gone_response()
                 blob_resp = await client.get(
                     f"https://api.github.com/repos/{github_repo}/git/blobs/{file_sha}",
                     headers=headers,
@@ -474,6 +479,8 @@ async def pr_image(
             # Case 3: Fallback — try download_url
             download_url = data.get("download_url")
             if download_url:
+                if await _client_gone(request, "the download_url fetch", path):
+                    return _client_gone_response()
                 logger.info(
                     "pr_image: falling back to download_url for path=%s (size=%s)",
                     path, data.get("size"),
