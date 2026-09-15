@@ -100,13 +100,21 @@ assert.ok(!/\s/.test(odd), 'no raw path characters in ' + odd);
 //
 // Read the limit of that before adding to it. These match source text, so they
 // pin a *shape*: that a call and a guard exist, in a given order. They cannot
-// reach whether a statement executes. Measured on this head: a guard wrapped in
-// `if (false)` passes every assertion below, and so would writing the href from
-// something other than ghUrl while `escAttr(ghUrl)` still appears somewhere.
-// Closing that needs a browser driving the race, which is the harness tracked
-// in #21 — that issue already names this exact category. Two assertions here
-// are also brittle by choice: a rewrite to createElement/setAttribute is a
-// strictly safer write and fails the writeAt anchor, and the capture below
+// reach whether a statement executes, and they see one occurrence of each
+// thing they name. Measured on this head, all suite-green: a guard wrapped in
+// `if (false)`, a guard whose captured local is reassigned just above it, a
+// guard inside a nested function nobody calls, an href written from something
+// other than ghUrl while `escAttr(ghUrl)` still appears somewhere, a *second*
+// unguarded write through another identifier, and the placeholder appended
+// last from a variable declared early — which the ordering check below reads
+// as correct because it compares source positions, not execution. Every one of
+// those needs a browser driving the race to catch, which is the harness tracked
+// in #21; that issue already names the category ("a call that is present but
+// never executed"). So treat this block as a floor under the obvious
+// regressions, not as coverage.
+//
+// Two assertions are brittle by choice: a rewrite to createElement/setAttribute
+// is a strictly safer write and fails the writeAt anchor, and the capture below
 // takes the *first* `X = state.currentFile;` in the function, so an unrelated
 // earlier one fails with a message blaming the wrong line. Both fail loudly
 // rather than passing quietly, which is the way round it should be. Do not
@@ -153,7 +161,13 @@ assert.ok(
 const guardAt = render.search(new RegExp(
   'if\\s*\\(\\s*(?:' + pathVar + '\\s*!==\\s*state\\.currentFile' +
   '|state\\.currentFile\\s*!==\\s*' + pathVar + ')\\s*\\)\\s*return\\s*;'));
-const thenAt = at('.then(', 'handle the digest asynchronously');
+// Anchored to the digest call, not to the function's first `.then(`. Those are
+// the same occurrence today, but any earlier promise chain above this block — a
+// fetch, an img.decode() — would silently make a bare first-indexOf stop
+// constraining the guard's scope, and the hoisted-guard mutant would pass again.
+const callAt = at('ghDiffUrl(', 'call ghDiffUrl');
+const thenAt = render.indexOf('.then(', callAt);
+assert.ok(thenAt > callAt, 'renderComparison must handle the digest asynchronously');
 const writeAt = at('container.innerHTML', 'write the link into the container');
 assert.ok(guardAt >= 0,
   'renderComparison must drop a digest that arrived after the viewer moved on');
