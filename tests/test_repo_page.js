@@ -14,8 +14,8 @@ const MODULE_PATH = runfiles
   ? path.join(runfiles, '_main', 'static', 'repo.js')
   : path.join(__dirname, '..', 'static', 'repo.js');
 
-const { verdictFor, summarize, summaryText, repoFromPath, viewerHref, pullsApiHref, relativeTime } =
-  require(MODULE_PATH);
+const { verdictFor, summarize, summaryText, repoFromPath, viewerHref, pullsApiHref, relativeTime,
+        renderList } = require(MODULE_PATH);
 
 // ── The four verdicts ───────────────────────────────────────────────────────
 
@@ -127,5 +127,113 @@ assert.strictEqual(relativeTime('2026-09-15T12:00:30Z', now), 'just now',
 assert.strictEqual(relativeTime('not a date', now), '',
   'an unparseable timestamp says nothing rather than "NaN ago"');
 assert.strictEqual(relativeTime(undefined, now), '');
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+//
+// The rendering half is a third of this module and had no assertions at all in
+// the first round, which is exactly where round 1 found a user-visible
+// falsehood: the empty-state message said the opposite of what it was printed
+// for. So it is driven here, through a DOM shim small enough to be obviously
+// faithful — createElement, appendChild, textContent, className, href — rather
+// than left to a browser run nobody repeats.
+
+function shimDocument() {
+  function node(tag) {
+    return {
+      tag: tag,
+      className: '',
+      children: [],
+      _text: '',
+      listeners: 0,
+      get textContent() {
+        // What a reader sees: this element's own text plus its children's.
+        return this._text + this.children.map(c => c.textContent).join('');
+      },
+      set textContent(v) {
+        // Assigning textContent replaces everything, as in a browser — which
+        // is what renderList relies on to clear the container.
+        this._text = String(v);
+        this.children = [];
+      },
+      appendChild(child) { this.children.push(child); return child; },
+      addEventListener() { this.listeners++; },
+    };
+  }
+  global.document = { createElement: node };
+  return node('div');
+}
+
+const container = shimDocument();
+const NOW = Date.parse('2026-09-15T12:00:00Z');
+const row = (n, over) => Object.assign({
+  number: n, title: 'PR ' + n, author: 'someone', draft: false,
+  html_url: 'https://github.com/o/r/pull/' + n,
+  updated_at: '2026-09-15T11:00:00Z',
+  head_ref: 'feature-' + n, base_ref: 'main', labels: [],
+  images: null, images_truncated: false, image_error: null,
+}, over);
+
+const find = (nodes, cls) => nodes.filter(n => n.className.indexOf(cls) >= 0);
+const descend = node => [node].concat(...node.children.map(descend));
+
+// A useful row is a link into the viewer; every other state is not a link at
+// all, which is the distinction the whole page is for. Asserting the class
+// alone would pass with every row an <a>.
+renderList(container, 'o', 'r', [
+  row(1, { images: 3 }),
+  row(2, { images: 0 }),
+  row(3, { image_error: 'HTTP 500' }),
+  row(4, {}),
+], { hideEmpty: false, nowMs: NOW });
+
+const rendered = find(container.children, 'pr-row');
+assert.strictEqual(rendered.length, 4);
+assert.strictEqual(rendered[0].tag, 'a');
+assert.strictEqual(rendered[0].href, '/o/r/pr/1');
+for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
+  assert.strictEqual(rendered[i].tag, 'div', 'a ' + state + ' row must not be a link');
+  assert.strictEqual(rendered[i].href, undefined, 'a ' + state + ' row must have no href');
+  assert.ok(rendered[i].className.includes('pr-' + state));
+}
+
+// Every GitHub-supplied string reaches the page as text. A title that is
+// markup stays one text node — nothing here parses it.
+const nasty = '<img src=x onerror=alert(1)>';
+renderList(container, 'o', 'r', [row(9, { images: 1, title: nasty, labels: ['<b>lgtm</b>'] })],
+  { hideEmpty: false, nowMs: NOW });
+const titleNode = find(descend(container), 'pr-title')[0];
+assert.strictEqual(titleNode.textContent, nasty, 'the title is text, not markup');
+assert.strictEqual(titleNode.children.length, 0, 'setting a title must create no elements');
+assert.ok(find(descend(container), 'pr-label')[0].textContent === '<b>lgtm</b>');
+
+// The empty state, which is where round 1's Major was. It can arise in exactly
+// one way — the filter hid every row — so the message must say that and not
+// its opposite.
+renderList(container, 'o', 'r', [row(1, { images: 0 }), row(2, { images: 0 })],
+  { hideEmpty: true, nowMs: NOW });
+const none = find(container.children, 'pr-none');
+assert.strictEqual(none.length, 1, 'a list filtered down to nothing says something');
+assert.strictEqual(find(container.children, 'pr-row').length, 0);
+assert.strictEqual(none[0].textContent, 'Every open pull request here has no image changes.');
+// It must not contradict the summary line rendered directly above it.
+assert.strictEqual(summaryText(summarize([row(1, { images: 0 }), row(2, { images: 0 })]), true),
+  '0 of 2 have image changes');
+
+// An empty repo is a different sentence.
+renderList(container, 'o', 'r', [], { hideEmpty: false, nowMs: NOW });
+assert.strictEqual(find(container.children, 'pr-none')[0].textContent, 'No open pull requests.');
+
+// The filter hides "no images" rows and nothing else — a row nobody could
+// check is not a row with nothing in it, so it stays visible.
+renderList(container, 'o', 'r', [
+  row(1, { images: 2 }),
+  row(2, { images: 0 }),
+  row(3, { image_error: 'HTTP 500' }),
+  row(4, {}),
+], { hideEmpty: true, nowMs: NOW });
+const kept = find(container.children, 'pr-row');
+assert.deepStrictEqual(kept.map(n => n.href), ['/o/r/pr/1', undefined, undefined]);
+assert.ok(kept[1].className.includes('pr-unknown'));
+assert.ok(kept[2].className.includes('pr-checking'));
 
 console.log('test_repo_page: all checks passed');

@@ -6,13 +6,15 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi.staticfiles import StaticFiles
 from httpx import ASGITransport, AsyncClient
 
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS, _is_image_path, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES, _PR_PROBE_CONCURRENCY, _OPEN_PULLS_MAX_PAGES
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS, _is_image_path, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES, _PR_PROBE_CONCURRENCY, _OPEN_PULLS_MAX_PAGES, _pr_image_summary
 
 
 @pytest.fixture(autouse=True)
@@ -2528,3 +2530,186 @@ class TestPrImageClientDisconnect:
             await self._drive("during_contents", contents=self.NO_SHA)
         assert "client gone before the download_url fetch" in caplog.text
         assert "before the blob call" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_one_pull_requests_transport_failure_does_not_discard_the_list(self):
+        """Round 1, Major 2: a read timeout on one PR blanked the whole page.
+
+        ``_gh_paginate`` raises ``_GitHubError`` for a non-200 and a body that
+        is not a list, and nothing else — so an ``httpx.ReadTimeout`` escaped
+        the probe, aborted the ``gather``, reached the endpoint's own handler
+        and answered ``{"pulls": []}``, which the page renders by wiping rows
+        it had already drawn. Over a six-wide fan-out on a 30s timeout that is
+        the failure that actually happens, and it is the one the HTTP-500 case
+        above does not reach.
+        """
+        class _TimingOut(_RepoClient):
+            async def get(self, url, **kwargs):
+                if url.endswith("/pulls/1/files"):
+                    raise httpx.ReadTimeout("read timed out")
+                return await super().get(url, **kwargs)
+
+        client = _TimingOut([[_pull(1), _pull(2)]], files_by_number={2: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert "error" not in data
+        rows = {row["number"]: row for row in data["pulls"]}
+        assert len(rows) == 2, "the other PRs are still listed"
+        assert rows[1]["images"] is None
+        assert "ReadTimeout" in rows[1]["image_error"]
+        assert rows[2]["images"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_fan_out_survives_a_probe_that_raises(self):
+        """The backstop in ``fill``, driven — otherwise no run enters it.
+
+        ``_pr_image_summary`` promises not to raise, and with that promise kept
+        the ``try`` around the call is a block no test reaches, which is a
+        guard that passes under any implementation. So the promise is broken on
+        purpose here. What it protects is out of proportion to one row: a
+        ``gather`` re-raises, the endpoint answers with no pulls, and a page
+        that had already rendered is wiped.
+        """
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("probe blew up")
+
+        client = _RepoClient([[_pull(1), _pull(2)]])
+        token, http = _patched(client)
+        with token, http, patch("app._pr_image_summary", _boom):
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert "error" not in data
+        assert len(data["pulls"]) == 2
+        for row in data["pulls"]:
+            assert row["images"] is None
+            assert "probe blew up" in row["image_error"]
+
+    @pytest.mark.asyncio
+    async def test_a_pull_request_with_no_head_sha_is_not_cached(self):
+        """An empty SHA would key a count no push could ever invalidate.
+
+        Nothing should produce one; the point is that a PR that does gets a
+        fresh count rather than a stale one pinned under a meaningless key.
+        """
+        client = _RepoClient([[_pull(1, head_sha="")]], files_by_number={1: [{"filename": "a.png"}]})
+        client.pull_pages[0][0]["head"]["sha"] = ""
+        token, http = _patched(client)
+        with token, http:
+            first = await _get("/api/owner/repo/pulls")
+            calls_after_first = len(client.file_requests())
+            second = await _get("/api/owner/repo/pulls")
+
+        assert first.json()["pulls"][0]["images"] == 1
+        assert second.json()["pulls"][0]["images"] == 1
+        assert len(client.file_requests()) == calls_after_first * 2, "probed again, not served from a cache"
+        assert not any(k.endswith(":") for k in _cache), "no key with an empty SHA was written"
+
+
+class TestPrImageSummaryNeverRaises:
+    """The probe's contract, driven directly.
+
+    Round 1 mutation M14: narrowing this ``except`` back to ``_GitHubError``
+    alone left the endpoint tests green, because ``fill``'s backstop caught
+    what escaped. Both guards are wanted — one states the contract, the other
+    survives the contract being broken — so each needs a test that fails
+    without it. This is the contract's.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [
+        httpx.ReadTimeout("read timed out"),
+        httpx.ConnectError("connection refused"),
+        httpx.RemoteProtocolError("server disconnected"),
+    ])
+    async def test_a_transport_error_is_returned_not_raised(self, error):
+        class _Failing:
+            async def get(self, url, **kwargs):
+                raise error
+
+        summary = await _pr_image_summary(_Failing(), "owner/repo", 1, "abc", {})
+        assert "images" not in summary, "a failure never carries a count"
+        assert type(error).__name__ in summary["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_returned_error_is_not_cached(self):
+        class _Failing:
+            async def get(self, url, **kwargs):
+                raise httpx.ReadTimeout("read timed out")
+
+        await _pr_image_summary(_Failing(), "owner/repo", 1, "abc", {})
+        assert _cache == {}
+
+
+class TestCatchAllRouteScope:
+    """Round 1, Minor 6: two catch-alls that could swallow the app's own paths.
+
+    ``/{owner}/{repo}`` matches any two segments and ``/{identifier}`` any one,
+    so a mistyped API path answered 200 with the repo page — a wrong body,
+    which is a worse failure than a missing one, and it hides the typo.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/api/pulls", "/api/anything", "/static/nope"])
+    async def test_reserved_prefixes_are_not_the_repo_page(self, path):
+        resp = await _get(path)
+        assert resp.status_code == 404, f"{path} must not be answered by a page route"
+        assert "text/html" not in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_prefix_alone_costs_no_github_request(self):
+        """The single-segment route resolves through a GitHub search."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=200))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/api")
+
+        assert resp.status_code == 404
+        assert instance.get.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_real_repo_page_still_answers(self):
+        """The guard rejects the app's own prefixes and nothing else."""
+        resp = await _get("/widdowson/visual-review")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    def test_the_catch_alls_are_registered_last(self):
+        """Ordering, so a route added later is reached rather than swallowed.
+
+        The reserved-prefix guard covers the paths this app owns today; this
+        covers the one it does not own yet. Starlette matches in registration
+        order, so a two-segment route declared above these is tried first and
+        one declared below never runs at all.
+        """
+        paths = [r.path for r in app.routes if getattr(r, "path", None)]
+        assert paths.index("/{owner}/{repo}") > max(
+            i for i, p in enumerate(paths) if p.startswith("/api/")
+        ), "the repo page must be registered after every API route"
+        assert paths.index("/{identifier}") > paths.index("/{owner}/{repo}")
+
+
+class TestStaticMount:
+    def test_static_files_follow_symlinks(self):
+        """Pinned by configuration, because no request here can reach it.
+
+        A Bazel runfiles tree is symlinks into the source tree, and Starlette's
+        default reads a symlink out of the mounted directory as an escape
+        attempt and 404s it — so under ``bazel run //:server`` the repo page's
+        script and the viewer's favicon both 404. This test cannot observe
+        that: ``Path(__file__).resolve()`` at the top of this file resolves the
+        runfiles symlink, so ``app`` is imported from the source tree where
+        ``static/`` holds real files and the mount behaves the same either way.
+        Round 1 measured exactly that — deleting the flag left this suite green
+        — so the assertion is on the setting rather than on a response.
+        """
+        mounts = [r for r in app.routes if isinstance(getattr(r, "app", None), StaticFiles)]
+        assert len(mounts) == 1
+        assert mounts[0].app.follow_symlink is True

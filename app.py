@@ -333,12 +333,6 @@ async def visual_review_page(owner: str, repo: str, number: int):
     return FileResponse(os.path.join(static_dir, "index.html"))
 
 
-@app.get("/{owner}/{repo}")
-async def repo_page(owner: str, repo: str):
-    """Serve the repo page listing a repository's open pull requests."""
-    return FileResponse(os.path.join(static_dir, "repo.html"))
-
-
 @app.get("/{identifier}/pr/{number}")
 async def short_url_redirect(identifier: str, number: int):
     """Resolve a short URL and 302-redirect to the canonical path.
@@ -361,55 +355,6 @@ async def short_url_redirect(identifier: str, number: int):
                 "identifier": identifier,
                 "matches": [
                     {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}/pr/{number}"}
-                    for owner, repo in matches
-                ],
-            },
-        )
-
-    return JSONResponse(
-        status_code=404,
-        content={"error": f"Repository not found: {identifier}"},
-    )
-
-
-# Single-segment paths a browser asks for on its own. Resolving one costs a
-# GitHub search request, so they are answered here instead: a page view that
-# declares no icon otherwise spends a search — and an hour of cache — on the
-# word "favicon.ico".
-_RESERVED_IDENTIFIERS = frozenset({
-    "favicon.ico",
-    "robots.txt",
-    "sitemap.xml",
-    "apple-touch-icon.png",
-    "apple-touch-icon-precomposed.png",
-})
-
-
-@app.get("/{identifier}")
-async def short_repo_redirect(identifier: str):
-    """Resolve a short repo identifier and 302-redirect to its repo page.
-
-    The repo-page counterpart of :func:`short_url_redirect`, so that a short
-    link keeps working with the PR number taken off the end: ``/im495z/pr/50``
-    names a PR and ``/im495z`` names the repository it belongs to.
-    """
-    if identifier in _RESERVED_IDENTIFIERS:
-        return JSONResponse(status_code=404, content={"error": "Not found"})
-
-    matches = await _resolve_repo(identifier)
-
-    if len(matches) == 1:
-        owner, repo = matches[0]
-        return RedirectResponse(url=f"/{owner}/{repo}", status_code=302)
-
-    if len(matches) > 1:
-        return JSONResponse(
-            status_code=300,
-            content={
-                "error": "Ambiguous repository name",
-                "identifier": identifier,
-                "matches": [
-                    {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}"}
                     for owner, repo in matches
                 ],
             },
@@ -945,12 +890,17 @@ _PR_PROBE_CONCURRENCY = 6
 _OPEN_PULLS_TTL = 60
 
 # An image count, by contrast, is keyed on the head SHA, so a push changes the
-# key rather than ageing the value. The TTL is a floor on how long a count for
-# a *withdrawn* SHA occupies memory, not a staleness window for a live one.
-# The one thing that can move under a fixed head is the merge base: GitHub
-# diffs a PR against it, so a file can leave the diff when the base branch
-# gains it. That is a count off by one on a listing page, and it is corrected
+# key rather than ageing the value, and the TTL is not really a staleness
+# window: the one thing that can move under a fixed head is the merge base,
+# since GitHub diffs a PR against it and a file leaves the diff when the base
+# branch gains it. That is a count off by one on a listing page, corrected
 # within the quarter hour.
+#
+# It is not a memory bound either, which is worth saying because the key space
+# is unbounded — one entry per (repo, PR, head SHA), so every push to a watched
+# PR leaves its predecessor behind. Nothing in this module ever deletes a cache
+# key; the TTL governs how long a value is *served*, not how long it is held.
+# Eviction is #44, and is the whole cache's problem rather than this key's.
 _PR_IMAGE_SUMMARY_TTL = 900
 
 # 1000 open pull requests. Unlike the file list, this is not GitHub's own
@@ -998,7 +948,19 @@ async def _pr_image_summary(
     carries no count: "we could not tell" has to stay distinct from "none" all
     the way to the page, because the two read identically to whoever is
     deciding which PRs to open.
+
+    **Every** failure returns rather than raises, which is why the ``except``
+    is as wide as it is. This runs once per open PR inside an
+    ``asyncio.gather``, so an exception escaping here does not cost one row —
+    it aborts the gather, reaches the endpoint's own handler, and answers with
+    an empty list, wiping a page that had already rendered. A read timeout is
+    the likely one: ``_GitHubError`` covers a non-200 and a body that is not a
+    list, and nothing else. The caller has a place to put a failure, and one
+    PR's bad luck is not the page's.
     """
+    # The write below is what an empty head SHA is guarded against: it would
+    # make a key no push can ever invalidate. The read needs no guard of its
+    # own, since a key nothing writes is a key nothing finds.
     cache_key = f"pr_image_summary:{github_repo}:{number}:{head_sha}"
     cached = _cache_get(cache_key, _PR_IMAGE_SUMMARY_TTL)
     if cached is not None:
@@ -1012,13 +974,17 @@ async def _pr_image_summary(
         )
     except _GitHubError as e:
         return {"error": f"Files request failed: {e}"}
+    except Exception as e:
+        return {"error": f"Files request failed: {type(e).__name__}: {e}"}
 
     summary = {
         "images": sum(1 for f in files if _is_image_path(f.get("filename", ""))),
         "truncated": truncated,
     }
-    _cache_set(cache_key, summary)
+    if head_sha:
+        _cache_set(cache_key, summary)
     return summary
+
 
 
 @app.get("/api/{owner}/{repo}/pulls")
@@ -1031,9 +997,13 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
     - one request for the list itself, plus one more per additional 100 open
       PRs;
     - one request per PR to count its images, only on a cache miss, and only
-      when ``probe`` is set.
+      when ``probe`` is set — and that is one request per *page* of that PR's
+      changed files, so a PR over 100 files costs one per 100 up to
+      ``_GH_MAX_PAGES``.
 
-    So N open PRs cost 1 + N requests cold and 1 warm. The page asks twice —
+    So N open PRs cost 1 + N requests cold where every PR is under 100 files,
+    which is the common case and not the bound: the worst case is 1 + 30N. A
+    warm page costs 1. The page asks twice —
     ``probe=0`` first, which is the single cheap request that puts the rows on
     screen, then the full one that fills in the counts — so the list is never
     waiting on the fan-out. Both answers share the list cache, so the second
@@ -1083,10 +1053,21 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
                 limit = asyncio.Semaphore(_PR_PROBE_CONCURRENCY)
 
                 async def fill(row: dict) -> None:
-                    async with limit:
-                        summary = await _pr_image_summary(
-                            client, github_repo, row["number"], row["head_sha"], headers,
-                        )
+                    # A second guard over _pr_image_summary's own promise never
+                    # to raise, because the cost of that promise being broken
+                    # is out of all proportion to one row: a gather re-raises
+                    # the first exception it sees, which reaches the handler
+                    # below and answers with no pulls at all, so one PR's read
+                    # timeout would blank a page that had already rendered the
+                    # other twenty-nine. Here it is one row reading "check
+                    # failed", which is what it is.
+                    try:
+                        async with limit:
+                            summary = await _pr_image_summary(
+                                client, github_repo, row["number"], row["head_sha"], headers,
+                            )
+                    except Exception as e:
+                        summary = {"error": f"Probe failed: {type(e).__name__}: {e}"}
                     if "error" in summary:
                         row["image_error"] = summary["error"]
                     else:
@@ -1109,6 +1090,84 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
             "probed": probe,
         },
         headers={"Cache-Control": "no-store"},
+    )
+
+
+# -- Page routes for a repository ----------------------------------------------
+#
+# These two are catch-alls: "/{owner}/{repo}" matches any two segments and
+# "/{identifier}" any one. They are registered here, last, so that every route
+# above wins on its own — a two-segment route added to this file later is
+# reached rather than silently swallowed, which for a page route means a 200
+# with the wrong body, the worst shape that mistake can take.
+#
+# Registration order is not enough by itself, because the prefixes this app
+# already owns can still be reached by a path that is not a route: "/api/pulls"
+# is a typo for a real endpoint, and answering it with the repo page hides that.
+# So the first segment is checked against what the app serves itself.
+_RESERVED_PATH_PREFIXES = frozenset({
+    "api",
+    "static",
+    "health",
+    "docs",
+    "redoc",
+    "openapi.json",
+})
+
+# Single-segment paths a browser asks for on its own. Resolving one costs a
+# GitHub search request, so they are answered here instead: a page view that
+# declares no icon otherwise spends a search — and an hour of cache — on the
+# word "favicon.ico".
+_RESERVED_IDENTIFIERS = frozenset({
+    "favicon.ico",
+    "robots.txt",
+    "sitemap.xml",
+    "apple-touch-icon.png",
+    "apple-touch-icon-precomposed.png",
+})
+
+
+@app.get("/{owner}/{repo}")
+async def repo_page(owner: str, repo: str):
+    """Serve the repo page listing a repository's open pull requests."""
+    if owner in _RESERVED_PATH_PREFIXES:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return FileResponse(os.path.join(static_dir, "repo.html"))
+
+
+@app.get("/{identifier}")
+async def short_repo_redirect(identifier: str):
+    """Resolve a short repo identifier and 302-redirect to its repo page.
+
+    The repo-page counterpart of :func:`short_url_redirect`, so that a short
+    link keeps working with the PR number taken off the end: ``/im495z/pr/50``
+    names a PR and ``/im495z`` names the repository it belongs to.
+    """
+    if identifier in _RESERVED_IDENTIFIERS or identifier in _RESERVED_PATH_PREFIXES:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    matches = await _resolve_repo(identifier)
+
+    if len(matches) == 1:
+        owner, repo = matches[0]
+        return RedirectResponse(url=f"/{owner}/{repo}", status_code=302)
+
+    if len(matches) > 1:
+        return JSONResponse(
+            status_code=300,
+            content={
+                "error": "Ambiguous repository name",
+                "identifier": identifier,
+                "matches": [
+                    {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}"}
+                    for owner, repo in matches
+                ],
+            },
+        )
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"Repository not found: {identifier}"},
     )
 
 

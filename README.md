@@ -97,7 +97,9 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 
 ```
 /{owner}/{repo}/pr/{number}          → Visual review SPA
-/api/{owner}/{repo}/pr/{number}/...  → API endpoints
+/{owner}/{repo}                      → Repo page: open PRs, and which change images
+/{identifier}                        → Short form of the repo page (302)
+/api/{owner}/{repo}/...              → API endpoints
 ```
 
 ### API Endpoints
@@ -109,6 +111,8 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 | GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file |
 | POST | `/api/{owner}/{repo}/pr/{number}/comments` | Post a review comment on a file |
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
+| GET | `/api/{owner}/{repo}/pr/{number}/checks` | Combined CI status for the PR's head commit |
+| GET | `/api/{owner}/{repo}/pulls?probe=1` | List open PRs with each one's image count. `probe=0` returns the list alone, with no per-PR count, in a single request |
 | GET | `/health` | Liveness check |
 
 ## Configuration

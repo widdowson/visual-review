@@ -188,9 +188,13 @@
             container.appendChild(renderRow(owner, repo, row, nowMs));
             shown++;
         }
+        // Nothing shown, with rows to show, means the filter hid all of them —
+        // it is the only thing that hides a row — so every open PR here has no
+        // images. Saying anything else would put a claim on screen that
+        // contradicts the summary line directly above it.
         if (shown === 0) {
             container.appendChild(el('div', 'pr-none', rows.length
-                ? 'Every open pull request here changes images — nothing to hide.'
+                ? 'Every open pull request here has no image changes.'
                 : 'No open pull requests.'));
         }
     }

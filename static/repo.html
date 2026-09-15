@@ -167,6 +167,11 @@
         var hideEmptyEl = document.getElementById('hide-empty');
         var repoLinkEl = document.getElementById('repo-link');
 
+        // Declared before the first thing that can call showMessage, which
+        // reads it: the bad-URL branch below is such a call.
+        var rows = [];
+        var probed = false;
+
         var where = VRRepo.repoFromPath(location.pathname);
         if (!where) {
             showMessage('That is not a repository URL. Try /{owner}/{repo}.', true);
@@ -182,9 +187,6 @@
             hideEmptyEl.checked = localStorage.getItem('vr-hide-empty') === '1';
         } catch (e) { /* private mode */ }
 
-        var rows = [];
-        var probed = false;
-
         hideEmptyEl.addEventListener('change', function () {
             try {
                 localStorage.setItem('vr-hide-empty', hideEmptyEl.checked ? '1' : '0');
@@ -192,7 +194,15 @@
             draw();
         });
 
+        // An error replaces the list only while there is no list. Once the
+        // first, cheap pass has rendered rows, those rows are correct and
+        // useful on their own — the counts are what failed — so a later
+        // failure says so above them rather than throwing them away.
         function showMessage(text, isError) {
+            if (rows.length) {
+                summaryEl.textContent = text;
+                return;
+            }
             listEl.textContent = '';
             var box = document.createElement('div');
             box.className = 'message' + (isError ? ' error' : '');
