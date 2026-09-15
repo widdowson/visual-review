@@ -113,6 +113,7 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
 | GET | `/api/{owner}/{repo}/pr/{number}/checks` | Combined CI status for the PR's head commit |
 | GET | `/api/{owner}/{repo}/pulls?probe=1` | List open PRs with each one's image count. `probe=0` returns the list alone, with no per-PR count, in a single request |
+| GET | `/api/extensions` | Image extensions this server understands, for clients that would otherwise hardcode them |
 | GET | `/health` | Liveness check |
 
 ## Configuration
