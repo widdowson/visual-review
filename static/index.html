@@ -682,8 +682,7 @@
 
                 var fname = document.createElement('span');
                 fname.className = 'filename';
-                var parts = img.path.split('/');
-                fname.textContent = parts[parts.length - 1];
+                fname.textContent = basenameOf(img.path);
                 fname.title = img.path;
                 li.appendChild(fname);
 
@@ -695,25 +694,77 @@
             });
         }
 
+        // -- Deep-link: the hash a file is named by ------------------------
+        //
+        // A hash is written from a path and read back into a selection, so the
+        // two halves have to agree about what names a file. Writing the
+        // basename alone does not, whenever a PR carries that basename in two
+        // directories: the write fires hashchange, the read scans from the top,
+        // and the first of them wins however far down the one you clicked was.
+        // That is the normal case for these baselines, whose per-app
+        // directories repeat names like cuj_01_login.bmp.
+
+        // ── hash-target:begin ──────────────────────────────────────────
+        // Naming a file in the hash, and reading that name back. Pure, so it
+        // can be tested without a DOM; extracted verbatim by
+        // tests/test_hash_target.js, which is what the markers are for.
+
+        function basenameOf(path) {
+            var parts = path.split('/');
+            return parts[parts.length - 1];
+        }
+
+        // The name to write for `path`: its basename while no other file in
+        // `images` shares it, and the whole path otherwise. So the short form
+        // stays the common case and the long one appears only where the short
+        // one would be a lie.
+        function hashTargetFor(path, images) {
+            var name = basenameOf(path);
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].path !== path && basenameOf(images[i].path) === name) {
+                    return path;
+                }
+            }
+            return name;
+        }
+
+        // The index `target` names, or -1. A whole path is matched before any
+        // basename, which is what keeps an unambiguous link off the ambiguous
+        // fallback: the basename pass alone would answer index 0 for a target
+        // that names a file further down exactly.
+        function resolveHashTarget(target, images) {
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].path === target) return i;
+            }
+            for (var i = 0; i < images.length; i++) {
+                if (basenameOf(images[i].path) === target) return i;
+            }
+            return -1;
+        }
+
+        // Per segment, because a fragment may hold a literal `/` and these
+        // URLs are read and pasted by people. decodeURIComponent on the way
+        // back leaves those slashes alone, so the round trip still holds.
+        function encodeHashTarget(target) {
+            return target.split('/').map(function(seg) {
+                return encodeURIComponent(seg);
+            }).join('/');
+        }
+        // ── hash-target:end ────────────────────────────────────────────
+
         // -- Deep-link: select file from URL hash --
         function selectFileFromHash() {
             var hash = location.hash.replace(/^#/, '');
             if (!hash || !state.images.length) return false;
-            var target = decodeURIComponent(hash);
-            for (var i = 0; i < state.images.length; i++) {
-                var parts = state.images[i].path.split('/');
-                var fname = parts[parts.length - 1];
-                if (fname === target || state.images[i].path === target) {
-                    // selectFile writes the hash, so its own hashchange lands
-                    // back here. Reloading the current file would double every
-                    // request and discard the images already decoded.
-                    if (state.images[i].path !== state.currentFile) {
-                        selectFile(state.images[i].path, true);
-                    }
-                    return true;
-                }
+            var idx = resolveHashTarget(decodeURIComponent(hash), state.images);
+            if (idx < 0) return false;
+            // selectFile writes the hash, so its own hashchange lands back
+            // here. Reloading the current file would double every request and
+            // discard the images already decoded.
+            if (state.images[idx].path !== state.currentFile) {
+                selectFile(state.images[idx].path, true);
             }
-            return false;
+            return true;
         }
 
         window.addEventListener('hashchange', function() {
@@ -751,8 +802,7 @@
 
             // Update URL hash
             if (!skipHash) {
-                var parts = path.split('/');
-                location.hash = encodeURIComponent(parts[parts.length - 1]);
+                location.hash = encodeHashTarget(hashTargetFor(path, state.images));
             }
 
             // Show toolbar
@@ -875,6 +925,38 @@
             };
         }
         // ── image-urls:end ───────────────────────────────────────────────────
+
+        // ── gh-diff-link:begin ───────────────────────────────────────────────
+        // Where a file sits in the GitHub PR diff (issue #15). Deterministic
+        // and DOM-free, so the tests can drive it — though not pure in the
+        // sense tests/spa_source.js checks for: it needs Web Crypto, which
+        // that helper's IMPURE list does not cover and should not, since the
+        // digest is the same in node as in a browser.
+        // GitHub anchors a file in the Files tab as `#diff-<sha256 of the
+        // file's path, lower-case hex>` — the path alone, with no trailing
+        // newline and nothing about the repository or the PR mixed in. That
+        // format is GitHub's and it is undocumented: the pair
+        // tests/test_gh_diff_link.js pins comes from a community answer, an
+        // older answer describes the anchor as an md5, and nothing here
+        // observes github.com. So take it as the best-sourced reading rather
+        // than as fact, read that test's comment for where it came from, and
+        // see #34 for what is still unverified — including which side of a
+        // rename GitHub hashes, where this uses the new path.
+        //
+        // Takes owner, repo and the number as arguments rather than closing
+        // over them so it can be tested without a DOM, like buildImageUrls
+        // above — keep the markers.
+        async function ghDiffUrl(owner, repo, prNumber, path) {
+            var bytes = new TextEncoder().encode(path);
+            var digest = await crypto.subtle.digest('SHA-256', bytes);
+            var hash = Array.from(new Uint8Array(digest)).map(function(b) {
+                return b.toString(16).padStart(2, '0');
+            }).join('');
+            return 'https://github.com/' + encodeURIComponent(owner) + '/' +
+                encodeURIComponent(repo) + '/pull/' + encodeURIComponent(prNumber) +
+                '/files#diff-' + hash;
+        }
+        // ── gh-diff-link:end ─────────────────────────────────────────────────
 
         // ── comments-pane:begin ──────────────────────────────────────────────
         // The two pieces of arithmetic behind the comments pane, kept pure so
@@ -1205,13 +1287,25 @@
             }
             imageInfo.innerHTML = infoHtml;
 
-            // Add GitHub diff link asynchronously
-            sha256Hex(state.currentFile).then(function(hash) {
+            // Fill that placeholder once the digest is in. The path is
+            // captured here and re-checked on arrival: a navigation during
+            // the digest rebuilds this bar with a new container of the same
+            // id, so an unguarded write puts the file we have left under the
+            // name of the one now on screen.
+            var linkPath = state.currentFile;
+            ghDiffUrl(owner, repo, prNumber, linkPath).then(function(ghUrl) {
+                if (linkPath !== state.currentFile) return;
                 var container = document.getElementById('gh-diff-link-container');
-                if (container) {
-                    var ghUrl = 'https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/pull/' + prNumber + '/files#diff-' + hash;
-                    container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) + '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
-                }
+                if (!container) return;
+                container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) +
+                    '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
+            }).catch(function(err) {
+                // Anything from here: the digest itself (there is no
+                // SubtleCrypto outside a secure context, where an unhandled
+                // rejection was reported once per file) or the write above it.
+                // Either way the rest of the bar stands and only the link is
+                // lost, which is the right trade for a convenience link.
+                console.warn('visual-review: no GitHub diff link for this file', err);
             });
 
             // Issue #14: renamed files — show single image with rename label, no diff modes
@@ -2142,13 +2236,6 @@
 
         function escAttr(s) {
             return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
-
-        // SHA-256 hash for GitHub diff anchors (async, uses SubtleCrypto)
-        async function sha256Hex(str) {
-            var data = new TextEncoder().encode(str);
-            var buf = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
         }
 
         function getFileData(path) {
