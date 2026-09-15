@@ -65,6 +65,131 @@ class TestVisualReviewPage:
         assert "text/html" in resp.headers.get("content-type", "")
 
 
+# -- Supported extensions endpoint --------------------------------------------
+
+class TestExtensionsEndpoint:
+    @pytest.mark.asyncio
+    async def test_returns_the_servers_own_list(self):
+        """The endpoint answers the same list the server matches with.
+
+        Asserted against ``_EXT_MIME`` rather than a literal, so adding a
+        format to image_extensions.json does not need this test edited. Note
+        what it does *not* establish: ``_EXT_MIME`` is the constant the
+        endpoint itself reads, so this pins the value the two share and not
+        where the answer came from. An endpoint carrying a frozen copy of
+        today's list passes here. ``test_serves_whatever_the_file_says``
+        below is what rules that out.
+        """
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"extensions": list(_EXT_MIME.keys())}
+
+    @pytest.mark.asyncio
+    async def test_serves_whatever_the_file_says(self):
+        """The answer is derived, not a second copy of the list.
+
+        This is the one defect #13 exists to remove, so it needs a case that
+        can see it: reintroducing the duplication on the server — a literal
+        list in the handler instead of ``IMAGE_EXTENSIONS`` — leaves every
+        other case in this class green, and the next format added to
+        image_extensions.json silently stops being served.
+
+        ``IMAGE_EXTENSIONS`` is ``_EXT_MIME.keys()``, a live view, so adding a
+        key to the dict reaches the response with no production change.
+        """
+        with patch.dict("app._EXT_MIME", {".webp": "image/webp"}):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/extensions")
+
+        assert ".webp" in resp.json()["extensions"]
+
+    @pytest.mark.asyncio
+    async def test_every_entry_is_a_lowercase_dotted_extension(self):
+        """The shape the browser extension validates against before adopting it."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        extensions = resp.json()["extensions"]
+        assert extensions, "an empty list is rejected by the client, so never serve one"
+        for ext in extensions:
+            assert isinstance(ext, str)
+            assert ext.startswith("."), ext
+            assert len(ext) >= 2, ext
+            assert ext == ext.lower(), ext
+
+    @pytest.mark.asyncio
+    async def test_needs_no_github_token(self):
+        """Every other API endpoint degrades without a token; this one must not."""
+        with patch("app.GITHUB_TOKEN", ""):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/extensions")
+
+        assert resp.status_code == 200
+        assert resp.json()["extensions"] == list(_EXT_MIME.keys())
+
+    @pytest.mark.asyncio
+    async def test_is_publicly_cacheable(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        cache_control = resp.headers.get("cache-control", "")
+        assert "public" in cache_control, cache_control
+        # The value, not just its presence. The docstring on the endpoint
+        # gives this hour a job — it is the only thing bounding the request
+        # rate of a client whose localStorage never holds — so it can no more
+        # move unnoticed than the client's own 5s budget can.
+        assert "max-age=3600" in cache_control, cache_control
+
+    @pytest.mark.asyncio
+    async def test_answers_cross_origin(self):
+        """Load-bearing, not incidental.
+
+        The browser extension reads this from a content script running on
+        github.com. A Manifest V3 content script's fetch carries the page's
+        origin and is subject to CORS, and ``host_permissions`` cannot exempt
+        it — that moved to the service worker in V3 — so losing this header
+        makes the endpoint unreachable from the only client it has.
+        """
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get(
+                "/api/extensions", headers={"Origin": "https://github.com"}
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "*"
+
+    @pytest.mark.asyncio
+    async def test_no_earlier_route_claims_a_two_segment_path(self):
+        """A tripwire for a future route, not a pin on a live hazard.
+
+        No dynamic route in app.py is two segments today — the short-URL
+        resolver is ``/{identifier}/pr/{number}``, three — so this endpoint is
+        unshadowable at any registration position, and moving it to the end of
+        the file leaves this green. What it guards is the day someone adds a
+        two-segment pattern above it: FastAPI matches in registration order, so
+        such a route would claim ``/api/extensions`` and the extension would
+        get that route's answer instead of the list.
+        """
+        route_paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/api/extensions" in route_paths
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.get("/api/extensions")
+
+        # A short-URL match would 404 or redirect rather than answer the list.
+        assert resp.status_code == 200
+        assert "extensions" in resp.json()
+
+
 # -- PR images endpoint -------------------------------------------------------
 
 class TestPrImages:
