@@ -1559,3 +1559,15 @@ class TestPrImageClientDisconnect:
                               blob={"encoding": "utf-8"})
         assert "client gone before the download_url fetch" in caplog.text
         assert "before the blob call" not in caplog.text
+
+        # The third shape, and the one that makes this an invariant rather
+        # than two spot checks: no sha, so the call skipped is the
+        # download_url fetch even though the abort landed during the contents
+        # call. A check placed at the case-2/3 entry point instead of
+        # immediately before each call saves the same calls and mislabels
+        # this one, which is a mutant the rest of the suite passes.
+        caplog.clear()
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_contents", contents=self.NO_SHA)
+        assert "client gone before the download_url fetch" in caplog.text
+        assert "before the blob call" not in caplog.text

@@ -361,13 +361,15 @@ async def pr_images(owner: str, repo: str, number: int):
 # then removed on the measurement: it fired in none of 900 aborted requests
 # across every timing and concurrency tried, including with the event loop
 # blocked for 1.5s while requests were both sent and aborted, and it cannot
-# fire on the case that looked most promising. A disconnect is never processed
-# ahead of the request bytes that preceded it on the same socket, so only a
-# request dispatched from behind another one could begin already
-# disconnected — and uvicorn does not dispatch one: ``on_response_complete``
-# opens with ``if self.transport.is_closing(): return`` in both
-# implementations, so a queued pipelined cycle on a closing connection is
-# dropped rather than run.
+# fire on the case that looked most promising. Only a request dispatched from
+# behind another one on the same connection could begin already disconnected,
+# and uvicorn never dispatches one: ``on_response_complete`` opens with ``if
+# self.transport.is_closing(): return`` in both implementations, so a queued
+# pipelined cycle on a closing connection is dropped rather than run. That is
+# read off the source rather than inferred from the wire, deliberately — an
+# RST discards the unread receive buffer instead of queueing behind it, so
+# how many of those requests were ever parsed varies with the abort shape,
+# and the conclusion should not rest on that.
 #
 # Pipelining does save calls here, and it is worth knowing that the saving is
 # not a check firing, because the obvious reading of the call counts is wrong.
@@ -375,9 +377,18 @@ async def pr_images(owner: str, repo: str, number: int):
 # 2 with them — but a third arm that polls ``is_disconnected()`` and *throws
 # the verdict away* also costs 2, with both checks evaluating False. The poll
 # itself is what does it: it calls ``receive()``, which resumes reading, which
-# lets uvicorn notice the pending EOF and abandon the queued request. Either
-# check's poll alone produces it, so the removed one bought nothing the
-# remaining ones do not.
+# lets uvicorn notice the pending EOF and abandon the queued request.
+#
+# Either surviving check's poll alone reproduces that, so the removed one
+# bought nothing on a request that reaches a check. It is not nothing on one
+# that does not: an inline-content request returns from case 1 having polled
+# zero times, measured, where the removed check polled on every request — so
+# four pipelined small files cost 2 upstream calls now against 1 before.
+# Small files are the common case in an image diff, so that is a real loss
+# and not a rounding error. It does not change the removal: this saving is a
+# side effect of polling rather than anything the check was for, a browser
+# does not pipeline, and a poll kept solely for its side effect on a shape we
+# never serve is a worse thing to own than the loss.
 #
 # Unverified from here: in production the browser talks to Cloud Run's front
 # end, which talks HTTP/1.1 to this container. Whether it closes that backend
