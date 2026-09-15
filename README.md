@@ -34,11 +34,26 @@ open http://localhost:8080/widdowson/apwphotos-appv2/pr/50
 pip install -r requirements.txt
 export GITHUB_TOKEN=ghp_your_token_here
 uvicorn app:app --reload --port 8080
-
-# Run tests
-pip install pytest pytest-asyncio
-pytest tests/ -v
 ```
+
+### Running the tests
+
+Everything runs under Bazel, including the Chrome extension's JS tests and the
+tests that exercise logic inlined in `static/index.html`:
+
+```bash
+bazel test //...
+```
+
+The JS tests also run standalone, which is quicker while iterating on the SPA:
+
+```bash
+node tests/test_prefetch_policy.js
+node tests/test_image_urls.js
+```
+
+`pytest tests/ -v` still works for the Python tests alone, but it misses every
+`js_test`, so it is not enough before pushing.
 
 ### Google Cloud Run
 

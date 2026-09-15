@@ -25,10 +25,10 @@ ENV/
 Thumbs.db
 
 # Bazel
-bazel-bin
-bazel-out
-bazel-testlogs
-bazel-visual-review
+# The convenience symlinks are named after the enclosing directory, so a git
+# worktree produces bazel-<worktree-name> rather than bazel-visual-review.
+# Root-anchored, since this is only ever where Bazel puts them.
+/bazel-*
 MODULE.bazel.lock
 
 # Environment

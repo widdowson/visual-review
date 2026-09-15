@@ -1,4 +1,4 @@
-load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
 load("@aspect_rules_py//py:defs.bzl", "py_binary", "py_image_layer")
 load("@pip//:requirements.bzl", "requirement")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_push")
@@ -59,6 +59,29 @@ py_test(
         requirement("httpx"),
         requirement("pytest"),
         requirement("pytest-asyncio"),
+    ],
+)
+
+# The SPA's logic lives inline in static/index.html; these tests extract the
+# marked regions from that file rather than keeping a copy, so they cannot
+# pass against logic that has since changed. static/index.html is therefore a
+# real input — without it in data the test would take a cache hit after an
+# index.html-only edit and never run against the change.
+js_test(
+    name = "test_prefetch_policy",
+    entry_point = "tests/test_prefetch_policy.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+js_test(
+    name = "test_image_urls",
+    entry_point = "tests/test_image_urls.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
     ],
 )
 

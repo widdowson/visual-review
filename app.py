@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -62,6 +63,28 @@ def _mime_for_path(path: str) -> str:
 
 
 # -- Helpers -------------------------------------------------------------------
+
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _image_cache_control(ref: str) -> str:
+    """Cache-Control for a proxied image.
+
+    A full commit SHA addresses immutable content, so the browser never needs
+    to ask for it twice — which is what makes moving back and forth between
+    files, and the SPA's speculative prefetch, cost nothing after the first
+    fetch. Any other ref (a branch name someone typed into the URL) can move,
+    so it keeps a short TTL.
+
+    ``private`` rather than ``public``: the whole benefit is browser-side, and
+    these bytes may come from a private repository, so there is nothing to gain
+    from letting an intermediary hold them for a year. ``fullmatch`` rather
+    than ``match`` because ``$`` also matches before a trailing newline.
+    """
+    if _FULL_SHA_RE.fullmatch(ref or ""):
+        return "private, max-age=31536000, immutable"
+    return "private, max-age=300"
+
 
 def _gh_headers() -> dict[str, str]:
     """Return standard GitHub API headers."""
@@ -323,7 +346,7 @@ async def pr_image(
         return Response(content=b"No GitHub token", status_code=500)
 
     headers = _gh_headers()
-    img_headers = {"Cache-Control": "public, max-age=300"}
+    img_headers = {"Cache-Control": _image_cache_control(ref)}
     mime = _mime_for_path(path)
 
     try:

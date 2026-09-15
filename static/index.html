@@ -565,6 +565,8 @@
             headLoaded: false,
             loadError: null,
             imageCache: {},
+            prefetching: {},
+            prefetchTimer: null,
             lastDirection: null,
             diffClusters: [],
         };
@@ -693,7 +695,12 @@
                 var parts = state.images[i].path.split('/');
                 var fname = parts[parts.length - 1];
                 if (fname === target || state.images[i].path === target) {
-                    selectFile(state.images[i].path, true);
+                    // selectFile writes the hash, so its own hashchange lands
+                    // back here. Reloading the current file would double every
+                    // request and discard the images already decoded.
+                    if (state.images[i].path !== state.currentFile) {
+                        selectFile(state.images[i].path, true);
+                    }
                     return true;
                 }
             }
@@ -717,6 +724,9 @@
                     else if (newIdx === prevIdx - 1) direction = 'prev';
                 }
             }
+            // Nothing speculative may start while the file the user asked for
+            // is still loading.
+            cancelPrefetchTimer();
             state.lastDirection = direction || null;
             state.currentFile = path;
             state.baseImg = null;
@@ -751,118 +761,328 @@
             loadComments(path);
         }
 
-        // -- Prefetch adjacent images --
-        function prefetchAdjacent(path) {
-            var curIdx = -1;
-            for (var i = 0; i < state.images.length; i++) {
-                if (state.images[i].path === path) { curIdx = i; break; }
+        // -- Speculative prefetch of neighbouring files -------------------
+        //
+        // Goal: the next j/k press should render from memory. Constraints: it
+        // must be invisible, and it must never compete with the images the
+        // user is looking at. So prefetching only ever starts once the current
+        // pair has rendered, it is armed on a short delay so a fast scroll
+        // through many files fetches nothing it passes, and anything already
+        // in flight for a file the user has moved away from is aborted.
+
+        // ── prefetch-policy:begin ────────────────────────────────────────────
+        // The tuning, and the pure function that applies it: given where the
+        // selection is and what is cached, decide what to speculatively fetch
+        // and what to drop. Indices only, so it can be tested without a DOM.
+        // Extracted verbatim by tests/test_prefetch_policy.js, which evaluates
+        // this region and reads PREFETCH_TUNING out of it — keep the markers
+        // and the purity, and keep the tuning inside them, since a constant
+        // declared outside is one a test can only read by grepping.
+        var PREFETCH_TUNING = {
+            ahead: 1,        // files below the selection to warm
+            behind: 1,       // files above it — j/k both go somewhere
+            delayMs: 250,    // settle time before speculating
+            cacheRadius: 2,  // keep decoded images this far either side
+        };
+
+        function computePrefetchPlan(opts) {
+            var count = opts.count || 0;
+            var current = typeof opts.current === 'number' ? opts.current : -1;
+            var cached = opts.cached || [];          // indices held in memory
+            var ahead = opts.ahead || 0;
+            var behind = opts.behind || 0;
+            var radius = opts.radius || 0;
+            var plan = { fetch: [], evict: [] };
+            if (count <= 0 || current < 0 || current >= count) return plan;
+
+            // Want list, next-first: the user is far likelier to press j than k,
+            // and the browser starts these in the order we set .src.
+            var want = [];
+            for (var d = 1; d <= ahead; d++) {
+                if (current + d < count) want.push(current + d);
             }
-            if (curIdx < 0) return;
+            for (var e = 1; e <= behind; e++) {
+                if (current - e >= 0) want.push(current - e);
+            }
 
-            var adjacent = [];
-            if (curIdx > 0) adjacent.push(state.images[curIdx - 1]);
-            if (curIdx < state.images.length - 1) adjacent.push(state.images[curIdx + 1]);
+            var held = {};
+            for (var c = 0; c < cached.length; c++) held[cached[c]] = true;
 
-            adjacent.forEach(function(img) {
-                if (state.imageCache[img.path]) return;
-                var entry = { baseImg: null, headImg: null };
-                if (img.status !== 'added') {
-                    var imgBase = new Image();
-                    imgBase.crossOrigin = 'anonymous';
-                    imgBase.src = apiBase + '/image?path=' + encodeURIComponent(img.path) + '&ref=' + state.baseRef;
-                    entry.baseImg = imgBase;
-                }
-                if (img.status !== 'removed') {
-                    var imgHead = new Image();
-                    imgHead.crossOrigin = 'anonymous';
-                    imgHead.src = apiBase + '/image?path=' + encodeURIComponent(img.path) + '&ref=' + state.headRef;
-                    entry.headImg = imgHead;
-                }
-                state.imageCache[img.path] = entry;
+            for (var w = 0; w < want.length; w++) {
+                if (!held.hasOwnProperty(want[w])) plan.fetch.push(want[w]);
+            }
+
+            // Keep the current file, everything we are about to fetch, and a
+            // small window either side so a change of mind is still instant.
+            var keep = {};
+            keep[current] = true;
+            for (var k = 0; k < want.length; k++) keep[want[k]] = true;
+            for (var r = 1; r <= radius; r++) {
+                if (current + r < count) keep[current + r] = true;
+                if (current - r >= 0) keep[current - r] = true;
+            }
+
+            for (var i = 0; i < cached.length; i++) {
+                if (!keep.hasOwnProperty(cached[i])) plan.evict.push(cached[i]);
+            }
+
+            // Farthest from the selection first, ties towards the lower index:
+            // reviewing runs forward, so of two files equally far away the one
+            // already behind is the one to let go — and the tiebreak makes the
+            // order independent of however the caller enumerated its cache.
+            plan.evict.sort(function(a, b) {
+                var da = Math.abs(a - current), db = Math.abs(b - current);
+                return db - da || a - b;
             });
+            return plan;
+        }
+        // ── prefetch-policy:end ──────────────────────────────────────────────
+
+        function indexOfPath(path) {
+            for (var i = 0; i < state.images.length; i++) {
+                if (state.images[i].path === path) return i;
+            }
+            return -1;
+        }
+
+        // ── image-urls:begin ─────────────────────────────────────────────────
+        // Pure function: the pair of URLs for one changed file. Both the real
+        // load and the prefetch go through it, so they cannot disagree about
+        // where a file's bytes are — they used to, and every renamed file
+        // prefetched a 404 as a result. Takes its refs as arguments rather
+        // than closing over them so it can be tested without a DOM; extracted
+        // verbatim by tests/test_image_urls.js — keep the markers.
+        function buildImageUrls(fileData, apiBase, baseRef, headRef) {
+            if (!fileData || !fileData.path) return { base: null, head: null };
+            // The base side of a renamed file lives at its previous path.
+            var basePath = (fileData.status === 'renamed' && fileData.previous_filename)
+                ? fileData.previous_filename : fileData.path;
+            function url(path, ref) {
+                return apiBase + '/image?path=' + encodeURIComponent(path) + '&ref=' + ref;
+            }
+            return {
+                base: fileData.status === 'added' ? null : url(basePath, baseRef),
+                head: fileData.status === 'removed' ? null : url(fileData.path, headRef),
+            };
+        }
+        // ── image-urls:end ───────────────────────────────────────────────────
+
+        function imageUrls(fileData) {
+            return buildImageUrls(fileData, apiBase, state.baseRef, state.headRef);
+        }
+
+        // Setting src to the empty string aborts a pending image load. Returns
+        // true when there was something to abort.
+        function abortImage(img) {
+            if (!img || img.complete) return false;
+            img.onload = null;
+            img.onerror = null;
+            try { img.src = ''; } catch (err) { /* nothing else to do */ }
+            return true;
+        }
+
+        function dropCached(path) {
+            if (!path || path === state.currentFile) return;
+            var imgs = state.prefetching[path];
+            if (imgs) {
+                imgs.forEach(abortImage);
+                delete state.prefetching[path];
+            }
+            delete state.imageCache[path];
+        }
+
+        // Abort every speculative load except the file we are about to show —
+        // loadImagePair adopts that one instead of starting it over.
+        function cancelPrefetches(exceptPath) {
+            Object.keys(state.prefetching).forEach(function(path) {
+                if (path === exceptPath) return;
+                var entry = state.imageCache[path];
+                state.prefetching[path].forEach(function(img) {
+                    if (!abortImage(img) || !entry) return;
+                    // Drop only the side that was still in flight; a sibling
+                    // that already arrived is a decoded image worth keeping.
+                    if (entry.baseImg === img) { entry.baseImg = null; entry.baseUrl = null; }
+                    if (entry.headImg === img) { entry.headImg = null; entry.headUrl = null; }
+                });
+                delete state.prefetching[path];
+                if (entry && !entry.baseImg && !entry.headImg) delete state.imageCache[path];
+            });
+        }
+
+        function cancelPrefetchTimer() {
+            if (state.prefetchTimer !== null) {
+                clearTimeout(state.prefetchTimer);
+                state.prefetchTimer = null;
+            }
+        }
+
+        function schedulePrefetch() {
+            cancelPrefetchTimer();
+            state.prefetchTimer = setTimeout(runPrefetch, PREFETCH_TUNING.delayMs);
+        }
+
+        function runPrefetch() {
+            state.prefetchTimer = null;
+            var current = indexOfPath(state.currentFile);
+            if (current < 0) return;
+
+            var cached = [];
+            Object.keys(state.imageCache).forEach(function(path) {
+                var idx = indexOfPath(path);
+                if (idx >= 0) cached.push(idx);
+            });
+
+            var plan = computePrefetchPlan({
+                count: state.images.length,
+                current: current,
+                cached: cached,
+                ahead: PREFETCH_TUNING.ahead,
+                behind: PREFETCH_TUNING.behind,
+                radius: PREFETCH_TUNING.cacheRadius,
+            });
+
+            plan.evict.forEach(function(idx) { dropCached(state.images[idx].path); });
+            plan.fetch.forEach(function(idx) { startPrefetch(state.images[idx]); });
+        }
+
+        function startPrefetch(fileData) {
+            var path = fileData.path;
+            if (state.imageCache[path] || state.prefetching[path]) return;
+            var urls = imageUrls(fileData);
+            if (!urls.base && !urls.head) return;
+
+            var entry = { baseImg: null, headImg: null, baseUrl: urls.base, headUrl: urls.head };
+            var imgs = [];
+            state.prefetching[path] = imgs;
+
+            function settle() {
+                for (var i = 0; i < imgs.length; i++) {
+                    if (!imgs[i].complete) return;
+                }
+                delete state.prefetching[path];
+            }
+
+            function warm(url, which) {
+                if (!url) return;
+                var img = new Image();
+                img.crossOrigin = 'anonymous';
+                // Speculative: the browser should serve the visible file first.
+                if ('fetchPriority' in img) img.fetchPriority = 'low';
+                img.decoding = 'async';
+                img.onload = settle;
+                img.onerror = settle;
+                img.src = url;
+                imgs.push(img);
+                entry[which] = img;
+            }
+
+            warm(urls.base, 'baseImg');
+            warm(urls.head, 'headImg');
+            state.imageCache[path] = entry;
         }
 
         // -- Load image pair (base and head) for comparison --
         var loadGeneration = 0;
+        var pendingLoad = null;   // { path, imgs } for the load now in flight
+
+        // A load the user has navigated away from is dead weight on the
+        // connection and on the proxy: abort it rather than just ignoring it.
+        function cancelPendingLoad() {
+            if (!pendingLoad) return;
+            var entry = state.imageCache[pendingLoad.path];
+            pendingLoad.imgs.forEach(function(img) {
+                if (!abortImage(img)) return;
+                if (!entry) return;
+                if (entry.baseImg === img) { entry.baseImg = null; entry.baseUrl = null; }
+                if (entry.headImg === img) { entry.headImg = null; entry.headUrl = null; }
+            });
+            if (entry && !entry.baseImg && !entry.headImg) delete state.imageCache[pendingLoad.path];
+            pendingLoad = null;
+        }
+
+        function usableCached(img, cachedUrl, wantUrl) {
+            if (!img || cachedUrl !== wantUrl) return null;
+            if (img.complete && img.naturalWidth === 0) return null;  // errored or aborted
+            return img;
+        }
 
         function loadImagePair(path) {
+            cancelPendingLoad();
+            cancelPrefetches(path);
             var gen = ++loadGeneration;
+            var fileData = getFileData(path);
             var fileStatus = getFileStatus(path);
+            var urls = imageUrls(fileData || { path: path, status: fileStatus });
 
-            // Check cache
-            if (state.imageCache[path]) {
-                var cached = state.imageCache[path];
-                if (cached.baseImg && cached.baseImg.complete && cached.baseImg.naturalWidth > 0) {
-                    state.baseImg = cached.baseImg;
-                    state.baseLoaded = true;
-                }
-                if (cached.headImg && cached.headImg.complete && cached.headImg.naturalWidth > 0) {
-                    state.headImg = cached.headImg;
-                    state.headLoaded = true;
-                }
-                if ((state.baseLoaded || fileStatus === 'added') && (state.headLoaded || fileStatus === 'removed')) {
-                    viewport.classList.remove('loading');
-                    renderComparison();
-                    prefetchAdjacent(path);
-                    return;
-                }
-            }
+            var cached = state.imageCache[path] || {};
+            // Adopt whatever a prefetch already started or finished for this
+            // file, so moving onto it mid-flight does not restart the download.
+            var imgBase = usableCached(cached.baseImg, cached.baseUrl, urls.base);
+            var imgHead = usableCached(cached.headImg, cached.headUrl, urls.head);
+            delete state.prefetching[path];
+
+            var entry = {
+                baseImg: null, headImg: null,
+                baseUrl: urls.base, headUrl: urls.head,
+            };
+            var inflight = [];
 
             function checkReady() {
-                var baseReady = state.baseLoaded || fileStatus === 'added';
-                var headReady = state.headLoaded || fileStatus === 'removed';
+                var baseReady = state.baseLoaded || !urls.base;
+                var headReady = state.headLoaded || !urls.head;
                 if (baseReady && headReady) {
+                    // Nothing is in flight any more, so the name means what it
+                    // says and a later cancel cannot reach these images.
+                    if (pendingLoad && pendingLoad.path === path) pendingLoad = null;
                     viewport.classList.remove('loading');
                     renderComparison();
-                    prefetchAdjacent(path);
+                    schedulePrefetch();
                 }
             }
 
-            // For renamed files, the base image is at the previous path
-            var fileData = getFileData(path);
-            var basePath = (fileStatus === 'renamed' && fileData && fileData.previous_filename) ? fileData.previous_filename : path;
-            var baseUrl = apiBase + '/image?path=' + encodeURIComponent(basePath) + '&ref=' + state.baseRef;
-            var headUrl = apiBase + '/image?path=' + encodeURIComponent(path) + '&ref=' + state.headRef;
+            function attach(img, url, which) {
+                if (!url) return;
+                var isBase = which === 'baseImg';
+                var fresh = !img;
+                if (fresh) {
+                    img = new Image();
+                    img.crossOrigin = 'anonymous';
+                }
+                entry[which] = img;
 
-            if (fileStatus !== 'added') {
-                var imgBase = new Image();
-                imgBase.crossOrigin = 'anonymous';
-                imgBase.onload = function() {
+                function loaded() {
+                    if (isBase) { state.baseImg = img; state.baseLoaded = true; }
+                    else { state.headImg = img; state.headLoaded = true; }
+                }
+
+                if (img.complete && img.naturalWidth > 0) {
+                    loaded();
+                    return;
+                }
+
+                img.onload = function() {
                     if (gen !== loadGeneration) return;
-                    state.baseImg = imgBase;
-                    state.baseLoaded = true;
+                    loaded();
                     checkReady();
                 };
-                imgBase.onerror = function() {
+                img.onerror = function() {
                     if (gen !== loadGeneration) return;
-                    state.baseLoaded = true;
+                    if (isBase) { state.baseLoaded = true; }
+                    else { state.loadError = 'head'; state.headLoaded = true; }
                     checkReady();
                 };
-                imgBase.src = baseUrl;
+                inflight.push(img);
+                if (fresh) img.src = url;
             }
 
-            if (fileStatus !== 'removed') {
-                var imgHead = new Image();
-                imgHead.crossOrigin = 'anonymous';
-                imgHead.onload = function() {
-                    if (gen !== loadGeneration) return;
-                    state.headImg = imgHead;
-                    state.headLoaded = true;
-                    checkReady();
-                };
-                imgHead.onerror = function() {
-                    if (gen !== loadGeneration) return;
-                    state.loadError = 'head';
-                    state.headLoaded = true;
-                    checkReady();
-                };
-                imgHead.src = headUrl;
-            }
+            attach(imgBase, urls.base, 'baseImg');
+            attach(imgHead, urls.head, 'headImg');
 
-            state.imageCache[path] = {
-                baseImg: fileStatus !== 'added' ? imgBase : null,
-                headImg: fileStatus !== 'removed' ? imgHead : null,
-            };
+            state.imageCache[path] = entry;
+            pendingLoad = inflight.length ? { path: path, imgs: inflight } : null;
+
+            // Everything was already decoded — render without a spinner frame.
+            checkReady();
         }
 
         function getFileStatus(path) {
