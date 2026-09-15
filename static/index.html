@@ -917,6 +917,38 @@
         }
         // ── image-urls:end ───────────────────────────────────────────────────
 
+        // ── gh-diff-link:begin ───────────────────────────────────────────────
+        // Where a file sits in the GitHub PR diff (issue #15). Deterministic
+        // and DOM-free, so the tests can drive it — though not pure in the
+        // sense tests/spa_source.js checks for: it needs Web Crypto, which
+        // that helper's IMPURE list does not cover and should not, since the
+        // digest is the same in node as in a browser.
+        // GitHub anchors a file in the Files tab as `#diff-<sha256 of the
+        // file's path, lower-case hex>` — the path alone, with no trailing
+        // newline and nothing about the repository or the PR mixed in. That
+        // format is GitHub's and it is undocumented: the pair
+        // tests/test_gh_diff_link.js pins comes from a community answer, an
+        // older answer describes the anchor as an md5, and nothing here
+        // observes github.com. So take it as the best-sourced reading rather
+        // than as fact, read that test's comment for where it came from, and
+        // see #34 for what is still unverified — including which side of a
+        // rename GitHub hashes, where this uses the new path.
+        //
+        // Takes owner, repo and the number as arguments rather than closing
+        // over them so it can be tested without a DOM, like buildImageUrls
+        // above — keep the markers.
+        async function ghDiffUrl(owner, repo, prNumber, path) {
+            var bytes = new TextEncoder().encode(path);
+            var digest = await crypto.subtle.digest('SHA-256', bytes);
+            var hash = Array.from(new Uint8Array(digest)).map(function(b) {
+                return b.toString(16).padStart(2, '0');
+            }).join('');
+            return 'https://github.com/' + encodeURIComponent(owner) + '/' +
+                encodeURIComponent(repo) + '/pull/' + encodeURIComponent(prNumber) +
+                '/files#diff-' + hash;
+        }
+        // ── gh-diff-link:end ─────────────────────────────────────────────────
+
         function imageUrls(fileData) {
             return buildImageUrls(fileData, apiBase, state.baseRef, state.headRef);
         }
@@ -1178,13 +1210,25 @@
             }
             imageInfo.innerHTML = infoHtml;
 
-            // Add GitHub diff link asynchronously
-            sha256Hex(state.currentFile).then(function(hash) {
+            // Fill that placeholder once the digest is in. The path is
+            // captured here and re-checked on arrival: a navigation during
+            // the digest rebuilds this bar with a new container of the same
+            // id, so an unguarded write puts the file we have left under the
+            // name of the one now on screen.
+            var linkPath = state.currentFile;
+            ghDiffUrl(owner, repo, prNumber, linkPath).then(function(ghUrl) {
+                if (linkPath !== state.currentFile) return;
                 var container = document.getElementById('gh-diff-link-container');
-                if (container) {
-                    var ghUrl = 'https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/pull/' + prNumber + '/files#diff-' + hash;
-                    container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) + '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
-                }
+                if (!container) return;
+                container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) +
+                    '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
+            }).catch(function(err) {
+                // Anything from here: the digest itself (there is no
+                // SubtleCrypto outside a secure context, where an unhandled
+                // rejection was reported once per file) or the write above it.
+                // Either way the rest of the bar stands and only the link is
+                // lost, which is the right trade for a convenience link.
+                console.warn('visual-review: no GitHub diff link for this file', err);
             });
 
             // Issue #14: renamed files — show single image with rename label, no diff modes
@@ -2096,13 +2140,6 @@
 
         function escAttr(s) {
             return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
-
-        // SHA-256 hash for GitHub diff anchors (async, uses SubtleCrypto)
-        async function sha256Hex(str) {
-            var data = new TextEncoder().encode(str);
-            var buf = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
         }
 
         function getFileData(path) {

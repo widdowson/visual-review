@@ -94,6 +94,15 @@ js_test(
     ],
 )
 
+js_test(
+    name = "test_gh_diff_link",
+    entry_point = "tests/test_gh_diff_link.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
 # ── OCI container image ─────────────────────────────────────────────────────
 
 # py_image_layer splits the py_binary's runfiles into optimized tar layers:
