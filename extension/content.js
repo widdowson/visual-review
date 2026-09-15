@@ -95,13 +95,14 @@
   // calls prHasImageFiles once per row. A failure memoizes the bundled list
   // too, so an unreachable server costs one request rather than one per row.
   //
-  // The request is bounded because prHasImageFiles awaits it before it looks
-  // at anything, and a PR list page awaits that once per row. A VR server that
-  // refuses or errors falls back below; one that accepts the connection and
-  // never answers — a blackholing proxy, a captive portal, a wedged host —
-  // would otherwise block the first row forever and inject nothing at all, on
-  // the list page, the detail page and the hovercard alike, for the life of
-  // that page. The abort lands in the same catch as any other failure.
+  // The request has to be bounded, because prHasImageFiles awaits it before it
+  // looks at anything and a PR list page awaits that once per row. A VR server
+  // that refuses or errors falls back below; one that accepts the connection
+  // and never answers — a blackholing proxy, a captive portal, a wedged host
+  // — would otherwise block the first row forever and inject nothing at all,
+  // on the list page, the detail page and the hovercard alike, for the life of
+  // that page. fetchTimeoutSignal below is what bounds it, and the abort lands
+  // in the same catch as any other failure.
   //
   // credentials:'omit' is not about cookies: fetch defaults to 'same-origin'
   // and this is cross-origin, so none would be sent either way. It is there to
@@ -110,6 +111,25 @@
   // credentialed request — so a later 'include' here would make every
   // response unreadable and pin the extension to the bundled list forever,
   // silently. That is what the assertion on this option is protecting.
+  // AbortSignal.timeout is Chrome 103+. The manifest sets no
+  // minimum_chrome_version and MV3 loads from Chrome 88, and this is evaluated
+  // while building fetch's options — before _extensionsPromise is assigned and
+  // outside the catch below. So calling it unguarded means that on a browser
+  // without it, a TypeError escapes ensureExtensions, then prHasImageFiles
+  // (which awaits it ahead of its own try), then the row loop and run(), and
+  // the extension injects nothing at all on any surface. That is precisely the
+  // failure the timeout was added to prevent, so it must not be the way the
+  // timeout is added.
+  //
+  // undefined is a valid `signal`, so a browser without it gets the unbounded
+  // request it would have had before any of this — which is the fallback
+  // behaviour this whole region promises.
+  function fetchTimeoutSignal() {
+    return (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+      ? AbortSignal.timeout(EXT_FETCH_TIMEOUT_MS)
+      : undefined;
+  }
+
   function ensureExtensions() {
     if (_extensionsPromise) return _extensionsPromise;
 
@@ -122,7 +142,7 @@
 
     _extensionsPromise = fetch(VR_BASE_URL + '/api/extensions', {
       credentials: 'omit',
-      signal: AbortSignal.timeout(EXT_FETCH_TIMEOUT_MS),
+      signal: fetchTimeoutSignal(),
     })
       .then(function(resp) {
         if (!resp.ok) throw new Error('HTTP ' + resp.status);

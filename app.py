@@ -259,11 +259,14 @@ async def supported_extensions():
     it is the same for every caller and there is nothing to keep an
     intermediary from holding.
 
-    The hour here is for callers that have no cache of their own, and is
-    deliberately not the day the browser extension keeps its copy for. The
-    extension does not re-request inside its own window, so this header never
-    governs it; the two numbers are independent rather than one of them being
-    a leftover of the other.
+    The hour here is deliberately not the day the browser extension keeps its
+    copy for, and the two are independent rather than one being a leftover of
+    the other. On the normal path the day governs and this header never comes
+    up, because the extension does not re-request inside its own window. The
+    hour is what covers the client whose store is gone: where localStorage
+    throws — site data blocked, or a quota error — the extension's own cache
+    silently never holds, and it asks again on every full page load. This
+    header is then the only thing bounding that.
 
     The CORS header the middleware adds is part of the contract rather than
     incidental. A Manifest V3 content script's ``fetch`` carries the page's

@@ -59,9 +59,12 @@ const INJECTED = [
 // that guard cannot apply — but dropping it and putting nothing in its place
 // leaves the region free to reach for any global INJECTED does not name, get
 // Node's own, and quietly stop being deterministic under test. INJECTED is
-// what the region may reach for; this is the part of the rest that would do
-// real damage if it were reached silently. A region that needs one of these
-// adds it to INJECTED and stubs it.
+// what the region may reach for among the globals whose behaviour a test needs
+// to control — not an exhaustive list of what it touches, since it also reaches
+// JSON, Array, Promise and Error, none of which needs stubbing. This is a
+// denylist rather than the complement of INJECTED: adding a name here to
+// INJECTED does not clear it, deliberately, because these are the ones that
+// should not appear in the region at all.
 const MUST_BE_INJECTED = [
   [/\bsetTimeout\b/, 'setTimeout'],
   [/\bsetInterval\b/, 'setInterval'],
@@ -101,8 +104,9 @@ function loadExtensions(env) {
   const withoutComments = stripComments(src);
   for (const [pattern, label] of MUST_BE_INJECTED) {
     assert.ok(!pattern.test(withoutComments),
-      'the vr:extensions region reaches for "' + label + '", which no test stubs; ' +
-      'add it to INJECTED and stub it, or the region stops being deterministic here');
+      'the vr:extensions region reaches for "' + label + '", which this file ' +
+      'does not allow at all — stubbing it in INJECTED will not clear this. ' +
+      'Find another way, or change the policy here deliberately');
   }
 
   const body = "'use strict';\n" + src +
@@ -169,6 +173,29 @@ function checked(name, body) {
   return body;
 }
 
+// The free names prHasImageFiles reads from the IIFE around it.
+const PR_HAS_IMAGE_FILES_DEPS = [
+  'getCachedResult', 'setCachedResult', 'ensureExtensions',
+  'hasImageExtension', 'fetch', 'MAX_FILES', 'console',
+];
+
+// prHasImageFiles, captured by bodyOf and made callable with those names
+// stubbed. It is the function that wires the vr:extensions region into the
+// extension, and a text check on it is only ever as good as the spellings it
+// anticipated — round 2 defeated one by putting a brace on its own line. So it
+// is run instead: whether the list is asked for, and asked for before anything
+// is matched, is then a fact about what executes rather than about formatting.
+function loadPrHasImageFiles(env) {
+  const src = bodyOf('prHasImageFiles');
+  for (const name of PR_HAS_IMAGE_FILES_DEPS) {
+    assert.ok(Object.prototype.hasOwnProperty.call(env, name),
+      'loadPrHasImageFiles needs a stub for ' + name);
+  }
+  return new Function(...PR_HAS_IMAGE_FILES_DEPS, "'use strict';\nreturn (" + src + ');')(
+    ...PR_HAS_IMAGE_FILES_DEPS.map((n) => env[n]));
+}
+
 module.exports = {
-  region, loadExtensions, bodyOf, source, sourceWithoutComments, INJECTED, EXPORTED,
+  region, loadExtensions, loadPrHasImageFiles, bodyOf, source, sourceWithoutComments,
+  INJECTED, EXPORTED, PR_HAS_IMAGE_FILES_DEPS,
 };

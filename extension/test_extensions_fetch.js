@@ -10,7 +10,9 @@
 // of PRs that happen to have no images.
 
 const assert = require('assert');
-const { loadExtensions, bodyOf, sourceWithoutComments } = require('./content_source');
+const {
+  loadExtensions, loadPrHasImageFiles, sourceWithoutComments,
+} = require('./content_source');
 
 const BUNDLED = ['.png', '.bmp'];
 const BASE_URL = 'https://vr.test';
@@ -291,6 +293,21 @@ test('a timeout caches nothing and is not retried per caller', async () => {
   assert.strictEqual(fetch.calls.length, 1);
 });
 
+test('a browser without AbortSignal.timeout still gets the list', async () => {
+  // The shape a pre-Chrome-103 browser presents. This is evaluated while
+  // building fetch's options, before the promise is memoized and outside the
+  // catch, so calling it unguarded threw straight out of ensureExtensions,
+  // through prHasImageFiles (which awaits it ahead of its own try) and out of
+  // run() — injecting nothing at all on any surface, which is the failure the
+  // timeout exists to prevent.
+  const { mod, fetch } = setup({ AbortSignal: {} });
+
+  assert.deepStrictEqual(await mod.ensureExtensions(), ['.png', '.webp'],
+    'the absence of a timeout must not cost the fetch');
+  assert.strictEqual(fetch.calls[0].opts.signal, undefined,
+    'an unbounded request is the old behaviour; a thrown TypeError is not');
+});
+
 // ── One fetch per page ──────────────────────────────────────────────────────
 
 test('overlapping callers share one request', async () => {
@@ -337,28 +354,67 @@ test('a localStorage that throws does not break the fetch', async () => {
 // its source rather than runs of it. Comments are stripped first, so a comment
 // claiming the call is made does not satisfy them.
 
-test('prHasImageFiles awaits the list before matching against it', () => {
-  const body = bodyOf('prHasImageFiles');
-  const awaited = body.indexOf('await ensureExtensions()');
-  const matched = body.indexOf('hasImageExtension(');
+// A GitHub changed-files response, in the shape prHasImageFiles reads.
+function githubFiles(paths) {
+  return {
+    ok: true,
+    json: () => Promise.resolve({
+      payload: { pullRequestsChangesRoute: { diffSummaries: paths.map((p) => ({ path: p })) } },
+    }),
+  };
+}
 
-  // Statement position, not just presence. A substring match is satisfied by
-  // `if (false) { await ensureExtensions(); }`, and worse by
-  // `if (_extensionsPromise) await ensureExtensions();` — which reads like a
-  // tidy-up, is never truthy on the first call since only ensureExtensions
-  // sets it, and so would stop the endpoint being fetched on any page at all.
-  // Both of those pass every other case in this file, because every other case
-  // runs the region in isolation. This is the check that has to catch them.
-  assert.ok(body.split('\n').some((line) => line.trim() === 'await ensureExtensions();'),
-    'prHasImageFiles must await ensureExtensions() as a statement of its own, ' +
-    'not inside a branch that may never be taken');
-  assert.ok(awaited > 0,
-    'prHasImageFiles must await ensureExtensions(); without it the fetched ' +
-    'list is never asked for and the endpoint might as well not exist');
-  assert.ok(matched > 0, 'prHasImageFiles must be where paths are matched');
-  assert.ok(awaited < matched,
-    'the await must come before the match, or the first page load decides ' +
-    'against the bundled list however current the server is');
+function wiredPrHasImageFiles(order, opts = {}) {
+  return loadPrHasImageFiles({
+    getCachedResult: opts.getCachedResult || (() => null),
+    setCachedResult: () => {},
+    ensureExtensions: () => {
+      order.push('ensure called');
+      // Resolves several microtasks out, so that a call which is made but not
+      // awaited — `void ensureExtensions();` — resolves after the matching
+      // rather than racing it, and shows up here as the wrong order instead
+      // of passing. Calling it is not the property under test; having the
+      // list in hand before deciding anything is.
+      let p = Promise.resolve();
+      for (let i = 0; i < 20; i++) p = p.then(() => {});
+      return p.then(() => { order.push('ensure resolved'); });
+    },
+    hasImageExtension: (p) => { order.push('match ' + p); return p.endsWith('.webp'); },
+    fetch: () => Promise.resolve(githubFiles(['notes.txt', 'shot.webp'])),
+    MAX_FILES: 100,
+    console: { warn: () => {} },
+  });
+}
+
+async function drive(prHasImageFiles) {
+  try {
+    return await prHasImageFiles('widdowson', 'repo', 1);
+  } catch (err) {
+    return assert.fail(
+      'prHasImageFiles threw outside its own try block: ' + err.message +
+      ' \u2014 if it now reads a name outside its parameters, ' +
+      'PR_HAS_IMAGE_FILES_DEPS in content_source.js must supply it');
+  }
+}
+
+test('prHasImageFiles asks for the list, before it matches anything', async () => {
+  const order = [];
+  assert.strictEqual(await drive(wiredPrHasImageFiles(order)), true);
+  assert.deepStrictEqual(
+    order, ['ensure called', 'ensure resolved', 'match notes.txt', 'match shot.webp'],
+    'the list must be asked for, and asked for before the first path is matched; ' +
+    'without that the endpoint might as well not exist, and the first page load ' +
+    'decides against the bundled list however current the server is');
+});
+
+test('a cached positive is the one path that needs no list', async () => {
+  // The early return above the await. Asserting it keeps the case above
+  // honest: it is about the live path, not about every path.
+  const order = [];
+  const prFn = wiredPrHasImageFiles(order, { getCachedResult: () => true });
+
+  assert.strictEqual(await drive(prFn), true);
+  assert.deepStrictEqual(order, [], 'a cached positive must not fetch or match');
 });
 
 test('prHasImageFiles is the only place the list is matched against', () => {
