@@ -17,7 +17,7 @@
 // reachable through machinery this file deliberately does not build.
 
 const assert = require('assert');
-const { extract, bodyOf } = require('./spa_source');
+const { extract, bodyOf, sourceWithoutComments } = require('./spa_source');
 
 const renameDisplay = extract('rename-display', 'renameDisplay');
 
@@ -451,21 +451,34 @@ assert.ok(
 // that: it stubs the mode renderers out, so their own computeRowDiffMap calls
 // are never made. Count the arguments at every call site instead. Exactly one
 // call passes a fourth, and it is the rename decision's.
+//
+// A census is only as good as its completeness, and an earlier version of this
+// check leaked twice — both confirmed by mutation, both with the suite green
+// while a gutter call compared alpha. It filtered the declaration out by its
+// first parameter's *name*, so a call site that hoisted its arguments into
+// locals called `baseImg`/`headImg` was discarded as the declaration; and it
+// guarded completeness with a floor set one too low, so a call carrying nested
+// parentheses could drop out of the match set unnoticed. Hence the three checks
+// below, in place of the floor: the name still appears, every occurrence of it
+// parsed, and exactly one of those is the declaration.
 
-const spaSource = require('fs').readFileSync(
-  (process.env.RUNFILES_DIR
-    ? require('path').join(process.env.RUNFILES_DIR, '_main', 'static', 'index.html')
-    : require('path').join(__dirname, '..', 'static', 'index.html')), 'utf8')
-  .replace(/\/\*[\s\S]*?\*\//g, ' ')
-  .replace(/(^|[^:])\/\/.*$/gm, '$1');
+const occurrences = (sourceWithoutComments.match(/computeRowDiffMap\s*\(/g) || []).length;
+assert.ok(occurrences >= 7,
+  'expected the declaration, the rename call and five gutter calls; found ' +
+  occurrences + '. This check reads static/index.html by name, so renaming ' +
+  'computeRowDiffMap makes it vacuous — rename it here too.');
 
-const callSites = [...spaSource.matchAll(/computeRowDiffMap\s*\(([^()]*)\)/g)]
-  .map(m => m[1].split(',').map(a => a.trim()))
-  .filter(args => args[0] !== 'baseImg');   // drop the declaration
+const uses = [...sourceWithoutComments.matchAll(
+  /(function\s+)?computeRowDiffMap\s*\(([^()]*)\)/g)];
+assert.strictEqual(uses.length, occurrences,
+  (occurrences - uses.length) + ' computeRowDiffMap occurrence(s) did not parse as a ' +
+  'flat argument list. A call carrying nested parentheses drops out of this census ' +
+  'silently, taking its arguments with it — rewrite this check, do not relax it.');
 
-assert.ok(callSites.length >= 5,
-  'expected the gutter call sites plus the rename one; found ' + callSites.length +
-  ' — if the calls now nest parentheses this check needs rewriting, not deleting');
+// The declaration is told apart by its `function` keyword, not by what its
+// parameters happen to be called.
+assert.strictEqual(uses.filter(u => u[1]).length, 1, 'exactly one declaration');
+const callSites = uses.filter(u => !u[1]).map(u => u[2].split(',').map(a => a.trim()));
 
 const withAlpha = callSites.filter(args => args.length === 4);
 assert.strictEqual(withAlpha.length, 1,
