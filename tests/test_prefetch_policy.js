@@ -6,23 +6,45 @@
 // if they go missing this test fails rather than silently testing nothing.
 
 const assert = require('assert');
-const { extract, constant, bodyOf } = require('./spa_source');
+const { extract, bodyOf } = require('./spa_source');
 
 const computePrefetchPlan = extract('prefetch-policy', 'computePrefetchPlan');
 
 // ── The shipped defaults ────────────────────────────────────────────────────
 // Asserted because the policy below is exercised with explicit arguments, so
 // every case here would still pass with the feature switched off in the SPA.
-// Each is a floor on the feature existing, not an opinion about its tuning:
-// raising any of these constants is a judgement call and must not fail here.
+// The tuning lives inside the same marked region and is read by evaluating it,
+// not by matching text — an earlier version grepped for `var NAME = <n>;` and
+// a commented-out previous value sitting above a live one read as the live one.
+// Each assertion is a floor on the feature existing, not an opinion about its
+// tuning: raising any of these is a judgement call and must not fail here.
 
-assert.ok(constant('PREFETCH_AHEAD') >= 1, 'the SPA must prefetch at least the next file');
-assert.ok(constant('PREFETCH_BEHIND') >= 1, 'the SPA must prefetch at least the previous file');
-assert.ok(constant('PREFETCH_DELAY_MS') > 0, 'prefetching must be debounced');
+const tuning = extract('prefetch-policy', 'PREFETCH_TUNING');
+assert.strictEqual(typeof tuning, 'object', 'the region must export a PREFETCH_TUNING object');
+assert.deepStrictEqual(
+  Object.keys(tuning).sort(), ['ahead', 'behind', 'cacheRadius', 'delayMs'],
+  'PREFETCH_TUNING gained or lost a key; the assertions below need updating');
+for (const [k, v] of Object.entries(tuning)) {
+  assert.ok(Number.isInteger(v), 'PREFETCH_TUNING.' + k + ' must be an integer, got ' + v);
+}
+
+assert.ok(tuning.ahead >= 1, 'the SPA must prefetch at least the next file');
+assert.ok(tuning.behind >= 1, 'the SPA must prefetch at least the previous file');
+assert.ok(tuning.delayMs > 0, 'prefetching must be debounced');
 // Only that the retained window reaches past the current file. Deliberately
 // not tied to the prefetch depth: the policy keeps `want` in `keep` whatever
 // the radius, and a case below pins that at radius 0.
-assert.ok(constant('CACHE_RADIUS') >= 1, 'the retained window must extend beyond the current file');
+assert.ok(tuning.cacheRadius >= 1, 'the retained window must extend beyond the current file');
+
+// The SPA must actually feed the tuning to the policy; the plan cases below
+// all pass explicit arguments, so none of them would notice a hard-coded 0.
+const runPrefetchBody = bodyOf('runPrefetch');
+for (const key of ['ahead', 'behind', 'cacheRadius']) {
+  assert.ok(new RegExp('PREFETCH_TUNING\\s*\\.\\s*' + key + '\\b').test(runPrefetchBody),
+    'runPrefetch must pass PREFETCH_TUNING.' + key + ' to the policy');
+}
+assert.ok(/PREFETCH_TUNING\s*\.\s*delayMs\b/.test(bodyOf('schedulePrefetch')),
+  'schedulePrefetch must use PREFETCH_TUNING.delayMs');
 
 // Defaults matching the SPA's constants, so each case states only what it varies.
 function plan(overrides) {
@@ -112,10 +134,9 @@ assert.deepStrictEqual(first, second, 'same input, same plan');
 // thing, so assert instead that each half of the plan is consumed and that
 // prefetching is armed from the loader's ready path.
 
-const runPrefetch = bodyOf('runPrefetch');
-assert.ok(/plan\.fetch\b[\s\S]*startPrefetch\s*\(/.test(runPrefetch),
+assert.ok(/plan\.fetch\b[\s\S]*startPrefetch\s*\(/.test(runPrefetchBody),
   'runPrefetch must start a prefetch for each index the plan asks for');
-assert.ok(/plan\.evict\b[\s\S]*dropCached\s*\(/.test(runPrefetch),
+assert.ok(/plan\.evict\b[\s\S]*dropCached\s*\(/.test(runPrefetchBody),
   'runPrefetch must drop each index the plan evicts');
 
 assert.ok(/schedulePrefetch\s*\(\s*\)/.test(bodyOf('loadImagePair')),

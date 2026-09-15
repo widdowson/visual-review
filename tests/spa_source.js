@@ -56,7 +56,7 @@ function extract(name, exportName) {
   assert.ok(end > begin, 'static/index.html must contain ' + name + ':end after ' + name + ':begin');
 
   const source = html.slice(html.indexOf('\n', begin) + 1, html.lastIndexOf('\n', end));
-  const declaration = new RegExp('function\\s+' + exportName + '\\s*\\(');
+  const declaration = new RegExp('\\b(?:function|var|let|const)\\s+' + exportName + '\\b');
   assert.ok(declaration.test(source),
     'the ' + name + ' region must define ' + exportName);
 
@@ -67,21 +67,6 @@ function extract(name, exportName) {
   }
 
   return new Function("'use strict';\n" + source + '\nreturn ' + exportName + ';')();
-}
-
-// The SPA's tuning constants, read off the source so a test can assert what
-// the shipped defaults actually are. Matched against the comment-stripped
-// source and required to be unique: a leftover `// var PREFETCH_AHEAD = 1;`
-// above a live `var PREFETCH_AHEAD = 0;` would otherwise be read instead of
-// the value that ships, which is exactly the mutant these assertions exist
-// to catch.
-function constant(name) {
-  const pattern = new RegExp('\\bvar\\s+' + name + '\\s*=\\s*(-?\\d+)\\s*;', 'g');
-  const matches = [...htmlWithoutComments.matchAll(pattern)];
-  assert.strictEqual(matches.length, 1,
-    'static/index.html must declare a numeric ' + name + ' exactly once, found ' +
-    matches.length);
-  return parseInt(matches[0][1], 10);
 }
 
 // The source of a top-level function in the SPA's inline script, from its
@@ -110,4 +95,4 @@ function bodyOf(name) {
   assert.fail(name + ' has no matching close brace');
 }
 
-module.exports = { extract, constant, bodyOf, stripComments, html };
+module.exports = { extract, bodyOf, stripComments, html };

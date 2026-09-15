@@ -770,16 +770,21 @@
         // through many files fetches nothing it passes, and anything already
         // in flight for a file the user has moved away from is aborted.
 
-        var PREFETCH_AHEAD = 1;        // files below the selection to warm
-        var PREFETCH_BEHIND = 1;       // files above it — j/k both go somewhere
-        var PREFETCH_DELAY_MS = 250;   // settle time before speculating
-        var CACHE_RADIUS = 2;          // keep decoded images this far either side
-
         // ── prefetch-policy:begin ────────────────────────────────────────────
-        // Pure function: given where the selection is and what is cached,
-        // decide what to speculatively fetch and what to drop. Indices only,
-        // so it can be tested without a DOM. Extracted verbatim by
-        // tests/test_prefetch_policy.js — keep the markers and the purity.
+        // The tuning, and the pure function that applies it: given where the
+        // selection is and what is cached, decide what to speculatively fetch
+        // and what to drop. Indices only, so it can be tested without a DOM.
+        // Extracted verbatim by tests/test_prefetch_policy.js, which evaluates
+        // this region and reads PREFETCH_TUNING out of it — keep the markers
+        // and the purity, and keep the tuning inside them, since a constant
+        // declared outside is one a test can only read by grepping.
+        var PREFETCH_TUNING = {
+            ahead: 1,        // files below the selection to warm
+            behind: 1,       // files above it — j/k both go somewhere
+            delayMs: 250,    // settle time before speculating
+            cacheRadius: 2,  // keep decoded images this far either side
+        };
+
         function computePrefetchPlan(opts) {
             var count = opts.count || 0;
             var current = typeof opts.current === 'number' ? opts.current : -1;
@@ -913,7 +918,7 @@
 
         function schedulePrefetch() {
             cancelPrefetchTimer();
-            state.prefetchTimer = setTimeout(runPrefetch, PREFETCH_DELAY_MS);
+            state.prefetchTimer = setTimeout(runPrefetch, PREFETCH_TUNING.delayMs);
         }
 
         function runPrefetch() {
@@ -931,9 +936,9 @@
                 count: state.images.length,
                 current: current,
                 cached: cached,
-                ahead: PREFETCH_AHEAD,
-                behind: PREFETCH_BEHIND,
-                radius: CACHE_RADIUS,
+                ahead: PREFETCH_TUNING.ahead,
+                behind: PREFETCH_TUNING.behind,
+                radius: PREFETCH_TUNING.cacheRadius,
             });
 
             plan.evict.forEach(function(idx) { dropCached(state.images[idx].path); });
