@@ -673,8 +673,7 @@
 
                 var fname = document.createElement('span');
                 fname.className = 'filename';
-                var parts = img.path.split('/');
-                fname.textContent = parts[parts.length - 1];
+                fname.textContent = basenameOf(img.path);
                 fname.title = img.path;
                 li.appendChild(fname);
 

@@ -131,31 +131,182 @@ for (let i = 0; i < ODD.length; i++) {
     'selecting ' + ODD[i].path + ' must resolve back to itself');
 }
 
-// ── The wiring ──────────────────────────────────────────────────────────────
+// ── The wiring, driven ──────────────────────────────────────────────────────
 //
-// Everything above tests the extracted region. The SPA reaches it from two
-// functions that touch the DOM and so cannot be run here — and every
-// assertion above would still pass with either of them left on its own
-// basename loop, which is precisely the state this PR found the file in.
+// Everything above tests the extracted region, and every one of those
+// assertions passes with either DOM-side function left on its own basename
+// loop — which is precisely the state this PR found the file in. So the call
+// sites need covering too, and they touch the DOM, so they cannot be pulled
+// into the pure region.
+//
+// They can still be *run*. bodyOf hands over their source, and `new Function`
+// supplies every name they close over as a parameter, so the stubs below stand
+// in for the page. What that buys over matching their text is the difference
+// between a call being written and its answer being used: round 1 of this PR's
+// review found ten edits that satisfied a set of regexes here while leaving
+// the page broken, two of them re-landing #20 exactly — an added second write
+// after the correct one, and a re-scan after the correct resolve. Both are red
+// below. The regexes are gone rather than kept alongside: `.split('/')` banned
+// one spelling of an operation `lastIndexOf('/')` performs just as well, and a
+// check that cannot fail is worse than no check, because it reads like one.
+//
+// The cost is that these stubs have to keep up with the SPA. A name either
+// function starts closing over and this file does not supply is a
+// ReferenceError naming it, which is a loud failure pointing here — the same
+// trade, and the same way round, as the brace walk in spa_source.js.
 
-const fromHash = bodyOf('selectFileFromHash');
-assert.ok(/resolveHashTarget\s*\(\s*decodeURIComponent\s*\(\s*hash\s*\)\s*,\s*state\.images\s*\)/
-  .test(fromHash),
-  'selectFileFromHash must resolve the decoded hash through resolveHashTarget');
-assert.ok(/selectFile\s*\([^)]*,\s*true\s*\)/.test(fromHash),
-  'selectFileFromHash must select with skipHash, or reading a hash rewrites it');
+function driver(opts) {
+  const state = {
+    images: opts.images,
+    currentFile: opts.currentFile || null,
+    lastDirection: null,
+    imageCache: {},
+  };
 
-const select = bodyOf('selectFile');
-assert.ok(
-  /location\.hash\s*=\s*encodeHashTarget\s*\(\s*hashTargetFor\s*\(\s*path\s*,\s*state\.images\s*\)\s*\)/
-    .test(select),
-  'selectFile must write encodeHashTarget(hashTargetFor(path, state.images))');
+  // A browser stores the fragment with its '#', which is what the read side
+  // strips back off; writing '' clears it. Modelling that is what makes the
+  // write and the read below a real round trip rather than two half-tests.
+  let stored = opts.hash === undefined ? '' : opts.hash;
+  const location = {
+    get hash() { return stored; },
+    set hash(v) { stored = v === '' ? '' : '#' + v; },
+  };
 
-// Neither may keep a basename of its own: a second, unshared notion of what
-// names a file is how the two halves came to disagree.
-for (const [name, body] of [['selectFileFromHash', fromHash], ['selectFile', select]]) {
-  assert.ok(!/\.split\s*\(\s*'\/'\s*\)/.test(body),
-    name + ' must take basenames from the hash-target region, not compute its own');
+  const noop = () => {};
+  const element = () => ({
+    style: {}, innerHTML: '',
+    classList: {add: noop, remove: noop, toggle: noop},
+    querySelectorAll: () => [],
+  });
+
+  const loaded = [];
+  const selectFile = new Function(
+    'state', 'location', 'cancelPrefetchTimer', 'fileList', 'modeToolbar',
+    'viewport', 'imageInfo', 'loadImagePair', 'loadComments',
+    'hashTargetFor', 'encodeHashTarget',
+    bodyOf('selectFile') + '\nreturn selectFile;')(
+      state, location, noop, element(), element(), element(), element(),
+      p => loaded.push(p), noop, hashTargetFor, encodeHashTarget);
+
+  // Wrapped rather than replaced: the read side has to reach the real
+  // selectFile for the round trip to mean anything, and the arguments it was
+  // reached with are themselves the assertion for skipHash.
+  const selected = [];
+  const spy = (path, skipHash, direction) => {
+    selected.push({path: path, skipHash: skipHash});
+    return selectFile(path, skipHash, direction);
+  };
+  const selectFileFromHash = new Function(
+    'state', 'location', 'selectFile', 'resolveHashTarget',
+    bodyOf('selectFileFromHash') + '\nreturn selectFileFromHash;')(
+      state, location, spy, resolveHashTarget);
+
+  return {
+    state: state, selected: selected, loaded: loaded,
+    selectFile: selectFile, selectFileFromHash: selectFileFromHash,
+    hash: () => stored,
+  };
+}
+
+// ── Writing ─────────────────────────────────────────────────────────────────
+
+// Selecting a colliding file leaves a hash that names it, and loads it.
+{
+  const d = driver({images: COLLIDING, currentFile: COLLIDING[0].path});
+  d.selectFile(COLLIDING[2].path);
+  assert.strictEqual(d.hash(), '#' + COLLIDING[2].path,
+    'selecting a file whose basename collides must write its whole path');
+  assert.deepStrictEqual(d.loaded, [COLLIDING[2].path],
+    'and must load the file that was asked for');
+  assert.strictEqual(d.state.currentFile, COLLIDING[2].path);
+}
+
+// An uncollided file still gets the short form, which is the common case.
+{
+  const d = driver({images: COLLIDING});
+  d.selectFile(COLLIDING[1].path);
+  assert.strictEqual(d.hash(), '#cuj_02_dashboard.bmp');
+}
+
+// skipHash means what it says: the caller already has the hash it wants.
+{
+  const d = driver({images: COLLIDING, hash: '#cuj_01_login.bmp'});
+  d.selectFile(COLLIDING[2].path, true);
+  assert.strictEqual(d.hash(), '#cuj_01_login.bmp',
+    'a selection with skipHash must leave the hash alone');
+  assert.deepStrictEqual(d.loaded, [COLLIDING[2].path]);
+}
+
+// ── The round trip, which is #20 ────────────────────────────────────────────
+
+// Click a file, let the write fire hashchange, read it back. This is the
+// sequence the bug report describes, and the one the SPA's guard against
+// re-selecting the current file depends on being the identity.
+{
+  const d = driver({
+    images: COLLIDING, currentFile: COLLIDING[1].path, hash: '#cuj_02_dashboard.bmp'});
+  d.selectFile(COLLIDING[2].path);
+  assert.strictEqual(d.selectFileFromHash(), true);
+  assert.strictEqual(d.state.currentFile, COLLIDING[2].path,
+    'the selection must not bounce to the first file sharing the basename');
+  assert.deepStrictEqual(d.selected, [],
+    'a hash naming the current file must select nothing at all');
+  assert.strictEqual(d.hash(), '#' + COLLIDING[2].path);
+}
+
+// The same, for the root-level collision the read order is the only thing that
+// can settle: `name.png` *is* the ambiguous basename, so nothing can be
+// written to disambiguate it. A read that scans basenames first lands on
+// `dir/name.png` here while every assertion above still passes.
+{
+  const d = driver({
+    images: ROOT_COLLIDING, currentFile: 'dir/name.png', hash: '#dir/name.png'});
+  d.selectFile('name.png');
+  assert.strictEqual(d.hash(), '#name.png');
+  assert.strictEqual(d.selectFileFromHash(), true);
+  assert.strictEqual(d.state.currentFile, 'name.png',
+    'a root-level file must not resolve to the nested one sharing its name');
+}
+
+// ── Reading ─────────────────────────────────────────────────────────────────
+
+// A link shared before this change keeps its meaning, and reading it does not
+// rewrite it — nobody's pasted URL is silently upgraded under them.
+{
+  const d = driver({images: COLLIDING, hash: '#cuj_01_login.bmp'});
+  assert.strictEqual(d.selectFileFromHash(), true);
+  assert.deepStrictEqual(d.selected.map(s => s.path), [COLLIDING[0].path]);
+  assert.ok(d.selected[0].skipHash, 'reading a hash must select with skipHash');
+  assert.strictEqual(d.hash(), '#cuj_01_login.bmp', 'reading a hash must not rewrite it');
+}
+
+// A full path in the bar selects the file it names, which is the whole point
+// of writing one.
+{
+  const d = driver({images: COLLIDING, hash: '#' + COLLIDING[2].path});
+  assert.strictEqual(d.selectFileFromHash(), true);
+  assert.deepStrictEqual(d.selected.map(s => s.path), [COLLIDING[2].path]);
+}
+
+// Percent-encoding survives the trip, which is what `#` and a space in a
+// filename reach the read side as.
+{
+  const ODD_IMAGES = files(['a/é b.png', 'x/y/a#b.png']);
+  const d = driver({images: ODD_IMAGES, hash: '#x/y/a%23b.png'});
+  assert.strictEqual(d.selectFileFromHash(), true);
+  assert.deepStrictEqual(d.selected.map(s => s.path), ['x/y/a#b.png']);
+}
+
+// Nothing to do: no hash, no match, no files.
+for (const [label, opts] of [
+  ['an empty hash', {images: COLLIDING, hash: ''}],
+  ['a hash naming nothing', {images: COLLIDING, hash: '#absent.bmp'}],
+  ['an empty file list', {images: [], hash: '#cuj_01_login.bmp'}],
+]) {
+  const d = driver(opts);
+  assert.strictEqual(d.selectFileFromHash(), false, label + ' must resolve to nothing');
+  assert.deepStrictEqual(d.selected, [], label + ' must select nothing');
+  assert.strictEqual(d.state.currentFile, null);
 }
 
 console.log('test_hash_target: all checks passed');
