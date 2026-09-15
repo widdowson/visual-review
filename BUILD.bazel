@@ -1,4 +1,4 @@
-load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
 load("@aspect_rules_py//py:defs.bzl", "py_binary", "py_image_layer")
 load("@pip//:requirements.bzl", "requirement")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_push")
@@ -60,6 +60,15 @@ py_test(
         requirement("pytest"),
         requirement("pytest-asyncio"),
     ],
+)
+
+# The SPA's prefetch policy lives inline in static/index.html; this test
+# extracts the marked region from that file rather than keeping a copy, so it
+# cannot pass against logic that has since changed.
+js_test(
+    name = "test_prefetch_policy",
+    entry_point = "tests/test_prefetch_policy.js",
+    data = ["static/index.html"],
 )
 
 # ── OCI container image ─────────────────────────────────────────────────────

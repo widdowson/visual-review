@@ -1,0 +1,4 @@
+# See tools/bazel_downloader.cfg — routes the bats toolchain archive via
+# Bazel's public mirror so analysis works where github.com access is scoped
+# per repository. A no-op on an unrestricted network.
+common --downloader_config=tools/bazel_downloader.cfg
