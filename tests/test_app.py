@@ -1884,3 +1884,276 @@ class TestPrImageCacheHeader:
         # Not merely "not immutable": the error path attaches no image headers
         # at all, so a file that appears later is not shadowed by a cached 404.
         assert resp.headers.get("cache-control") is None
+
+
+# -- Client disconnect ---------------------------------------------------------
+
+class TestPrImageClientDisconnect:
+    """A request the browser has cancelled must stop costing GitHub API calls.
+
+    These drive the ASGI app directly rather than going through
+    ``ASGITransport``. That transport does deliver ``http.disconnect``, but
+    only after ``response_complete`` and only from behind an ``await`` that
+    ``is_disconnected()``'s already-cancelled scope can never get past —
+    measured: it reports False before the response and False after it. So the
+    transport cannot express this case at all, which is equally why none of
+    the other tests in this file change behaviour because of these checks.
+    """
+
+    @staticmethod
+    def _scope(path: str = "test.png", ref: str = "a" * 40):
+        from urllib.parse import urlencode
+        return {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/owner/repo/pr/1/image",
+            "raw_path": b"/api/owner/repo/pr/1/image",
+            "query_string": urlencode({"path": path, "ref": ref}).encode(),
+            "root_path": "",
+            "headers": [(b"host", b"test")],
+            "client": ("1.2.3.4", 1234),
+            "server": ("test", 80),
+        }
+
+    @classmethod
+    async def _drive(cls, gone: str, *, contents: dict, blob: dict | None = None,
+                     blob_status: int = 200, path: str = "test.png",
+                     ref: str = "a" * 40):
+        """Run pr_image against a stub GitHub, aborting when ``gone`` says.
+
+        ``gone`` is "never", "at_start" (already gone when the handler ran),
+        "during_contents" (gone while the contents call was in flight, which
+        is where the SPA's aborts land) or "during_blob". The trigger is the
+        stub upstream seeing that call, not a count of channel reads: a count
+        would silently mean "the Nth check" and would move whenever a check
+        was added or removed, which is exactly when these tests need to keep
+        meaning what their names say.
+
+        Returns (status, headers, body, upstream_urls). The URLs are the whole
+        point — an assertion on the status alone would pass against a handler
+        that made every call and threw the results away.
+        """
+        disconnected = {"now": gone == "at_start"}
+
+        async def receive():
+            if disconnected["now"]:
+                return {"type": "http.disconnect"}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        contents_resp = MagicMock()
+        contents_resp.status_code = 200
+        contents_resp.json.return_value = contents
+
+        blob_resp = MagicMock()
+        blob_resp.status_code = blob_status
+        blob_resp.json.return_value = blob or {}
+
+        download_resp = MagicMock()
+        download_resp.status_code = 200
+        download_resp.content = b"downloaded-png-data"
+
+        urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            urls.append(url)
+            if "/contents/" in url:
+                if gone == "during_contents":
+                    disconnected["now"] = True
+                return contents_resp
+            if "/git/blobs/" in url:
+                if gone == "during_blob":
+                    disconnected["now"] = True
+                return blob_resp
+            return download_resp
+
+        sent: list[dict] = []
+
+        async def send(message):
+            sent.append(message)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            instance = AsyncMock()
+            instance.get = mock_get
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+
+            await app(cls._scope(path=path, ref=ref), receive, send)
+
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        body = b"".join(
+            m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+        )
+        headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+        return start["status"], headers, body, urls
+
+    # The contents-call shapes, named so a failure says which case it was in
+    # rather than which dict literal it was handed.
+    _B64 = base64.b64encode(b"fake-png-data").decode()
+    SMALL = {"encoding": "base64", "content": _B64}
+    LARGE = {"sha": "deadbeef123", "size": 2_000_000,
+             "download_url": "https://raw.githubusercontent.com/o/r/abc/test.png"}
+    NO_SHA = {"size": 2_000_000,
+              "download_url": "https://raw.githubusercontent.com/o/r/abc/test.png"}
+    BLOB = {"encoding": "base64", "content": _B64}
+
+    @staticmethod
+    def _kinds(urls):
+        return [
+            "contents" if "/contents/" in u
+            else "blob" if "/git/blobs/" in u
+            else "download"
+            for u in urls
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_contents_call_skips_the_blob_call(self):
+        """The check with the most to save: the bytes fetch is never made.
+
+        The contents call is spent — nothing can refund a call already sent —
+        but the blob call that would have transferred the file is not made.
+        """
+        status, _, body, urls = await self._drive(
+            "during_contents", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
+        assert body == b""
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_contents_call_skips_the_download_fallback(self):
+        """Case 3 reached directly: no sha, so download_url is the next call."""
+        status, _, _, urls = await self._drive(
+            "during_contents", contents=self.NO_SHA
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_blob_call_skips_the_download_fallback(self):
+        """Case 3 reached *after* case 2, which the entry check cannot cover.
+
+        A blob response that is not base64 falls through to download_url, so
+        without a check of its own this request would spend a third upstream
+        call and write a 200 into a socket that has gone.
+        """
+        status, _, body, urls = await self._drive(
+            "during_blob", contents=self.LARGE, blob={"encoding": "utf-8"}
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents", "blob"]
+        assert body == b""
+
+    @pytest.mark.asyncio
+    async def test_gone_during_the_blob_call_after_a_failed_blob_call(self):
+        """The same fall-through, reached by a non-200 blob response."""
+        status, _, _, urls = await self._drive(
+            "during_blob", contents=self.LARGE, blob={}, blob_status=404
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents", "blob"]
+
+    @pytest.mark.asyncio
+    async def test_no_check_precedes_the_contents_call(self):
+        """Deliberate, and measured: there is no check before the first call.
+
+        One was written and removed — it fired in none of 900 aborted
+        requests, and uvicorn will not dispatch a queued pipelined cycle on a
+        closing connection, which was the only case that could have reached
+        it. So a client already gone still spends the contents call, and is
+        stopped at the next one. If this starts returning no upstream calls at
+        all, a pre-contents check has come back and needs its own evidence.
+        """
+        status, _, _, urls = await self._drive(
+            "at_start", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 499
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_small_file_already_in_hand_is_still_returned(self):
+        """Deliberate: both checks sit below the inline-content case.
+
+        A small file's bytes arrived with the contents call, so stopping short
+        of returning them would save nothing. If this ever returns 499 a
+        check has been moved above case 1.
+        """
+        status, headers, body, urls = await self._drive(
+            "during_contents", contents=self.SMALL
+        )
+        assert status == 200
+        assert body == b"fake-png-data"
+        assert headers["cache-control"] == "private, max-age=31536000, immutable"
+        assert self._kinds(urls) == ["contents"]
+
+    @pytest.mark.asyncio
+    async def test_connected_client_still_gets_every_call(self):
+        """The checks must not fire on a client that is still there."""
+        status, _, body, urls = await self._drive(
+            "never", contents=self.LARGE, blob=self.BLOB
+        )
+        assert status == 200
+        assert body == b"fake-png-data"
+        assert self._kinds(urls) == ["contents", "blob"]
+
+    @pytest.mark.asyncio
+    async def test_connected_client_reaches_the_download_fallback(self):
+        """The full three-call path, so the added check cannot be a blanket."""
+        status, _, body, urls = await self._drive(
+            "never", contents=self.LARGE, blob={"encoding": "utf-8"}
+        )
+        assert status == 200
+        assert body == b"downloaded-png-data"
+        assert self._kinds(urls) == ["contents", "blob", "download"]
+
+    @pytest.mark.asyncio
+    async def test_client_gone_response_is_not_cached(self):
+        """A cached 499 would shadow the image on the next request for it."""
+        cases = (
+            ("during_contents", self.LARGE, self.BLOB),
+            ("during_blob", self.LARGE, {"encoding": "utf-8"}),
+        )
+        for gone, contents, blob in cases:
+            status, headers, _, _ = await self._drive(
+                gone, contents=contents, blob=blob
+            )
+            assert status == 499, gone
+            assert headers.get("cache-control") is None, gone
+
+    @pytest.mark.asyncio
+    async def test_each_check_logs_the_call_it_skipped(self, caplog):
+        """The log line is the only thing that tells the checks apart.
+
+        Without this, swapping the two label strings is a mutation the whole
+        suite passes — so each one is pinned to the call it actually guards.
+        """
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_contents", contents=self.LARGE,
+                              blob=self.BLOB)
+        assert "client gone before the blob call" in caplog.text
+        assert "download_url" not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_blob", contents=self.LARGE,
+                              blob={"encoding": "utf-8"})
+        assert "client gone before the download_url fetch" in caplog.text
+        assert "before the blob call" not in caplog.text
+
+        # The third shape, and the one that makes this an invariant rather
+        # than two spot checks: no sha, so the call skipped is the
+        # download_url fetch even though the abort landed during the contents
+        # call. A check placed at the case-2/3 entry point instead of
+        # immediately before each call saves the same calls and mislabels
+        # this one, which is a mutant the rest of the suite passes.
+        caplog.clear()
+        with caplog.at_level("INFO", logger="visual-review"):
+            await self._drive("during_contents", contents=self.NO_SHA)
+        assert "client gone before the download_url fetch" in caplog.text
+        assert "before the blob call" not in caplog.text
