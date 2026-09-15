@@ -141,8 +141,10 @@ async def _gh_paginate(
     ``Authorization`` header is only ever sent to a URL this function built,
     and it makes the page cap above a straightforward bound on the walk.
 
-    A short page ends the sequence, so a file count that is an exact multiple
-    of ``_GH_PAGE_SIZE`` costs one extra request that comes back empty.
+    A short page ends the sequence, so an item count that is an exact
+    multiple of ``_GH_PAGE_SIZE`` *below the cap* costs one extra request
+    that comes back empty. At the cap itself the walk stops on the page
+    count and makes no such request, which is the case above.
     """
     items: list[Any] = []
     base_params = dict(params or {})
@@ -370,12 +372,22 @@ async def pr_images(owner: str, repo: str, number: int):
 
             # The changed-file list comes from "List pull request files"
             # rather than the compare API, because compare's ``files`` array
-            # is capped at 300 entries and offers no page beyond that: PR 352
-            # of apwphotos-appv2 (489 files) answers with exactly 300 files
-            # and a Link header whose only relations are ``first`` and
-            # ``prev``. Compare paginates its *commits*, not its files, so
-            # the remaining 189 were unreachable however the request was
-            # phrased, and they went missing with nothing said (#12).
+            # is capped at 300 entries and offers no page beyond that. Two
+            # measurements against apwphotos-appv2 PR 352 (489 changed files,
+            # 4 commits), which are separate responses and say different
+            # things:
+            #
+            #   compare/e47246ef...f190bf2d
+            #       -> 300 files, and no Link header at all, so nothing
+            #          advertises a next page
+            #   compare/e47246ef...f190bf2d?per_page=100&page=2
+            #       -> 0 files, 0 commits, and a Link header offering only
+            #          first and prev
+            #
+            # Together those say compare paginates its *commits*, not its
+            # files: with 4 commits there is one page, so the remaining 189
+            # files were unreachable however the request was phrased, and
+            # they went missing with nothing said (#12).
             #
             # Both endpoints diff the merge base against the head, so below
             # the cap they agree exactly — measured on three apwphotos-appv2

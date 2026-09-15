@@ -510,19 +510,29 @@ class TestGhPaginate:
 
     @pytest.mark.asyncio
     async def test_caller_params_survive_paging(self):
+        """A caller's params ride every page, not just the first.
+
+        The fixture has to page for this to mean anything: an earlier
+        version answered ``[]`` on page 1, so the walk stopped after one
+        request and dropping the caller's params from page 2 onward left
+        the suite green.
+        """
         captured = []
 
         async def mock_get(url, **kwargs):
-            captured.append(dict(kwargs.get("params", {})))
+            params = dict(kwargs.get("params", {}))
+            captured.append(params)
             resp = MagicMock(status_code=200)
-            resp.json.return_value = []
+            # Full page 1 forces a second request; short page 2 ends the walk.
+            resp.json.return_value = list(range(_GH_PAGE_SIZE)) if params["page"] == 1 else []
             return resp
 
         client = AsyncMock()
         client.get = mock_get
         await _gh_paginate(client, "http://gh/list", {}, params={"state": "all"})
-        assert captured[0]["state"] == "all"
-        assert captured[0]["page"] == 1
+        assert [p["page"] for p in captured] == [1, 2]
+        assert [p["state"] for p in captured] == ["all", "all"]
+        assert [p["per_page"] for p in captured] == [_GH_PAGE_SIZE] * 2
 
     @pytest.mark.asyncio
     async def test_truncates_at_max_pages(self):
