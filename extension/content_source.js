@@ -185,6 +185,17 @@ const PR_HAS_IMAGE_FILES_DEPS = [
 // anticipated — round 2 defeated one by putting a brace on its own line. So it
 // is run instead: whether the list is asked for, and asked for before anything
 // is matched, is then a fact about what executes rather than about formatting.
+//
+// A documented limit, not a gap to build past. prHasImageFiles runs here in
+// isolation from the module state it shares with the region in production, so
+// a predicate on a free name outside PR_HAS_IMAGE_FILES_DEPS either throws —
+// loudly, and drive() names this list — or, under `typeof`, silently
+// diverges: `if (typeof _extensionsPromise === 'undefined') await
+// ensureExtensions();` passes here while fetching on no page at all, since in
+// production that name is a declared var. Contrived as a hand-written mutant,
+// and the only remedy is a denylist over this function's body, which is more
+// of exactly the surface this file already has too much of. The analogue of
+// MUST_BE_INJECTED's blindness to computed access. Do not build it.
 function loadPrHasImageFiles(env) {
   const src = bodyOf('prHasImageFiles');
   for (const name of PR_HAS_IMAGE_FILES_DEPS) {
