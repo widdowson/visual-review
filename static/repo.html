@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visual Review</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <script>(function(){var p=localStorage.getItem('vr-theme-pref')||'auto';var t=(p==='auto'?window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light':p);document.documentElement.dataset.theme=t;})();</script>
+    <style>
+        /* Same custom-property palette as the viewer, so the two pages are
+           recognisably one tool and the theme choice carries across. */
+        :root {
+            --vr-bg-body: #f0f2f5;
+            --vr-bg-surface: #fff;
+            --vr-text: #1a1d23;
+            --vr-text-secondary: #555;
+            --vr-text-muted: #888;
+            --vr-border: #d0d5dd;
+            --vr-border-subtle: #e4e7ec;
+            --vr-link: #2563eb;
+            --vr-link-hover: #1d4ed8;
+            --vr-accent: #4a90d9;
+            --vr-hover-bg: #f0f4fa;
+            --vr-badge-images-bg: #dcfce7; --vr-badge-images-fg: #166534;
+            --vr-badge-empty-bg: #eceef2; --vr-badge-empty-fg: #6b7280;
+            --vr-badge-unknown-bg: #fef9c3; --vr-badge-unknown-fg: #854d0e;
+            --vr-tag-bg: #eceef2; --vr-tag-fg: #555;
+        }
+        [data-theme="dark"] {
+            --vr-bg-body: #1a1d23;
+            --vr-bg-surface: #22252e;
+            --vr-text: #e0e0e0;
+            --vr-text-secondary: #bbb;
+            --vr-text-muted: #888;
+            --vr-border: #3a3f52;
+            --vr-border-subtle: #2a2d38;
+            --vr-link: #8eb5f0;
+            --vr-link-hover: #b8d4ff;
+            --vr-accent: #4a90d9;
+            --vr-hover-bg: #2a3042;
+            --vr-badge-images-bg: #1a3a1a; --vr-badge-images-fg: #4ade80;
+            --vr-badge-empty-bg: #2a2d38; --vr-badge-empty-fg: #8b90a0;
+            --vr-badge-unknown-bg: #3a3a1a; --vr-badge-unknown-fg: #facc15;
+            --vr-tag-bg: #2a2d38; --vr-tag-fg: #bbb;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            background: var(--vr-bg-body); color: var(--vr-text); margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        /* Top bar — always dark, as in the viewer */
+        .topbar {
+            background: #2a3042; padding: 10px 20px;
+            display: flex; align-items: center; gap: 12px;
+            border-bottom: 1px solid #3a3f52;
+            position: sticky; top: 0; z-index: 100;
+        }
+        .topbar a { color: #8eb5f0; text-decoration: none; }
+        .topbar a:hover { color: #b8d4ff; }
+        .topbar .brand { color: #fff; font-weight: 600; font-size: 1.1rem; }
+        .topbar .repo-name { color: #8eb5f0; font-size: 1.05rem; }
+        .theme-toggle {
+            background: none; border: 1px solid #3a3f52; color: #8eb5f0;
+            border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        .theme-toggle:hover { border-color: #8eb5f0; }
+
+        .wrap { max-width: 1000px; margin: 0 auto; padding: 20px 16px 48px; }
+
+        .listbar {
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+            margin-bottom: 14px; color: var(--vr-text-secondary); font-size: 0.9rem;
+        }
+        .listbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+        .listbar .spacer { margin-left: auto; }
+
+        .pr-row {
+            display: flex; align-items: flex-start; gap: 14px;
+            background: var(--vr-bg-surface); border: 1px solid var(--vr-border-subtle);
+            border-left: 4px solid transparent;
+            border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
+            text-decoration: none; color: inherit;
+        }
+        /* The whole point of the page: a PR with images is a live link with a
+           green count and full contrast; one without is a dimmed, unclickable
+           row. The difference has to survive a glance down the list. */
+        a.pr-row { cursor: pointer; }
+        a.pr-row:hover { background: var(--vr-hover-bg); border-color: var(--vr-accent); }
+        .pr-images { border-left-color: #4ade80; }
+        .pr-empty { opacity: 0.55; }
+        .pr-unknown { border-left-color: #facc15; }
+        .pr-checking { opacity: 0.75; }
+
+        .pr-badge {
+            flex: 0 0 auto; min-width: 104px; text-align: center;
+            font-size: 0.75rem; font-weight: 700; padding: 4px 10px;
+            border-radius: 12px; white-space: nowrap; margin-top: 1px;
+        }
+        .badge-images { background: var(--vr-badge-images-bg); color: var(--vr-badge-images-fg); }
+        .badge-empty { background: var(--vr-badge-empty-bg); color: var(--vr-badge-empty-fg); }
+        .badge-unknown { background: var(--vr-badge-unknown-bg); color: var(--vr-badge-unknown-fg); }
+        .badge-checking { background: var(--vr-badge-empty-bg); color: var(--vr-badge-empty-fg); }
+
+        .pr-body { flex: 1 1 auto; min-width: 0; }
+        .pr-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+        .pr-number { color: var(--vr-text-muted); font-variant-numeric: tabular-nums; }
+        /* The title shares the line and wraps within it; without a basis of
+           its own a long title wraps as one block and leaves the PR number
+           stranded on the line above. */
+        .pr-title { font-weight: 600; flex: 1 1 60%; min-width: 0; }
+        .pr-tag {
+            font-size: 0.7rem; padding: 1px 7px; border-radius: 10px;
+            background: var(--vr-tag-bg); color: var(--vr-tag-fg); font-weight: 600;
+        }
+        .pr-meta { color: var(--vr-text-muted); font-size: 0.8rem; margin-top: 4px; }
+        .pr-links { flex: 0 0 auto; }
+        .pr-gh-link { color: var(--vr-link); text-decoration: none; font-size: 0.8rem; }
+        .pr-gh-link:hover { color: var(--vr-link-hover); text-decoration: underline; }
+
+        .pr-none, .message {
+            background: var(--vr-bg-surface); border: 1px solid var(--vr-border-subtle);
+            border-radius: 8px; padding: 18px; color: var(--vr-text-secondary);
+        }
+        .message.error { border-color: #cf222e; }
+
+        @media (max-width: 600px) {
+            .pr-row { flex-wrap: wrap; }
+            .pr-links { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <span class="brand">Visual Review</span>
+        <a class="repo-name" id="repo-link" href="#"></a>
+        <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+            <button class="theme-toggle" id="theme-toggle" title="Toggle theme">&#9681;</button>
+        </div>
+    </div>
+
+    <div class="wrap">
+        <div class="listbar">
+            <span id="summary">Loading…</span>
+            <span class="spacer"></span>
+            <label><input type="checkbox" id="hide-empty"> Hide PRs with no images</label>
+        </div>
+        <div id="pr-list"></div>
+    </div>
+
+    <script src="/static/repo.js"></script>
+    <script>
+    (function () {
+        'use strict';
+
+        // Theme toggle, same preference key as the viewer.
+        var themeBtn = document.getElementById('theme-toggle');
+        themeBtn.addEventListener('click', function () {
+            var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+            document.documentElement.dataset.theme = next;
+            try { localStorage.setItem('vr-theme-pref', next); } catch (e) { /* private mode */ }
+        });
+
+        var listEl = document.getElementById('pr-list');
+        var summaryEl = document.getElementById('summary');
+        var hideEmptyEl = document.getElementById('hide-empty');
+        var repoLinkEl = document.getElementById('repo-link');
+
+        var where = VRRepo.repoFromPath(location.pathname);
+        if (!where) {
+            showMessage('That is not a repository URL. Try /{owner}/{repo}.', true);
+            return;
+        }
+        document.title = where.owner + '/' + where.repo + ' — Visual Review';
+        repoLinkEl.textContent = where.owner + '/' + where.repo;
+        repoLinkEl.href = 'https://github.com/' + where.owner + '/' + where.repo + '/pulls';
+        repoLinkEl.target = '_blank';
+        repoLinkEl.rel = 'noopener';
+
+        try {
+            hideEmptyEl.checked = localStorage.getItem('vr-hide-empty') === '1';
+        } catch (e) { /* private mode */ }
+
+        var rows = [];
+        var probed = false;
+
+        hideEmptyEl.addEventListener('change', function () {
+            try {
+                localStorage.setItem('vr-hide-empty', hideEmptyEl.checked ? '1' : '0');
+            } catch (e) { /* private mode */ }
+            draw();
+        });
+
+        function showMessage(text, isError) {
+            listEl.textContent = '';
+            var box = document.createElement('div');
+            box.className = 'message' + (isError ? ' error' : '');
+            box.textContent = text;
+            listEl.appendChild(box);
+            summaryEl.textContent = '';
+        }
+
+        function draw() {
+            VRRepo.renderList(listEl, where.owner, where.repo, rows, {
+                hideEmpty: hideEmptyEl.checked,
+                nowMs: Date.now(),
+            });
+            summaryEl.textContent = VRRepo.summaryText(VRRepo.summarize(rows), probed);
+        }
+
+        function load(withProbe) {
+            return fetch(VRRepo.pullsApiHref(where.owner, where.repo, withProbe))
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.error) { showMessage(data.error, true); return false; }
+                    rows = data.pulls || [];
+                    probed = !!data.probed;
+                    draw();
+                    return true;
+                });
+        }
+
+        // Two requests, in order rather than at once. The first is the cheap
+        // one — no per-PR probing — so the list is on screen while the counts
+        // are still being fetched. They are sequential because both share the
+        // server's list cache: fired together they would both miss it and each
+        // ask GitHub for the same list.
+        load(false)
+            .then(function (ok) { if (ok) return load(true); })
+            .catch(function (err) { showMessage('Could not load pull requests: ' + err, true); });
+    })();
+    </script>
+</body>
+</html>

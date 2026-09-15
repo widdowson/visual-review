@@ -1,5 +1,6 @@
 """Tests for visual-review app — FastAPI endpoint tests."""
 
+import asyncio
 import base64
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _EXT_MIME, IMAGE_EXTENSIONS, _is_image_path, _GH_PAGE_SIZE, _PR_PROBE_CONCURRENCY, _OPEN_PULLS_MAX_PAGES
 
 
 @pytest.fixture(autouse=True)
@@ -1298,3 +1299,500 @@ class TestPrImageCacheHeader:
         # Not merely "not immutable": the error path attaches no image headers
         # at all, so a file that appears later is not shadowed by a cached 404.
         assert resp.headers.get("cache-control") is None
+
+
+# -- Repo page (#39) ----------------------------------------------------------
+
+def _pull(number, *, title=None, head_sha=None, draft=False, labels=(), author="someone"):
+    """One entry as "List pull requests" serves it."""
+    return {
+        "number": number,
+        "title": title or f"PR {number}",
+        "user": {"login": author},
+        "draft": draft,
+        "html_url": f"https://github.com/owner/repo/pull/{number}",
+        "updated_at": "2026-09-15T12:00:00Z",
+        "head": {"ref": f"feature-{number}", "sha": head_sha or f"sha{number}"},
+        "base": {"ref": "main", "sha": "basesha"},
+        "labels": [{"name": name} for name in labels],
+    }
+
+
+class _RepoClient:
+    """A mock httpx.AsyncClient serving a repo's pulls and per-PR file lists.
+
+    ``pull_pages`` is the paged "List pull requests" response, 1-indexed;
+    ``files_by_number`` maps a PR number to its complete file list, which this
+    serves in pages of ``_GH_PAGE_SIZE``. ``list_status`` and
+    ``files_status`` drive failures.
+
+    Every request is recorded on ``.calls`` as ``(url, page)``, because the
+    cost of this page is the whole design constraint: a test that only reads
+    the payload cannot tell one request per PR from four, and a cache that
+    never hits looks exactly like one that does.
+    """
+
+    def __init__(self, pull_pages, files_by_number=None, list_status=None, files_status=None):
+        self.pull_pages = pull_pages
+        self.files_by_number = files_by_number or {}
+        self.list_status = list_status or {}
+        self.files_status = files_status or {}
+        self.calls = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def get(self, url, **kwargs):
+        page = kwargs.get("params", {}).get("page")
+        self.calls.append((url, page))
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            # Yield to the loop so overlapping requests really do overlap;
+            # without this every call runs to completion before the next
+            # starts and the concurrency cap could not be observed.
+            await asyncio.sleep(0)
+            if url.endswith("/files"):
+                number = int(url.split("/pulls/")[1].split("/")[0])
+                status = self.files_status.get(number, 200)
+                resp = MagicMock(status_code=status)
+                if status == 200:
+                    files = self.files_by_number.get(number, [])
+                    start = (page - 1) * _GH_PAGE_SIZE
+                    resp.json.return_value = files[start:start + _GH_PAGE_SIZE]
+                return resp
+            if url.endswith("/pulls"):
+                status = self.list_status.get(page, 200)
+                resp = MagicMock(status_code=status)
+                if status == 200:
+                    resp.json.return_value = (
+                        self.pull_pages[page - 1] if 1 <= page <= len(self.pull_pages) else []
+                    )
+                return resp
+            return MagicMock(status_code=404)
+        finally:
+            self.in_flight -= 1
+
+    def file_requests(self):
+        return [url for url, _ in self.calls if url.endswith("/files")]
+
+    def list_requests(self):
+        return [url for url, _ in self.calls if url.endswith("/pulls")]
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _patched(client):
+    """Patch the token and hand the endpoint our client."""
+    return (
+        patch("app.GITHUB_TOKEN", "fake-token"),
+        patch("httpx.AsyncClient", client),
+    )
+
+
+async def _get(url):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        return await ac.get(url)
+
+
+class TestIsImagePath:
+    """One definition of "image", shared by the viewer and the repo page."""
+
+    def test_known_extensions(self):
+        assert _is_image_path("a/b/shot.png")
+        assert _is_image_path("SHOT.PNG")
+        assert _is_image_path("photos/hero.jpg")
+        assert _is_image_path("baseline.bmp")
+
+    def test_non_images(self):
+        assert not _is_image_path("src/main.py")
+        assert not _is_image_path("README")
+        assert not _is_image_path("notes.txt")
+
+    def test_matches_the_extension_table(self):
+        """It answers for the table, not for a list written out beside it."""
+        for ext in IMAGE_EXTENSIONS:
+            assert _is_image_path(f"dir/file{ext}")
+
+
+class TestRepoPage:
+    @pytest.mark.asyncio
+    async def test_repo_page_returns_html(self):
+        resp = await _get("/owner/repo")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_serves_the_repo_page_not_the_viewer(self):
+        """Both routes return HTML, so status and type cannot tell them apart.
+
+        Without this, pointing the new route at index.html would pass every
+        other assertion here.
+        """
+        repo_page = (await _get("/owner/repo")).text
+        viewer = (await _get("/owner/repo/pr/1")).text
+        assert "/static/repo.js" in repo_page
+        assert "/static/repo.js" not in viewer
+
+    @pytest.mark.asyncio
+    async def test_the_page_script_is_served(self):
+        resp = await _get("/static/repo.js")
+        assert resp.status_code == 200
+        assert "verdictFor" in resp.text
+
+
+class TestShortRepoRedirect:
+    @pytest.mark.asyncio
+    async def test_redirect_by_repo_name(self):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "items": [{"name": "visual-review", "owner": {"login": "widdowson"}}]
+        }
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/visual-review")
+
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/widdowson/visual-review"
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_name_offers_repo_pages(self):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "app", "owner": {"login": "alice"}},
+                {"name": "app", "owner": {"login": "bob"}},
+            ]
+        }
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/app")
+
+        assert resp.status_code == 300
+        urls = [m["url"] for m in resp.json()["matches"]]
+        assert urls == ["/alice/app", "/bob/app"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_identifier_is_404(self):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"items": []}
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/nosuchrepo")
+
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_favicon_costs_no_github_request(self):
+        """A browser asks for /favicon.ico on its own.
+
+        Resolving it would spend a GitHub search — and cache the miss for an
+        hour — on a word no user typed. Asserting the 404 alone would not
+        catch that: a failed search 404s too.
+        """
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=200))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/favicon.ico")
+
+        assert resp.status_code == 404
+        assert instance.get.await_count == 0
+
+
+class TestRepoPulls:
+    @pytest.mark.asyncio
+    async def test_no_token(self):
+        resp = await _get("/api/owner/repo/pulls")
+        assert resp.json()["pulls"] == []
+        assert "GITHUB_TOKEN" in resp.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_counts_images_per_pull_request(self):
+        client = _RepoClient(
+            [[_pull(10, title="Baselines", labels=["lgtm"]), _pull(11, draft=True)]],
+            files_by_number={
+                10: [
+                    {"filename": "tests/visual/a.png"},
+                    {"filename": "tests/visual/b.PNG"},
+                    {"filename": "app.py"},
+                ],
+                11: [{"filename": "README.md"}],
+            },
+        )
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert data["repo"] == "owner/repo"
+        assert data["probed"] is True
+        assert data["truncated"] is False
+        rows = {row["number"]: row for row in data["pulls"]}
+        assert rows[10]["images"] == 2
+        assert rows[10]["image_error"] is None
+        assert rows[10]["title"] == "Baselines"
+        assert rows[10]["labels"] == ["lgtm"]
+        assert rows[11]["images"] == 0
+        assert rows[11]["draft"] is True
+        # One list request, one per PR, and nothing else.
+        assert len(client.list_requests()) == 1
+        assert len(client.file_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_probe_off_is_one_request_and_no_counts(self):
+        """The cheap first request the page makes: rows now, counts after.
+
+        ``images`` stays None rather than 0, because the page renders 0 as
+        "no images" and nothing has been counted yet.
+        """
+        client = _RepoClient([[_pull(1), _pull(2)]], files_by_number={1: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        data = resp.json()
+        assert data["probed"] is False
+        assert [row["images"] for row in data["pulls"]] == [None, None]
+        assert client.file_requests() == []
+        assert len(client.list_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_is_not_an_empty_pr(self):
+        """The one wrong answer this page can give.
+
+        A PR whose file list could not be fetched must not come back as
+        ``images: 0`` — that is the page telling someone a PR is empty when
+        nobody checked.
+        """
+        client = _RepoClient(
+            [[_pull(1), _pull(2)]],
+            files_by_number={2: [{"filename": "a.png"}]},
+            files_status={1: 500},
+        )
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        rows = {row["number"]: row for row in resp.json()["pulls"]}
+        assert rows[1]["images"] is None
+        assert "500" in rows[1]["image_error"]
+        # The failure is contained: the other PR still gets its count.
+        assert rows[2]["images"] == 1
+        assert rows[2]["image_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_is_not_cached(self):
+        """A retry has to be able to succeed.
+
+        Caching the error would pin "could not be checked" to that head SHA
+        for the whole TTL, so a transient 500 would outlive itself by a
+        quarter of an hour.
+        """
+        client = _RepoClient([[_pull(1)]], files_by_number={1: [{"filename": "a.png"}]},
+                             files_status={1: 500})
+        token, http = _patched(client)
+        with token, http:
+            first = await _get("/api/owner/repo/pulls")
+            client.files_status = {}
+            second = await _get("/api/owner/repo/pulls")
+
+        assert first.json()["pulls"][0]["images"] is None
+        assert second.json()["pulls"][0]["images"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_second_visit_asks_github_for_nothing(self):
+        """Both caches, checked by their effect rather than by their keys."""
+        client = _RepoClient([[_pull(1), _pull(2)]],
+                             files_by_number={1: [{"filename": "a.png"}], 2: []})
+        token, http = _patched(client)
+        with token, http:
+            await _get("/api/owner/repo/pulls")
+            calls_after_first = len(client.calls)
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert len(client.calls) == calls_after_first
+        assert [row["images"] for row in resp.json()["pulls"]] == [1, 0]
+
+    @pytest.mark.asyncio
+    async def test_counts_are_not_written_into_the_list_cache(self):
+        """The list cache is keyed on the repo alone.
+
+        A count written into it would outlive the head SHA it was measured
+        against, and would then be served for a PR that has since been pushed
+        to. The summaries have their own per-SHA cache for exactly that.
+        """
+        client = _RepoClient([[_pull(1)]], files_by_number={1: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            await _get("/api/owner/repo/pulls")
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        assert resp.json()["pulls"][0]["images"] is None
+
+    @pytest.mark.asyncio
+    async def test_probe_fan_out_is_capped(self):
+        """The burst GitHub sees is bounded by the semaphore, not by the repo.
+
+        Drop the semaphore and this is 20 requests in flight at once.
+        """
+        pulls = [_pull(n) for n in range(1, 21)]
+        client = _RepoClient([pulls], files_by_number={n: [] for n in range(1, 21)})
+        token, http = _patched(client)
+        with token, http:
+            await _get("/api/owner/repo/pulls")
+
+        assert len(client.file_requests()) == 20
+        assert client.max_in_flight == _PR_PROBE_CONCURRENCY
+
+    @pytest.mark.asyncio
+    async def test_open_pull_requests_past_the_first_page(self):
+        """More than 100 open PRs: every one of them is listed."""
+        page1 = [_pull(n) for n in range(1, 101)]
+        page2 = [_pull(n) for n in range(101, 121)]
+        client = _RepoClient([page1, page2])
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        data = resp.json()
+        assert len(data["pulls"]) == 120
+        assert data["truncated"] is False
+        assert [page for url, page in client.calls if url.endswith("/pulls")] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_a_capped_list_walk_says_so(self):
+        """The walk stops at its page cap and the payload admits it."""
+        pages = [[_pull(n) for n in range(i * 100, i * 100 + 100)]
+                 for i in range(_OPEN_PULLS_MAX_PAGES)]
+        client = _RepoClient(pages)
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert len(data["pulls"]) == _OPEN_PULLS_MAX_PAGES * 100
+        assert len(client.list_requests()) == _OPEN_PULLS_MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_a_pull_requests_files_past_the_first_page_are_counted(self):
+        """A PR's own file list pages too, so the count is not capped at 100."""
+        files = [{"filename": f"shots/s{i:04d}.png"} for i in range(150)]
+        files += [{"filename": f"src/f{i}.py"} for i in range(10)]
+        client = _RepoClient([[_pull(1)]], files_by_number={1: files})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert resp.json()["pulls"][0]["images"] == 150
+        assert len(client.file_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_list_failure_is_reported(self):
+        client = _RepoClient([[_pull(1)]], list_status={1: 404})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert data["pulls"] == []
+        assert "404" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_open_pull_requests(self):
+        client = _RepoClient([[]])
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert resp.json()["pulls"] == []
+        assert "error" not in resp.json()
+
+    @pytest.mark.asyncio
+    async def test_a_pull_request_with_more_files_than_the_walk_serves(self):
+        """The file walk's own cap reaches the payload.
+
+        30 full pages is where ``_gh_paginate`` stops, and the count it
+        reports from there is a floor. Without this, passing ``truncated``
+        through could be cut to a literal False with every other assertion
+        here still green — the page reads that flag to decide between "40
+        images" and "40+ images", and between "no images" and "too many
+        files to check".
+        """
+        files = [{"filename": f"shots/s{i:05d}.png"} for i in range(_GH_PAGE_SIZE * 30)]
+        client = _RepoClient([[_pull(1)]], files_by_number={1: files})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        row = resp.json()["pulls"][0]
+        assert row["images_truncated"] is True
+        assert row["images"] == _GH_PAGE_SIZE * 30
+        assert len(client.file_requests()) == 30
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_is_not_a_list_is_an_error(self):
+        """GitHub answering 200 with an object would otherwise be walked.
+
+        ``items.extend`` over a dict extends with its *keys*, so an error
+        object would arrive as a handful of files named "message" and
+        "documentation_url" — a list the page would render as real.
+        """
+        client = _RepoClient([[_pull(1)]])
+        client.pull_pages = [{"message": "Moved Permanently"}]
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert data["pulls"] == []
+        assert "dict" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_transport_failure_is_reported_not_raised(self):
+        """A connection that never answers is an error message, not a 500."""
+        class _Exploding:
+            async def get(self, url, **kwargs):
+                raise RuntimeError("connection reset")
+
+            def __call__(self, *a, **kw):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient", _Exploding()):
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert resp.status_code == 200
+        assert resp.json()["pulls"] == []
+        assert "connection reset" in resp.json()["error"]

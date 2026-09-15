@@ -4,6 +4,7 @@ Proxies image files from GitHub's API and serves a single-page app for
 side-by-side, crossfade, swipe, and diff overlay comparisons.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -62,6 +63,19 @@ def _mime_for_path(path: str) -> str:
     return _EXT_MIME.get(f".{ext}", "image/png")
 
 
+def _is_image_path(path: str) -> bool:
+    """Whether a changed file is one this tool can show.
+
+    Extension only, read from the same table that gives the MIME type. It is
+    a function rather than the test written out at each call site so that the
+    repo page's count of a PR's images and the viewer's list of them cannot
+    come to disagree about what an image is — a page reporting "3 images" over
+    a viewer showing two would be worse than no page at all.
+    """
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return f".{ext}" in IMAGE_EXTENSIONS
+
+
 # -- Helpers -------------------------------------------------------------------
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -92,6 +106,77 @@ def _gh_headers() -> dict[str, str]:
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
     }
+
+
+# -- Paginated GitHub list endpoints -------------------------------------------
+
+# GitHub clamps ``per_page`` to 100 on every list endpoint, so asking for more
+# just wastes the round trip.
+_GH_PAGE_SIZE = 100
+
+# "List pull request files" serves at most 3000 files, i.e. 30 pages of 100.
+# The loop stops there itself rather than trusting the sequence to end, so a
+# change at GitHub's end can cost a truncated list but never an endless walk.
+_GH_MAX_PAGES = 30
+
+
+class _GitHubError(Exception):
+    """A GitHub API list request could not be completed.
+
+    ``status_code`` is the HTTP status that stopped the walk, or ``None`` when
+    the request succeeded but the body was not the list the endpoint promises.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _gh_paginate(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    params: dict[str, Any] | None = None,
+    max_pages: int = _GH_MAX_PAGES,
+) -> tuple[list[Any], bool]:
+    """Read every page of a GitHub list endpoint.
+
+    Returns ``(items, truncated)``. ``truncated`` is true when the walk ran
+    out of pages rather than reaching a short one, so the list may be
+    incomplete — it does not establish that more remained. Exactly
+    ``max_pages`` full pages with nothing beyond them reports true, because
+    settling it would cost a probe request for a page the caller has already
+    decided not to read. The flag errs toward "may be incomplete", which is
+    the direction that matters to a caller deciding whether to say so.
+    Raises :class:`_GitHubError` if any page fails.
+
+    Pages are walked by incrementing ``page`` rather than by following the
+    ``Link: rel="next"`` header. Both terminate correctly; counting means the
+    ``Authorization`` header is only ever sent to a URL this function built,
+    and it makes ``max_pages`` a straightforward bound on the walk.
+
+    A short page ends the sequence, so an item count that is an exact multiple
+    of ``_GH_PAGE_SIZE`` *below the cap* costs one extra request that comes
+    back empty.
+    """
+    items: list[Any] = []
+    base_params = dict(params or {})
+    base_params["per_page"] = _GH_PAGE_SIZE
+
+    for page in range(1, max_pages + 1):
+        resp = await client.get(url, headers=headers, params={**base_params, "page": page})
+        if resp.status_code != 200:
+            raise _GitHubError(f"HTTP {resp.status_code}", resp.status_code)
+
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise _GitHubError(f"expected a list of items, got {type(batch).__name__}")
+
+        items.extend(batch)
+        if len(batch) < _GH_PAGE_SIZE:
+            return items, False
+
+    return items, True
 
 
 # -- Repo resolver for short URLs ---------------------------------------------
@@ -193,7 +278,16 @@ async def _resolve_repo(identifier: str) -> list[tuple[str, str]]:
 
 # -- Static files --------------------------------------------------------------
 static_dir = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# ``follow_symlink`` because a Bazel runfiles tree is symlinks into the source
+# tree, and Starlette's default treats a symlink pointing outside the mounted
+# directory as an escape attempt and 404s it. Under `bazel run //:server` that
+# is every asset: the repo page's script, and the favicon the viewer asks for.
+# The container is not affected — py_image_layer tars real files — so this is
+# the local run that the tests and a reviewer's browser use. Nothing untrusted
+# ever lands in this directory; its contents are the two pages and the icon,
+# shipped with the app.
+app.mount("/static", StaticFiles(directory=static_dir, follow_symlink=True), name="static")
 
 
 @app.get("/health")
@@ -208,6 +302,12 @@ async def health_check():
 async def visual_review_page(owner: str, repo: str, number: int):
     """Serve the visual review SPA for any owner/repo/PR."""
     return FileResponse(os.path.join(static_dir, "index.html"))
+
+
+@app.get("/{owner}/{repo}")
+async def repo_page(owner: str, repo: str):
+    """Serve the repo page listing a repository's open pull requests."""
+    return FileResponse(os.path.join(static_dir, "repo.html"))
 
 
 @app.get("/{identifier}/pr/{number}")
@@ -232,6 +332,55 @@ async def short_url_redirect(identifier: str, number: int):
                 "identifier": identifier,
                 "matches": [
                     {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}/pr/{number}"}
+                    for owner, repo in matches
+                ],
+            },
+        )
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"Repository not found: {identifier}"},
+    )
+
+
+# Single-segment paths a browser asks for on its own. Resolving one costs a
+# GitHub search request, so they are answered here instead: a page view that
+# declares no icon otherwise spends a search — and an hour of cache — on the
+# word "favicon.ico".
+_RESERVED_IDENTIFIERS = frozenset({
+    "favicon.ico",
+    "robots.txt",
+    "sitemap.xml",
+    "apple-touch-icon.png",
+    "apple-touch-icon-precomposed.png",
+})
+
+
+@app.get("/{identifier}")
+async def short_repo_redirect(identifier: str):
+    """Resolve a short repo identifier and 302-redirect to its repo page.
+
+    The repo-page counterpart of :func:`short_url_redirect`, so that a short
+    link keeps working with the PR number taken off the end: ``/im495z/pr/50``
+    names a PR and ``/im495z`` names the repository it belongs to.
+    """
+    if identifier in _RESERVED_IDENTIFIERS:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
+    matches = await _resolve_repo(identifier)
+
+    if len(matches) == 1:
+        owner, repo = matches[0]
+        return RedirectResponse(url=f"/{owner}/{repo}", status_code=302)
+
+    if len(matches) > 1:
+        return JSONResponse(
+            status_code=300,
+            content={
+                "error": "Ambiguous repository name",
+                "identifier": identifier,
+                "matches": [
+                    {"owner": owner, "repo": repo, "url": f"/{owner}/{repo}"}
                     for owner, repo in matches
                 ],
             },
@@ -308,8 +457,7 @@ async def pr_images(owner: str, repo: str, number: int):
 
             for f in files:
                 filename = f.get("filename", "")
-                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-                if f".{ext}" in IMAGE_EXTENSIONS:
+                if _is_image_path(filename):
                     entry = {
                         "path": filename,
                         "status": f.get("status", "modified"),
@@ -622,6 +770,186 @@ async def pr_checks(owner: str, repo: str, number: int):
         return {"error": str(e)}
 
 
+# -- Repo page: a repository's open pull requests ------------------------------
+
+# How wide the per-PR fan-out below runs. Each probe is one GitHub request on
+# a cold cache, so this bounds both the burst GitHub sees and the number of
+# sockets one page view opens, without making a repo with thirty open PRs wait
+# for thirty serial round trips.
+_PR_PROBE_CONCURRENCY = 6
+
+# The open-PR list is short-lived: a PR opened, merged or retitled should show
+# up on the next visit rather than in a quarter of an hour.
+_OPEN_PULLS_TTL = 60
+
+# An image count, by contrast, is keyed on the head SHA, so a push changes the
+# key rather than ageing the value. The TTL is a floor on how long a count for
+# a *withdrawn* SHA occupies memory, not a staleness window for a live one.
+# The one thing that can move under a fixed head is the merge base: GitHub
+# diffs a PR against it, so a file can leave the diff when the base branch
+# gains it. That is a count off by one on a listing page, and it is corrected
+# within the quarter hour.
+_PR_IMAGE_SUMMARY_TTL = 900
+
+# 1000 open pull requests. Unlike the file list, this is not GitHub's own
+# ceiling — it is a bound on how much work one page view can ask for.
+_OPEN_PULLS_MAX_PAGES = 10
+
+
+def _pull_row(pull: dict) -> dict:
+    """The fields the repo page shows, from a "List pull requests" entry.
+
+    ``images`` is left None here and filled in by the probe, so a row that was
+    never probed and a row whose probe failed are distinguishable from a row
+    with no images — the page must never present either as "no images".
+    """
+    head = pull.get("head") or {}
+    base = pull.get("base") or {}
+    return {
+        "number": pull.get("number"),
+        "title": pull.get("title", ""),
+        "author": (pull.get("user") or {}).get("login", ""),
+        "draft": bool(pull.get("draft", False)),
+        "html_url": pull.get("html_url", ""),
+        "updated_at": pull.get("updated_at"),
+        "head_ref": head.get("ref", ""),
+        "head_sha": head.get("sha", ""),
+        "base_ref": base.get("ref", ""),
+        "labels": [lbl.get("name", "") for lbl in (pull.get("labels") or [])],
+        "images": None,
+        "images_truncated": False,
+        "image_error": None,
+    }
+
+
+async def _pr_image_summary(
+    client: httpx.AsyncClient,
+    github_repo: str,
+    number: int,
+    head_sha: str,
+    headers: dict[str, str],
+) -> dict:
+    """How many image files one PR changes.
+
+    Returns ``{"images": int, "truncated": bool}``, or ``{"error": str}`` when
+    GitHub could not be asked. An error is deliberately **not** cached and
+    carries no count: "we could not tell" has to stay distinct from "none" all
+    the way to the page, because the two read identically to whoever is
+    deciding which PRs to open.
+    """
+    cache_key = f"pr_image_summary:{github_repo}:{number}:{head_sha}"
+    cached = _cache_get(cache_key, _PR_IMAGE_SUMMARY_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        files, truncated = await _gh_paginate(
+            client,
+            f"https://api.github.com/repos/{github_repo}/pulls/{number}/files",
+            headers,
+        )
+    except _GitHubError as e:
+        return {"error": f"Files request failed: {e}"}
+
+    summary = {
+        "images": sum(1 for f in files if _is_image_path(f.get("filename", ""))),
+        "truncated": truncated,
+    }
+    _cache_set(cache_key, summary)
+    return summary
+
+
+@app.get("/api/{owner}/{repo}/pulls")
+async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
+    """List a repository's open PRs, with how many images each one changes.
+
+    Cost, which is the whole design constraint here — the page lists *every*
+    open PR, so anything per-PR is multiplied by however many are open:
+
+    - one request for the list itself, plus one more per additional 100 open
+      PRs;
+    - one request per PR to count its images, only on a cache miss, and only
+      when ``probe`` is set.
+
+    So N open PRs cost 1 + N requests cold and 1 warm. The page asks twice —
+    ``probe=0`` first, which is the single cheap request that puts the rows on
+    screen, then the full one that fills in the counts — so the list is never
+    waiting on the fan-out. Both answers share the list cache, so the second
+    request adds no list request of its own.
+    """
+    github_repo = f"{owner}/{repo}"
+
+    if not GITHUB_TOKEN:
+        return JSONResponse(
+            content={"error": "No GITHUB_TOKEN configured", "pulls": []},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    headers = _gh_headers()
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            list_cache_key = f"open_pulls:{github_repo}"
+            listing = _cache_get(list_cache_key, _OPEN_PULLS_TTL)
+            if listing is None:
+                try:
+                    pulls, truncated = await _gh_paginate(
+                        client,
+                        f"https://api.github.com/repos/{github_repo}/pulls",
+                        headers,
+                        params={"state": "open", "sort": "updated", "direction": "desc"},
+                        max_pages=_OPEN_PULLS_MAX_PAGES,
+                    )
+                except _GitHubError as e:
+                    return JSONResponse(
+                        content={"error": f"Pull request list failed: {e}", "pulls": []},
+                        headers={"Cache-Control": "no-store"},
+                    )
+                listing = {
+                    "pulls": [_pull_row(p) for p in pulls],
+                    "truncated": truncated,
+                }
+                _cache_set(list_cache_key, listing)
+
+            # Copied out of the cache before anything is filled in. The cached
+            # listing is keyed on the repository alone, so a probe result
+            # written into it would outlive the head SHA it was measured
+            # against; the summaries have their own per-SHA cache for that.
+            rows = [dict(row) for row in listing["pulls"]]
+
+            if probe and rows:
+                limit = asyncio.Semaphore(_PR_PROBE_CONCURRENCY)
+
+                async def fill(row: dict) -> None:
+                    async with limit:
+                        summary = await _pr_image_summary(
+                            client, github_repo, row["number"], row["head_sha"], headers,
+                        )
+                    if "error" in summary:
+                        row["image_error"] = summary["error"]
+                    else:
+                        row["images"] = summary["images"]
+                        row["images_truncated"] = summary["truncated"]
+
+                await asyncio.gather(*(fill(row) for row in rows))
+
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e), "pulls": []},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    return JSONResponse(
+        content={
+            "repo": github_repo,
+            "pulls": rows,
+            "truncated": listing["truncated"],
+            "probed": probe,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 # -- Root redirect -------------------------------------------------------------
 
 @app.get("/")
@@ -631,4 +959,5 @@ async def root():
         "app": "Visual Review",
         "usage": "Navigate to /{owner}/{repo}/pr/{number} to review a PR's visual changes.",
         "short_urls": "Also supports /{repo_name}/pr/{number}, /{repo_id}/pr/{number}, and /{base36_id}/pr/{number}.",
+        "repo_page": "Navigate to /{owner}/{repo} to list a repository's open pull requests and see which of them change images.",
     })

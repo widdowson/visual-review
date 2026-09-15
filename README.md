@@ -5,6 +5,7 @@ A standalone tool for reviewing visual changes (PNG screenshots) in GitHub pull 
 ## Features
 
 - **Multi-repo support** — one deployment serves any GitHub repository via `/{owner}/{repo}/pr/{number}`
+- **Repo page** — `/{owner}/{repo}` lists every open pull request and says which of them change images, so you can tell what is worth opening without checking each one on GitHub
 - **4 comparison modes** — side-by-side, crossfade, swipe slider, and pixel diff overlay
 - **Pixel loupe** — hold Shift to magnify and inspect individual pixels across base, current, and diff views
 - **Diff gutter** — minimap showing which rows have changes, with scroll indicators

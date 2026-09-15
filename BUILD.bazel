@@ -38,6 +38,8 @@ py_binary(
         "image_extensions.json",
         "static/favicon.svg",
         "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
     ],
     deps = [":app_lib"],
 )
@@ -52,7 +54,12 @@ py_test(
         "tests/__init__.py",
     ],
     args = ["tests/test_app.py"],
-    data = ["image_extensions.json"],
+    data = [
+        "image_extensions.json",
+        "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
+    ],
     main = "tests/run_tests.py",
     deps = [
         ":app_lib",
@@ -83,6 +90,16 @@ js_test(
         "static/index.html",
         "tests/spa_source.js",
     ],
+)
+
+# The repo page's logic is a module rather than a region of its HTML, so this
+# requires it directly. static/repo.js is the entry point's own dependency —
+# without it in data an edit to the page's logic changes no input of this
+# target and the test takes a cache hit against the change.
+js_test(
+    name = "test_repo_page",
+    entry_point = "tests/test_repo_page.js",
+    data = ["static/repo.js"],
 )
 
 # ── OCI container image ─────────────────────────────────────────────────────
