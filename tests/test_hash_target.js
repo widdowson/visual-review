@@ -251,6 +251,22 @@ function driver(opts) {
     'the written hash must be encoded, not the raw name');
 }
 
+// A collision that also needs encoding, with its partner away from index 0.
+// This is the only write case that composes all three of the things the call
+// site does, and it takes three mutations that each survive every other case:
+// the two functions nested the wrong way round — which encodes first, so the
+// basename matches nothing and the collision is never found — a collision
+// search that stops short of the partner, and no encode at all. Round 3 of
+// this PR's review measured the first two, and the first is an ordinary
+// refactoring slip whose consequence is #20 itself.
+{
+  const WIDE = files(['z/other.png', 'a/cuj 01 login.bmp', 'b/cuj 01 login.bmp']);
+  const d = driver({images: WIDE});
+  d.selectFile('b/cuj 01 login.bmp');
+  assert.strictEqual(d.hash(), '#b/cuj%2001%20login.bmp',
+    'a colliding path that needs encoding must be written whole AND encoded');
+}
+
 // An uncollided file still gets the short form, which is the common case.
 {
   const d = driver({images: COLLIDING});
