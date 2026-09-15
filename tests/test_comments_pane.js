@@ -72,10 +72,16 @@ assertPasses('resizeCommentsPane', bodyOf('resizeCommentsPane'), [
   ['minPaneHeight', 'COMMENTS_PANE_TUNING.minPaneHeight'],
   ['minViewportHeight', 'COMMENTS_PANE_TUNING.minViewportHeight'],
 ]);
+// Anchored through the unit, not just to the callee's open paren. maxHeight is
+// a <length>: assigning the bare number 300 is an invalid value, CSSOM drops
+// the declaration silently, and the pane keeps its CSS cap at every pointer
+// position — measured, inline stays '' and computed stays 270px. Its sibling
+// assignment below takes a bare number, which is why the two look alike and
+// only this one needs the unit.
 assert.ok(
-  /commentsSection\s*\.\s*style\s*\.\s*maxHeight\s*=\s*computeCommentsPaneHeight\s*\(/
+  /commentsSection\s*\.\s*style\s*\.\s*maxHeight\s*=\s*computeCommentsPaneHeight\s*\([\s\S]*?\)\s*\+\s*'px'/
     .test(bodyOf('resizeCommentsPane')),
-  'resizeCommentsPane must assign the clamped height to the pane');
+  'resizeCommentsPane must assign the clamped height to the pane, in px');
 
 // ...and the three handlers that make the drag happen. All are named in the SPA
 // so this can read them: any one of them emptied leaves the pane unresizable,
@@ -185,7 +191,8 @@ function unconditionalRules(sheet, selector) {
   return out;
 }
 
-const caps = unconditionalRules(css, '.comments-section')
+const paneRules = unconditionalRules(css, '.comments-section');
+const caps = paneRules
   .map((rule) => rule.match(/max-height:\s*([\d.]+)vh/))
   .filter(Boolean);
 assert.strictEqual(caps.length, 1,
@@ -196,14 +203,34 @@ assert.strictEqual(caps.length, 1,
 // the column, which is shorter — at 1440x900 the window is 900 and the column
 // 766 — so a cap reads as a larger share of the column than of the window. For
 // the comparator to keep at least half the 766px column the cap must be at most
-// 383px, i.e. 42.5vh; 40 is that with margin, and the shipped 30vh (270px,
-// leaving the comparator 496px) clears it comfortably. Note what this rules out
-// and what it does not: at 50vh the pane would be 450px against a 316px
-// comparator, the majority of the column, which is why 50 is not the bound.
+// 383px, i.e. 42.5vh. The bound is 40, which is that with a little margin, so
+// 41 and 42 are inside the constraint and outside the bound; the shipped 30vh
+// (270px, leaving the comparator 496px) clears both comfortably. What this rules
+// out: at 50vh the pane would take 450px of the 766px column and leave the
+// comparator 316px, the pane holding the majority — which is why 50 is not the
+// bound. All of it is the geometry of one window size, since the cap is a
+// fraction of the window while the constraint is a fraction of the column, and
+// those track each other only while the chrome between them is a fixed height.
 assert.ok(Number(caps[0][1]) > 0 && Number(caps[0][1]) <= 40,
-  'the initial cap must leave the image comparator at least half the column at ' +
-  'the 900px window this file is measured against — above 40vh it does not — got ' +
-  caps[0][1] + 'vh');
+  'the initial cap must be at most 40vh, the bound at which the image comparator ' +
+  'still keeps half the column at the 900px window this file is measured ' +
+  'against (42.5vh, with margin) — got ' + caps[0][1] + 'vh');
+// The pane is a flex column, which is what gives the scroll body a bounded
+// height to scroll within. Both declarations are load-bearing and neither is
+// implied by the overflow checks below, so both are pinned. Measured with 12
+// comments at 1440x900: as a block box the scroll body's clientHeight becomes
+// its scrollHeight (263 -> 1129), so there is nothing to scroll, the pane opens
+// on the *oldest* comment — the inverse of the issue — and 866px of content
+// spills out of the 30vh box, which no longer clips. In row direction the
+// handle is laid out beside the body at its content width, 800px -> 0px, and
+// cannot be grabbed at all.
+for (const [label, declaration] of [
+  ['display: flex', /display:\s*flex/],
+  ['flex-direction: column', /flex-direction:\s*column/],
+]) {
+  assert.ok(paneRules.some((rule) => declaration.test(rule)),
+    '.comments-section must be a flex column (' + label + ')');
+}
 // The body must be the thing that scrolls: a pane that scrolls as a whole puts
 // its drag handle over whatever comment it is scrolled against. Checked over
 // every .comments-section rule, nested ones included.
