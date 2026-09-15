@@ -122,4 +122,31 @@ function checked(name, body) {
   return body;
 }
 
-module.exports = { extract, bodyOf };
+// The SPA's one <style> block, with CSS comments stripped. Shared for the same
+// reason the rest of this file is: a test that re-derives the runfiles path and
+// re-implements the comment strip drifts from this one silently. Scoped to the
+// block rather than the whole document so a `{` in a JS string cannot be walked
+// as if it opened a rule.
+function stylesheet() {
+  const open = html.indexOf('<style>');
+  const close = html.indexOf('</style>', open);
+  assert.ok(open >= 0 && close > open, 'static/index.html must contain a <style> block');
+  assert.strictEqual(html.indexOf('<style>', open + 1), -1,
+    'static/index.html must contain exactly one <style> block');
+  // CSS has no `//` comment form, so the block form is the whole strip.
+  return html.slice(open + '<style>'.length, close).replace(/\/\*[\s\S]*?\*\//g, ' ');
+}
+
+// Everything outside that <style> block, with JS comments already stripped.
+// For the checks that have to look outside any one function — that a named
+// handler is registered on an event, say — where `bodyOf` cannot reach and the
+// stylesheet would only add false matches.
+function scriptSource() {
+  const open = htmlWithoutComments.indexOf('<style>');
+  const close = htmlWithoutComments.indexOf('</style>', open);
+  assert.ok(open >= 0 && close > open, 'static/index.html must contain a <style> block');
+  return htmlWithoutComments.slice(0, open) +
+    htmlWithoutComments.slice(close + '</style>'.length);
+}
+
+module.exports = { extract, bodyOf, stylesheet, scriptSource };
