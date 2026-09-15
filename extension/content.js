@@ -40,8 +40,10 @@
   // extension matches against until the server's answer arrives — and
   // whatever happens, if that answer never does. So a format added on the
   // server reaches an already-installed extension without a rebuild, and a
-  // server that is down, blocked or answering nonsense leaves the extension
-  // behaving exactly as it did before this was added.
+  // server that is down, refusing, answering nonsense, or accepting the
+  // connection and never answering — the request is bounded, see
+  // fetchTimeoutSignal — leaves the extension behaving exactly as it did
+  // before this was added.
   //
   // The region below is marked because extension/test_extensions_fetch.js
   // extracts and runs this source rather than keeping its own copy of it.
@@ -124,8 +126,13 @@
   // undefined is a valid `signal`, so a browser without it gets the unbounded
   // request it would have had before any of this — which is the fallback
   // behaviour this whole region promises.
+  //
+  // Only .timeout is checked. AbortSignal itself has existed since Chrome 66
+  // and MV3 loads from 88, so there is no browser that can run this extension
+  // and lack it — a `typeof AbortSignal !== 'undefined'` conjunct would be a
+  // branch no run could enter, here or in a test.
   function fetchTimeoutSignal() {
-    return (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+    return (typeof AbortSignal.timeout === 'function')
       ? AbortSignal.timeout(EXT_FETCH_TIMEOUT_MS)
       : undefined;
   }

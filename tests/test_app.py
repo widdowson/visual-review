@@ -141,7 +141,11 @@ class TestExtensionsEndpoint:
 
         cache_control = resp.headers.get("cache-control", "")
         assert "public" in cache_control, cache_control
-        assert "max-age=" in cache_control, cache_control
+        # The value, not just its presence. The docstring on the endpoint
+        # gives this hour a job — it is the only thing bounding the request
+        # rate of a client whose localStorage never holds — so it can no more
+        # move unnoticed than the client's own 5s budget can.
+        assert "max-age=3600" in cache_control, cache_control
 
     @pytest.mark.asyncio
     async def test_answers_cross_origin(self):
