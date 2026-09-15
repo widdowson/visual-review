@@ -62,6 +62,35 @@ def _mime_for_path(path: str) -> str:
     return _EXT_MIME.get(f".{ext}", "image/png")
 
 
+def _is_safe_image_path(path: str) -> bool:
+    """Whether ``path`` is a safe relative path to an image inside a repo.
+
+    The ``path`` query parameter of :func:`pr_image` is interpolated straight
+    into the GitHub contents URL, and httpx performs RFC 3986 dot-segment
+    removal when it builds that URL — so ``../`` segments are collapsed
+    *before* the request goes out, retargeting the call at another repository
+    and returning its bytes under the deployment token (issue #37). Percent
+    encoding does not survive query parsing to reach this check, so literal
+    ``../`` segments are the working input; validate the decoded value.
+
+    A path is safe only when every one of these holds:
+
+    - it is non-empty and does not start with ``/`` (no absolute paths);
+    - no backslashes (a normalized-separator dodge);
+    - every ``/``-delimited segment is non-empty and is neither ``.`` nor
+      ``..`` (no dot segments, no ``//`` runs);
+    - its extension is one the endpoint can actually serve
+      (``IMAGE_EXTENSIONS``) — a path it could not serve anyway.
+    """
+    if not path or path.startswith("/") or "\\" in path:
+        return False
+    segments = path.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return False
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return f".{ext}" in IMAGE_EXTENSIONS
+
+
 # -- Helpers -------------------------------------------------------------------
 
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -446,6 +475,10 @@ async def pr_image(
 ):
     """Proxy image content from a specific git ref via GitHub contents API."""
     github_repo = f"{owner}/{repo}"
+
+    if not _is_safe_image_path(path):
+        logger.warning("pr_image: rejected unsafe path=%r", path)
+        return Response(content=b"Invalid image path", status_code=400)
 
     if not GITHUB_TOKEN:
         logger.error("pr_image: no GITHUB_TOKEN configured")
