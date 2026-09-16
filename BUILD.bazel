@@ -81,9 +81,12 @@ py_test(
 # the target takes a cache hit instead of running.
 py_test(
     name = "test_spa_prefetch",
-    # "medium" despite an ~8s happy path, which earns Bazel's "size is too big"
-    # advisory: a total-prefetch-failure mutant spends 66s in wait_until
-    # timeouts before reporting, and a browser is not a small-size workload.
+    # "medium" despite an ~9s happy path, which earns Bazel's "size is too big"
+    # advisory: a total-prefetch-failure mutant spends ~83s in wait_until
+    # timeouts before reporting, against medium's 300s cap, and a browser is
+    # not a small-size workload. That number moves with every wait added — it
+    # was 66s until this file's own adoption test added a 15s gate — so read
+    # the headroom rather than the figure.
     size = "medium",
     srcs = [
         "tests/__init__.py",
