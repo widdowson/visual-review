@@ -6,6 +6,7 @@ load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
 
 exports_files([
+    "browsers.1.57.0.json",
     "image_extensions.json",
     "requirements_lock.txt",
 ])
@@ -38,6 +39,8 @@ py_binary(
         "image_extensions.json",
         "static/favicon.svg",
         "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
     ],
     deps = [":app_lib"],
 )
@@ -52,13 +55,65 @@ py_test(
         "tests/__init__.py",
     ],
     args = ["tests/test_app.py"],
-    data = ["image_extensions.json"],
+    data = [
+        "image_extensions.json",
+        "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
+    ],
     main = "tests/run_tests.py",
     deps = [
         ":app_lib",
         requirement("httpx"),
         requirement("pytest"),
         requirement("pytest-asyncio"),
+    ],
+)
+
+# Browser-driven tests for the SPA (#21). Everything the page does with state —
+# adopting an in-flight prefetch, aborting an abandoned load, the hashchange
+# re-entry guard — needs a DOM, so it cannot be reached by the extraction tests
+# below. This target drives the real page in hermetic Chromium against a fake
+# backend whose request log is what the assertions read.
+#
+# static/index.html is the code under test, so it is in data for the same
+# reason it is below: without it an index.html-only edit changes no input and
+# the target takes a cache hit instead of running.
+py_test(
+    name = "test_spa_prefetch",
+    # "medium" despite an ~9s happy path, which earns Bazel's "size is too big"
+    # advisory: a total-prefetch-failure mutant spends ~83s in wait_until
+    # timeouts before reporting, against medium's 300s cap, and a browser is
+    # not a small-size workload. That number moves with every wait added — it
+    # was 66s until this file's own adoption test added a 15s gate — so read
+    # the headroom rather than the figure.
+    size = "medium",
+    srcs = [
+        "tests/__init__.py",
+        "tests/fixture_server.py",
+        "tests/run_tests.py",
+        "tests/spa_harness.py",
+        "tests/test_spa_prefetch.py",
+    ],
+    args = ["tests/test_spa_prefetch.py"],
+    data = [
+        "browsers.1.57.0.json",
+        "static/index.html",
+        "@playwright//:chromium-headless-shell",
+    ],
+    env = {
+        "BAZEL_PLAYWRIGHT_CHROMIUM": "$(rlocationpath @playwright//:chromium-headless-shell)",
+    },
+    main = "tests/run_tests.py",
+    tags = ["browser"],
+    deps = [
+        # The fixture asks app.py for the image Cache-Control rather than
+        # copying the literal, so that "the immutable header is load-bearing"
+        # cannot go on being asserted about a header production stopped
+        # sending.
+        ":app_lib",
+        requirement("playwright"),
+        requirement("pytest"),
     ],
 )
 
@@ -127,6 +182,24 @@ js_test(
     data = [
         "static/index.html",
         "tests/spa_source.js",
+    ],
+)
+
+# The repo page's logic is a module rather than a region of its HTML, so this
+# requires it directly. static/repo.js is the entry point's own dependency —
+# without it in data an edit to the page's logic changes no input of this
+# target and the test takes a cache hit against the change.
+js_test(
+    name = "test_repo_page",
+    entry_point = "tests/test_repo_page.js",
+    # repo.html as well as repo.js: the harness runs the page's inline script
+    # and the wiring check reads it as text, and an undeclared input is not in
+    # the sandbox *and* is not a cache key — so such a check fails here and,
+    # once passing, takes a cache hit on the very edit it exists to catch.
+    data = [
+        "static/repo.html",
+        "static/repo.js",
+        "tests/repo_page_harness.js",
     ],
 )
 

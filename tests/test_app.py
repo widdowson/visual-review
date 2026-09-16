@@ -1,17 +1,21 @@
 """Tests for visual-review app — FastAPI endpoint tests."""
 
+import asyncio
 import base64
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi.staticfiles import StaticFiles
 from httpx import ASGITransport, AsyncClient
 
 # Ensure the app module is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES
+from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS, _is_image_path, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES, _PR_PROBE_CONCURRENCY, _OPEN_PULLS_MAX_PAGES, _pr_image_summary
 
 
 @pytest.fixture(autouse=True)
@@ -2436,7 +2440,630 @@ class TestPrImageCacheHeader:
         assert resp.headers.get("cache-control") is None
 
 
-# -- Client disconnect ---------------------------------------------------------
+# -- Repo page (#39) ----------------------------------------------------------
+
+def _pull(number, *, title=None, head_sha=None, draft=False, labels=(), author="someone"):
+    """One entry as "List pull requests" serves it."""
+    return {
+        "number": number,
+        "title": title or f"PR {number}",
+        "user": {"login": author},
+        "draft": draft,
+        "html_url": f"https://github.com/owner/repo/pull/{number}",
+        "updated_at": "2026-09-15T12:00:00Z",
+        "head": {"ref": f"feature-{number}", "sha": head_sha or f"sha{number}"},
+        "base": {"ref": "main", "sha": "basesha"},
+        "labels": [{"name": name} for name in labels],
+    }
+
+
+class _RepoClient:
+    """A mock httpx.AsyncClient serving a repo's pulls and per-PR file lists.
+
+    ``pull_pages`` is the paged "List pull requests" response, 1-indexed;
+    ``files_by_number`` maps a PR number to its complete file list, which this
+    serves in pages of ``_GH_PAGE_SIZE``. ``list_status`` and
+    ``files_status`` drive failures.
+
+    Every request is recorded on ``.calls`` as ``(url, page)``, because the
+    cost of this page is the whole design constraint: a test that only reads
+    the payload cannot tell one request per PR from four, and a cache that
+    never hits looks exactly like one that does.
+    """
+
+    def __init__(self, pull_pages, files_by_number=None, list_status=None, files_status=None):
+        self.pull_pages = pull_pages
+        self.files_by_number = files_by_number or {}
+        self.list_status = list_status or {}
+        self.files_status = files_status or {}
+        self.calls = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def get(self, url, **kwargs):
+        page = kwargs.get("params", {}).get("page")
+        self.calls.append((url, page))
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            # Yield to the loop so overlapping requests really do overlap;
+            # without this every call runs to completion before the next
+            # starts and the concurrency cap could not be observed.
+            await asyncio.sleep(0)
+            if url.endswith("/files"):
+                number = int(url.split("/pulls/")[1].split("/")[0])
+                status = self.files_status.get(number, 200)
+                resp = MagicMock(status_code=status)
+                if status == 200:
+                    files = self.files_by_number.get(number, [])
+                    start = (page - 1) * _GH_PAGE_SIZE
+                    resp.json.return_value = files[start:start + _GH_PAGE_SIZE]
+                return resp
+            if url.endswith("/pulls"):
+                status = self.list_status.get(page, 200)
+                resp = MagicMock(status_code=status)
+                if status == 200:
+                    resp.json.return_value = (
+                        self.pull_pages[page - 1] if 1 <= page <= len(self.pull_pages) else []
+                    )
+                return resp
+            return MagicMock(status_code=404)
+        finally:
+            self.in_flight -= 1
+
+    def file_requests(self):
+        return [url for url, _ in self.calls if url.endswith("/files")]
+
+    def list_requests(self):
+        return [url for url, _ in self.calls if url.endswith("/pulls")]
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _patched(client):
+    """Patch the token and hand the endpoint our client."""
+    return (
+        patch("app.GITHUB_TOKEN", "fake-token"),
+        patch("httpx.AsyncClient", client),
+    )
+
+
+async def _get(url):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        return await ac.get(url)
+
+
+class TestIsImagePath:
+    """One definition of "image", shared by the viewer and the repo page."""
+
+    def test_known_extensions(self):
+        assert _is_image_path("a/b/shot.png")
+        assert _is_image_path("SHOT.PNG")
+        assert _is_image_path("photos/hero.jpg")
+        assert _is_image_path("baseline.bmp")
+
+    def test_non_images(self):
+        assert not _is_image_path("src/main.py")
+        assert not _is_image_path("README")
+        assert not _is_image_path("notes.txt")
+
+    def test_matches_the_extension_table(self):
+        """It answers for the table, not for a list written out beside it."""
+        for ext in IMAGE_EXTENSIONS:
+            assert _is_image_path(f"dir/file{ext}")
+
+
+class TestRepoPage:
+    @pytest.mark.asyncio
+    async def test_repo_page_returns_html(self):
+        resp = await _get("/owner/repo")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_serves_the_repo_page_not_the_viewer(self):
+        """Both routes return HTML, so status and type cannot tell them apart.
+
+        Without this, pointing the new route at index.html would pass every
+        other assertion here.
+        """
+        repo_page = (await _get("/owner/repo")).text
+        viewer = (await _get("/owner/repo/pr/1")).text
+        assert "/static/repo.js" in repo_page
+        assert "/static/repo.js" not in viewer
+
+    @pytest.mark.asyncio
+    async def test_the_page_script_is_served(self):
+        resp = await _get("/static/repo.js")
+        assert resp.status_code == 200
+        assert "verdictFor" in resp.text
+
+
+class TestShortRepoRedirect:
+    @pytest.mark.asyncio
+    async def test_redirect_by_repo_name(self):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "items": [{"name": "visual-review", "owner": {"login": "widdowson"}}]
+        }
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/visual-review")
+
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/widdowson/visual-review"
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_name_offers_repo_pages(self):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {
+            "items": [
+                {"name": "app", "owner": {"login": "alice"}},
+                {"name": "app", "owner": {"login": "bob"}},
+            ]
+        }
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/app")
+
+        assert resp.status_code == 300
+        urls = [m["url"] for m in resp.json()["matches"]]
+        assert urls == ["/alice/app", "/bob/app"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_identifier_is_404(self):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"items": []}
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=mock_resp)
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/nosuchrepo")
+
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_favicon_costs_no_github_request(self):
+        """A browser asks for /favicon.ico on its own.
+
+        Resolving it would spend a GitHub search — and cache the miss for an
+        hour — on a word no user typed. Asserting the 404 alone would not
+        catch that: a failed search 404s too.
+        """
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=200))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/favicon.ico")
+
+        assert resp.status_code == 404
+        assert instance.get.await_count == 0
+
+
+class TestRepoPulls:
+    @pytest.mark.asyncio
+    async def test_no_token(self):
+        resp = await _get("/api/owner/repo/pulls")
+        assert resp.json()["pulls"] == []
+        assert "GITHUB_TOKEN" in resp.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_counts_images_per_pull_request(self):
+        client = _RepoClient(
+            [[_pull(10, title="Baselines", labels=["lgtm"]), _pull(11, draft=True)]],
+            files_by_number={
+                10: [
+                    {"filename": "tests/visual/a.png"},
+                    {"filename": "tests/visual/b.PNG"},
+                    {"filename": "app.py"},
+                ],
+                11: [{"filename": "README.md"}],
+            },
+        )
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert data["repo"] == "owner/repo"
+        assert data["probed"] is True
+        assert data["truncated"] is False
+        rows = {row["number"]: row for row in data["pulls"]}
+        assert rows[10]["images"] == 2
+        assert rows[10]["image_error"] is None
+        assert rows[10]["title"] == "Baselines"
+        assert rows[10]["labels"] == ["lgtm"]
+        assert rows[11]["images"] == 0
+        assert rows[11]["draft"] is True
+        # One list request, one per PR, and nothing else.
+        assert len(client.list_requests()) == 1
+        assert len(client.file_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_probe_off_is_one_request_and_no_counts(self):
+        """The cheap first request the page makes: rows now, counts after.
+
+        ``images`` stays None rather than 0, because the page renders 0 as
+        "no images" and nothing has been counted yet.
+        """
+        client = _RepoClient([[_pull(1), _pull(2)]], files_by_number={1: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        data = resp.json()
+        assert data["probed"] is False
+        assert [row["images"] for row in data["pulls"]] == [None, None]
+        assert client.file_requests() == []
+        assert len(client.list_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_is_not_an_empty_pr(self):
+        """The one wrong answer this page can give.
+
+        A PR whose file list could not be fetched must not come back as
+        ``images: 0`` — that is the page telling someone a PR is empty when
+        nobody checked.
+        """
+        client = _RepoClient(
+            [[_pull(1), _pull(2)]],
+            files_by_number={2: [{"filename": "a.png"}]},
+            files_status={1: 500},
+        )
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        rows = {row["number"]: row for row in resp.json()["pulls"]}
+        assert rows[1]["images"] is None
+        assert "500" in rows[1]["image_error"]
+        # The failure is contained: the other PR still gets its count.
+        assert rows[2]["images"] == 1
+        assert rows[2]["image_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_is_not_cached(self):
+        """A retry has to be able to succeed.
+
+        Caching the error would pin "could not be checked" to that head SHA
+        for the whole TTL, so a transient 500 would outlive itself by a
+        quarter of an hour.
+        """
+        client = _RepoClient([[_pull(1)]], files_by_number={1: [{"filename": "a.png"}]},
+                             files_status={1: 500})
+        token, http = _patched(client)
+        with token, http:
+            first = await _get("/api/owner/repo/pulls")
+            client.files_status = {}
+            second = await _get("/api/owner/repo/pulls")
+
+        assert first.json()["pulls"][0]["images"] is None
+        assert second.json()["pulls"][0]["images"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_second_visit_asks_github_for_nothing(self):
+        """Both caches, checked by their effect rather than by their keys."""
+        client = _RepoClient([[_pull(1), _pull(2)]],
+                             files_by_number={1: [{"filename": "a.png"}], 2: []})
+        token, http = _patched(client)
+        with token, http:
+            await _get("/api/owner/repo/pulls")
+            calls_after_first = len(client.calls)
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert len(client.calls) == calls_after_first
+        assert [row["images"] for row in resp.json()["pulls"]] == [1, 0]
+
+    @pytest.mark.asyncio
+    async def test_counts_are_not_written_into_the_list_cache(self):
+        """The list cache is keyed on the repo alone.
+
+        A count written into it would outlive the head SHA it was measured
+        against, and would then be served for a PR that has since been pushed
+        to. The summaries have their own per-SHA cache for exactly that.
+        """
+        client = _RepoClient([[_pull(1)]], files_by_number={1: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            await _get("/api/owner/repo/pulls")
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        assert resp.json()["pulls"][0]["images"] is None
+
+    @pytest.mark.asyncio
+    async def test_probe_fan_out_is_capped(self):
+        """The burst GitHub sees is bounded by the semaphore, not by the repo.
+
+        Drop the semaphore and this is 20 requests in flight at once.
+        """
+        pulls = [_pull(n) for n in range(1, 21)]
+        client = _RepoClient([pulls], files_by_number={n: [] for n in range(1, 21)})
+        token, http = _patched(client)
+        with token, http:
+            await _get("/api/owner/repo/pulls")
+
+        assert len(client.file_requests()) == 20
+        assert client.max_in_flight == _PR_PROBE_CONCURRENCY
+
+    @pytest.mark.asyncio
+    async def test_open_pull_requests_past_the_first_page(self):
+        """More than 100 open PRs: every one of them is listed."""
+        page1 = [_pull(n) for n in range(1, 101)]
+        page2 = [_pull(n) for n in range(101, 121)]
+        client = _RepoClient([page1, page2])
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        data = resp.json()
+        assert len(data["pulls"]) == 120
+        assert data["truncated"] is False
+        assert [page for url, page in client.calls if url.endswith("/pulls")] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_a_capped_list_walk_says_so(self):
+        """The walk stops at its page cap and the payload admits it."""
+        pages = [[_pull(n) for n in range(i * 100, i * 100 + 100)]
+                 for i in range(_OPEN_PULLS_MAX_PAGES)]
+        client = _RepoClient(pages)
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls?probe=0")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert len(data["pulls"]) == _OPEN_PULLS_MAX_PAGES * 100
+        assert len(client.list_requests()) == _OPEN_PULLS_MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_a_pull_requests_files_past_the_first_page_are_counted(self):
+        """A PR's own file list pages too, so the count is not capped at 100."""
+        files = [{"filename": f"shots/s{i:04d}.png"} for i in range(150)]
+        files += [{"filename": f"src/f{i}.py"} for i in range(10)]
+        client = _RepoClient([[_pull(1)]], files_by_number={1: files})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert resp.json()["pulls"][0]["images"] == 150
+        assert len(client.file_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_list_failure_is_reported(self):
+        client = _RepoClient([[_pull(1)]], list_status={1: 404})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert data["pulls"] == []
+        assert "404" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_open_pull_requests(self):
+        client = _RepoClient([[]])
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert resp.json()["pulls"] == []
+        assert "error" not in resp.json()
+
+    @pytest.mark.asyncio
+    async def test_a_pull_request_with_more_files_than_the_walk_serves(self):
+        """The file walk's own cap reaches the payload.
+
+        30 full pages is where ``_gh_paginate`` stops, and the count it
+        reports from there is a floor. Without this, passing ``truncated``
+        through could be cut to a literal False with every other assertion
+        here still green — the page reads that flag to decide between "40
+        images" and "40+ images", and between "no images" and "too many
+        files to check".
+        """
+        files = [{"filename": f"shots/s{i:05d}.png"} for i in range(_GH_PAGE_SIZE * 30)]
+        client = _RepoClient([[_pull(1)]], files_by_number={1: files})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        row = resp.json()["pulls"][0]
+        assert row["images_truncated"] is True
+        assert row["images"] == _GH_PAGE_SIZE * 30
+        assert len(client.file_requests()) == 30
+
+    @pytest.mark.asyncio
+    async def test_a_body_that_is_not_a_list_is_an_error(self):
+        """GitHub answering 200 with an object would otherwise be walked.
+
+        ``items.extend`` over a dict extends with its *keys*, so an error
+        object would arrive as a handful of files named "message" and
+        "documentation_url" — a list the page would render as real.
+        """
+        client = _RepoClient([[_pull(1)]])
+        client.pull_pages = [{"message": "Moved Permanently"}]
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert data["pulls"] == []
+        assert "dict" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_transport_failure_is_reported_not_raised(self):
+        """A connection that never answers is an error message, not a 500."""
+        class _Exploding:
+            async def get(self, url, **kwargs):
+                raise RuntimeError("connection reset")
+
+            def __call__(self, *a, **kw):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient", _Exploding()):
+            resp = await _get("/api/owner/repo/pulls")
+
+        assert resp.status_code == 200
+        assert resp.json()["pulls"] == []
+        assert "connection reset" in resp.json()["error"]
+
+    @pytest.mark.asyncio
+    async def test_one_pull_requests_transport_failure_does_not_discard_the_list(self):
+        """Round 1, Major 2: a read timeout on one PR blanked the whole page.
+
+        ``_gh_paginate`` raises ``_GitHubError`` for a non-200 and a body that
+        is not a list, and nothing else — so an ``httpx.ReadTimeout`` escaped
+        the probe, aborted the ``gather``, reached the endpoint's own handler
+        and answered ``{"pulls": []}``, which the page renders by wiping rows
+        it had already drawn. Over a six-wide fan-out on a 30s timeout that is
+        the failure that actually happens, and it is the one the HTTP-500 case
+        above does not reach.
+        """
+        class _TimingOut(_RepoClient):
+            async def get(self, url, **kwargs):
+                if url.endswith("/pulls/1/files"):
+                    raise httpx.ReadTimeout("read timed out")
+                return await super().get(url, **kwargs)
+
+        client = _TimingOut([[_pull(1), _pull(2)]], files_by_number={2: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert "error" not in data
+        rows = {row["number"]: row for row in data["pulls"]}
+        assert len(rows) == 2, "the other PRs are still listed"
+        assert rows[1]["images"] is None
+        assert "ReadTimeout" in rows[1]["image_error"]
+        assert rows[2]["images"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failure_with_no_message_still_reads_as_a_failure(self):
+        """Round 4, Major 1: ``str(e)`` can be empty, and empty is falsy.
+
+        A read timeout on the list request stringifies to "" the whole way
+        down — anyio raises a bare ``TimeoutError()``, httpcore re-raises it
+        as ``to_exc(exc)``, httpx does ``message = str(exc)`` — so the outer
+        handler's ``{"error": str(e)}`` answered ``{"error": ""}``. The page
+        decided success by truthiness, so it took that for a good load of a
+        repository with no open pull requests, and said so.
+
+        Measured before the fix: the endpoint really did answer
+        ``{"error": "", "pulls": []}``. Both halves are fixed; this is the
+        server's. The client's is scenario F in //:test_repo_page.
+        """
+        class _Timeout:
+            async def get(self, url, **kwargs):
+                raise httpx.ReadTimeout(str(TimeoutError()))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        assert str(httpx.ReadTimeout(str(TimeoutError()))) == "", (
+            "this test is only meaningful while that exception stringifies empty"
+        )
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), \
+             patch("httpx.AsyncClient", return_value=_Timeout()):
+            resp = await _get("/api/owner/repo/pulls")
+
+        body = resp.json()
+        assert body["pulls"] == []
+        assert body["error"], "an error the far side cannot see is not an error"
+        assert "ReadTimeout" in body["error"], "and it names what went wrong"
+
+    @pytest.mark.asyncio
+    async def test_the_fan_out_survives_a_probe_that_raises(self, caplog):
+        """The backstop in ``fill``, driven — otherwise no run enters it.
+
+        ``_pr_image_summary`` promises not to raise, and with that promise kept
+        the ``try`` around the call is a block no test reaches, which is a
+        guard that passes under any implementation. So the promise is broken on
+        purpose here. What it protects is out of proportion to one row: a
+        ``gather`` re-raises, the endpoint answers with no pulls, and a page
+        that had already rendered is wiped.
+        """
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("probe blew up")
+
+        client = _RepoClient([[_pull(1), _pull(2)]])
+        token, http = _patched(client)
+        caplog.clear()
+        with caplog.at_level("ERROR", logger="visual-review"):
+            with token, http, patch("app._pr_image_summary", _boom):
+                resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert "error" not in data
+        assert len(data["pulls"]) == 2
+        for row in data["pulls"]:
+            assert row["images"] is None
+            assert "probe blew up" in row["image_error"]
+
+        # Reaching the backstop means the contract above was broken, so this
+        # one keeps its traceback — it is the branch nothing expects, unlike
+        # the probe's own handler, which is a warning because it runs once per
+        # open PR. Asserted here rather than left to inspection: deleting this
+        # log left the whole suite green in the round-3 review, because
+        # test_a_swallowed_failure_is_logged calls _pr_image_summary directly
+        # and never reaches fill().
+        assert "repo_pulls: probe raised" in caplog.text
+        assert "RuntimeError" in caplog.text, "the traceback must reach the log"
+        assert "pr=1" in caplog.text and "pr=2" in caplog.text, "each row is named"
+
+    @pytest.mark.asyncio
+    async def test_a_pull_request_with_no_head_sha_is_not_cached(self):
+        """An empty SHA would key a count no push could ever invalidate.
+
+        Nothing should produce one; the point is that a PR that does gets a
+        fresh count rather than a stale one pinned under a meaningless key.
+        """
+        client = _RepoClient([[_pull(1, head_sha="")]], files_by_number={1: [{"filename": "a.png"}]})
+        client.pull_pages[0][0]["head"]["sha"] = ""
+        token, http = _patched(client)
+        with token, http:
+            first = await _get("/api/owner/repo/pulls")
+            calls_after_first = len(client.file_requests())
+            second = await _get("/api/owner/repo/pulls")
+
+        assert first.json()["pulls"][0]["images"] == 1
+        assert second.json()["pulls"][0]["images"] == 1
+        assert len(client.file_requests()) == calls_after_first * 2, "probed again, not served from a cache"
+        assert not any(k.endswith(":") for k in _cache), "no key with an empty SHA was written"
+
 
 class TestPrImageClientDisconnect:
     """A request the browser has cancelled must stop costing GitHub API calls.
@@ -2707,3 +3334,218 @@ class TestPrImageClientDisconnect:
             await self._drive("during_contents", contents=self.NO_SHA)
         assert "client gone before the download_url fetch" in caplog.text
         assert "before the blob call" not in caplog.text
+
+class TestPrImageSummaryNeverRaises:
+    """The probe's contract, driven directly.
+
+    Round 1 mutation M14: narrowing this ``except`` back to ``_GitHubError``
+    alone left the endpoint tests green, because ``fill``'s backstop caught
+    what escaped. Both guards are wanted — one states the contract, the other
+    survives the contract being broken — so each needs a test that fails
+    without it. This is the contract's.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [
+        httpx.ReadTimeout("read timed out"),
+        httpx.ConnectError("connection refused"),
+        httpx.RemoteProtocolError("server disconnected"),
+    ])
+    async def test_a_transport_error_is_returned_not_raised(self, error):
+        class _Failing:
+            async def get(self, url, **kwargs):
+                raise error
+
+        summary = await _pr_image_summary(_Failing(), "owner/repo", 1, "abc", {})
+        assert "images" not in summary, "a failure never carries a count"
+        assert type(error).__name__ in summary["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_returned_error_is_not_cached(self):
+        class _Failing:
+            async def get(self, url, **kwargs):
+                raise httpx.ReadTimeout("read timed out")
+
+        await _pr_image_summary(_Failing(), "owner/repo", 1, "abc", {})
+        assert _cache == {}
+
+    @pytest.mark.asyncio
+    async def test_a_swallowed_failure_is_logged(self, caplog):
+        """Round 2, Minor 3: the wide ``except`` made bugs look like bad luck.
+
+        A transport failure and an ``AttributeError`` from a malformed file
+        entry both render as one "check failed" badge, which a user reads as
+        GitHub being slow. The log is the only place the two are distinct, so
+        swallowing without logging is what the catch costs.
+        """
+        class _Failing:
+            async def get(self, url, **kwargs):
+                raise httpx.ReadTimeout("read timed out")
+
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="visual-review"):
+            await _pr_image_summary(_Failing(), "owner/repo", 7, "abc", {})
+
+        # "pr=7" rather than "7": caplog.text carries the logger's own file
+        # paths and line numbers, so a bare digit is in it whatever the log
+        # says, and the assertion could not fail. Measured — dropping pr=%s
+        # from the call left this green in the round-3 review.
+        assert "repo=owner/repo" in caplog.text
+        assert "pr=7" in caplog.text, "the log must name the PR it is about"
+        assert "ReadTimeout" in caplog.text, "and what went wrong"
+
+        # The level and the absence of a traceback, not just the text.
+        # ``caplog.at_level`` is a threshold, so a record emitted at ERROR with
+        # a traceback satisfies everything above exactly as a WARNING does —
+        # measured: putting ``logger.exception`` back here left the suite
+        # green. This branch is the expected one and runs once per open PR, so
+        # a GitHub blip must not be one traceback per PR per cold page load.
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert caplog.records[0].exc_info is None, "the expected branch logs no traceback"
+
+
+class TestCatchAllRouteScope:
+    """Round 1, Minor 6: two catch-alls that could swallow the app's own paths.
+
+    ``/{owner}/{repo}`` matches any two segments and ``/{identifier}`` any one,
+    so a mistyped API path answered 200 with the repo page — a wrong body,
+    which is a worse failure than a missing one, and it hides the typo.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/api/pulls", "/api/anything", "/static/nope"])
+    async def test_reserved_prefixes_are_not_the_repo_page(self, path):
+        resp = await _get(path)
+        assert resp.status_code == 404, f"{path} must not be answered by a page route"
+        assert "text/html" not in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_prefix_alone_costs_no_github_request(self):
+        """The single-segment route resolves through a GitHub search."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=200))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/api")
+
+        assert resp.status_code == 404
+        assert instance.get.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_real_repo_page_still_answers(self):
+        """The guard rejects the app's own prefixes and nothing else."""
+        resp = await _get("/widdowson/visual-review")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/api/x/pr/5", "/static/x/pr/5", "/docs/x/pr/5"])
+    async def test_reserved_prefixes_are_not_the_viewer(self, path):
+        """Round 2, Minor 2: the two older catch-alls had no guard at all.
+
+        ``/{owner}/{repo}/pr/{number}`` is declared above every API route and
+        cannot move — so unlike the two page routes, the guard is the whole of
+        its protection rather than a second line of it. ``/api/x/pr/5`` used to
+        answer 200 with the viewer's HTML.
+        """
+        resp = await _get(path)
+        assert resp.status_code == 404, f"{path} must not be answered by the viewer"
+        assert "text/html" not in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_prefix_short_pr_url_costs_no_github_request(self):
+        """``/{identifier}/pr/{n}`` resolves through a GitHub search too."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=200))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/api/pr/5")
+
+        assert resp.status_code == 404
+        assert instance.get.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_real_viewer_url_still_answers(self):
+        resp = await _get("/widdowson/visual-review/pr/43")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
+    def test_the_catch_alls_are_registered_last(self):
+        """Ordering, so a route added later is reached rather than swallowed.
+
+        The reserved-prefix guard covers the paths this app owns today; this
+        covers the one it does not own yet. Starlette matches in registration
+        order, so a two-segment route declared above these is tried first and
+        one declared below never runs at all.
+
+        Scoped to the two page routes on purpose. The other two catch-alls are
+        *not* registered last and are not asserted to be — they predate this
+        and sit above every API route, which is why they carry the guard the
+        two cases above drive. An assertion here covering all four would have
+        to fail on the tree as it is.
+        """
+        paths = [r.path for r in app.routes if getattr(r, "path", None)]
+        assert paths.index("/{owner}/{repo}") > max(
+            i for i, p in enumerate(paths) if p.startswith("/api/")
+        ), "the repo page must be registered after every API route"
+        assert paths.index("/{identifier}") > paths.index("/{owner}/{repo}")
+
+    def test_every_leading_segment_route_is_guarded(self):
+        """The census, so a fifth such route cannot arrive unguarded.
+
+        Registration order protects the two page routes and the guard protects
+        all four, so the property that actually holds file-wide is "a route
+        whose first segment is data checks it".
+
+        The set below is the expectation and it is deliberately hard-coded: the
+        routes are *discovered* from ``app.routes``, and it is the equality
+        against this list that a fifth route trips, not the source grep. So
+        adding one fails here until someone writes it down — which is the
+        mechanism wanted, since writing it down is where you notice the guard
+        is missing. The grep is the second half, for a route that is listed and
+        still unguarded.
+        """
+        import inspect
+
+        guarded = {"/{owner}/{repo}", "/{identifier}",
+                   "/{owner}/{repo}/pr/{number}", "/{identifier}/pr/{number}"}
+        found = {
+            r.path for r in app.routes
+            if getattr(r, "path", "").startswith("/{")
+        }
+        assert found == guarded, (
+            f"a route taking a leading segment as data changed: {found ^ guarded}. "
+            "Add _RESERVED_PATH_PREFIXES to it and list it here."
+        )
+        for route in app.routes:
+            if getattr(route, "path", "") in guarded:
+                source = inspect.getsource(route.endpoint)
+                assert "_RESERVED_PATH_PREFIXES" in source, (
+                    f"{route.path} does not check its first segment"
+                )
+
+
+class TestStaticMount:
+    def test_static_files_follow_symlinks(self):
+        """Pinned by configuration, because no request here can reach it.
+
+        A Bazel runfiles tree is symlinks into the source tree, and Starlette's
+        default reads a symlink out of the mounted directory as an escape
+        attempt and 404s it — so under ``bazel run //:server`` the repo page's
+        script and the viewer's favicon both 404. This test cannot observe
+        that: ``Path(__file__).resolve()`` at the top of this file resolves the
+        runfiles symlink, so ``app`` is imported from the source tree where
+        ``static/`` holds real files and the mount behaves the same either way.
+        Round 1 measured exactly that — deleting the flag left this suite green
+        — so the assertion is on the setting rather than on a response.
+        """
+        mounts = [r for r in app.routes if isinstance(getattr(r, "app", None), StaticFiles)]
+        assert len(mounts) == 1
+        assert mounts[0].app.follow_symlink is True
