@@ -199,11 +199,20 @@
             draw();
         });
 
-        // The whole of the page, drawn from state. The summary line is a
-        // function of that state rather than somewhere messages get written,
-        // which is what lets an error survive the next redraw — and a redraw
-        // is one click on the filter away.
+        // The whole of the page, drawn from state — every part of it, including
+        // the failure box. Nothing here is written once and left standing,
+        // because a redraw is one click on the filter away and a redraw over
+        // state that does not record the failure puts a count of a list that
+        // never arrived where the error used to be.
         function draw() {
+            // A failure with no rows *is* the page rather than a line above
+            // it. This branch is the one two rounds of fixes walked past: the
+            // error was rendered by whoever caught it and never recorded, so
+            // the next draw() reported an empty list as an empty repository.
+            if (loadError && !rows.length) {
+                showMessage(loadError, true);
+                return;
+            }
             VRRepo.renderList(listEl, where.owner, where.repo, rows, {
                 hideEmpty: hideEmptyEl.checked,
                 nowMs: Date.now(),
@@ -213,16 +222,13 @@
             summaryEl.className = line.isError ? 'summary-error' : '';
         }
 
-        // An error replaces the list only while there is no list. Once the
-        // first, cheap pass has rendered rows, those rows are correct and
-        // useful on their own — the counts are what failed — so the failure
-        // becomes page state instead of replacing them, and every row still
-        // waiting on a count is told the count is not coming.
+        // A failed load is recorded and then drawn, never drawn directly. With
+        // rows already on screen the failure is a line above them, since those
+        // rows are right and only the counts failed, and every row still
+        // waiting on a count is told the count is not coming. With no rows it
+        // is the whole page. draw() decides which; both survive a redraw
+        // because both are read back out of the same state.
         function fail(text) {
-            if (!rows.length) {
-                showMessage(text, true);
-                return;
-            }
             loadError = text;
             VRRepo.markUncounted(rows, text);
             draw();

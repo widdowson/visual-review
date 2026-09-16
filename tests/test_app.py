@@ -2418,7 +2418,7 @@ class TestRepoPulls:
         assert rows[2]["images"] == 1
 
     @pytest.mark.asyncio
-    async def test_the_fan_out_survives_a_probe_that_raises(self):
+    async def test_the_fan_out_survives_a_probe_that_raises(self, caplog):
         """The backstop in ``fill``, driven — otherwise no run enters it.
 
         ``_pr_image_summary`` promises not to raise, and with that promise kept
@@ -2433,8 +2433,10 @@ class TestRepoPulls:
 
         client = _RepoClient([[_pull(1), _pull(2)]])
         token, http = _patched(client)
-        with token, http, patch("app._pr_image_summary", _boom):
-            resp = await _get("/api/owner/repo/pulls")
+        caplog.clear()
+        with caplog.at_level("ERROR", logger="visual-review"):
+            with token, http, patch("app._pr_image_summary", _boom):
+                resp = await _get("/api/owner/repo/pulls")
 
         data = resp.json()
         assert "error" not in data
@@ -2442,6 +2444,17 @@ class TestRepoPulls:
         for row in data["pulls"]:
             assert row["images"] is None
             assert "probe blew up" in row["image_error"]
+
+        # Reaching the backstop means the contract above was broken, so this
+        # one keeps its traceback — it is the branch nothing expects, unlike
+        # the probe's own handler, which is a warning because it runs once per
+        # open PR. Asserted here rather than left to inspection: deleting this
+        # log left the whole suite green in the round-3 review, because
+        # test_a_swallowed_failure_is_logged calls _pr_image_summary directly
+        # and never reaches fill().
+        assert "repo_pulls: probe raised" in caplog.text
+        assert "RuntimeError" in caplog.text, "the traceback must reach the log"
+        assert "pr=1" in caplog.text and "pr=2" in caplog.text, "each row is named"
 
     @pytest.mark.asyncio
     async def test_a_pull_request_with_no_head_sha_is_not_cached(self):
@@ -2462,6 +2475,7 @@ class TestRepoPulls:
         assert second.json()["pulls"][0]["images"] == 1
         assert len(client.file_requests()) == calls_after_first * 2, "probed again, not served from a cache"
         assert not any(k.endswith(":") for k in _cache), "no key with an empty SHA was written"
+
 
 class TestPrImageClientDisconnect:
     """A request the browser has cancelled must stop costing GitHub API calls.
@@ -2781,11 +2795,16 @@ class TestPrImageSummaryNeverRaises:
                 raise httpx.ReadTimeout("read timed out")
 
         caplog.clear()
-        with caplog.at_level("ERROR", logger="visual-review"):
+        with caplog.at_level("WARNING", logger="visual-review"):
             await _pr_image_summary(_Failing(), "owner/repo", 7, "abc", {})
 
-        assert "owner/repo" in caplog.text and "7" in caplog.text
-        assert "ReadTimeout" in caplog.text, "the traceback must reach the log"
+        # "pr=7" rather than "7": caplog.text carries the logger's own file
+        # paths and line numbers, so a bare digit is in it whatever the log
+        # says, and the assertion could not fail. Measured — dropping pr=%s
+        # from the call left this green in the round-3 review.
+        assert "repo=owner/repo" in caplog.text
+        assert "pr=7" in caplog.text, "the log must name the PR it is about"
+        assert "ReadTimeout" in caplog.text, "and what went wrong"
 
 
 class TestCatchAllRouteScope:
@@ -2885,8 +2904,15 @@ class TestCatchAllRouteScope:
 
         Registration order protects the two page routes and the guard protects
         all four, so the property that actually holds file-wide is "a route
-        whose first segment is data checks it". That is what this asserts, by
-        finding those routes in the app rather than from a list kept here.
+        whose first segment is data checks it".
+
+        The set below is the expectation and it is deliberately hard-coded: the
+        routes are *discovered* from ``app.routes``, and it is the equality
+        against this list that a fifth route trips, not the source grep. So
+        adding one fails here until someone writes it down — which is the
+        mechanism wanted, since writing it down is where you notice the guard
+        is missing. The grep is the second half, for a route that is listed and
+        still unguarded.
         """
         import inspect
 

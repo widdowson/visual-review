@@ -13,6 +13,9 @@ const runfiles = process.env.RUNFILES_DIR || '';
 const MODULE_PATH = runfiles
   ? path.join(runfiles, '_main', 'static', 'repo.js')
   : path.join(__dirname, '..', 'static', 'repo.js');
+const HARNESS_PATH = runfiles
+  ? path.join(runfiles, '_main', 'tests', 'repo_page_harness.js')
+  : path.join(__dirname, 'repo_page_harness.js');
 
 const { verdictFor, summarize, summaryText, summaryLine, markUncounted, repoFromPath,
         viewerHref, pullsApiHref, relativeTime, renderList } = require(MODULE_PATH);
@@ -216,9 +219,6 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
   // the page is redrawn.
   const failedLine = summaryLine([row(1, { images: 2 })], true, 'HTTP 502', false);
   assert.deepStrictEqual(failedLine, { text: 'HTTP 502', isError: true });
-  assert.deepStrictEqual(
-    summaryLine([row(1, { images: 2 })], true, 'HTTP 502', false), failedLine,
-    'the line is a function of state, so a redraw cannot lose the error');
 
   // With no error it is the summary, unchanged.
   assert.deepStrictEqual(
@@ -273,12 +273,18 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/(^|[^:])\/\/.*$/gm, '$1');
 
+    // These patterns pin the page's local variable *names* as well as the
+    // argument order. The order is the point — swap two and every assertion
+    // above still passes while the page reads its own state wrongly — and the
+    // names are the incidental cost, so a rename is a failure of this check
+    // rather than of the page. Each message below says so.
+    const RENAME = ' (this check pins these local names; rename them here too)';
     assert.ok(/VRRepo\.summaryLine\(\s*rows\s*,\s*probed\s*,\s*loadError\s*,\s*listTruncated\s*\)/.test(page),
-      'draw() must take the summary line from summaryLine, with the page state in order');
+      'draw() must take the summary line from summaryLine, with the page state in order' + RENAME);
     assert.ok(/VRRepo\.markUncounted\(\s*rows\s*,/.test(page),
-      'a failed load must mark the rows it left uncounted');
+      'a failed load must mark the rows it left uncounted' + RENAME);
     assert.ok(/listTruncated\s*=\s*!!\s*data\.truncated/.test(page),
-      "the response's top-level truncated flag must reach the page");
+      "the response's top-level truncated flag must reach the page" + RENAME);
     // The bug itself: nothing may write the error into the element, because the
     // next draw() overwrites it.
     const assignments = page.match(/summaryEl\.textContent\s*=\s*([^;]+);/g) || [];
@@ -288,6 +294,94 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
         'the summary element may only be set from summaryLine or cleared, got: ' + a.trim());
     }
   }
+}
+
+// ── The page, run ──────────────────────────────────────────────────────────
+// Round 3, Major 1. Everything above tests repo.js and the shape of the calls
+// repo.html makes. Neither can see *which branch* of fail() runs, and both
+// findings against this page's failure handling have been branch findings: a
+// message written where the next redraw erased it, and a failed first load
+// whose error one filter click replaced with "No open pull requests." — a
+// positive claim about the question the page exists to answer, from a page
+// that had just said it could not answer it.
+//
+// So these run the real inline script. The reachable route to the second bug
+// was a typo'd repo name: GitHub 404s, the page says so, and one click said
+// the repository had no open PRs.
+{
+  const { drivePage } = require(HARNESS_PATH);
+
+  const ERR = { error: 'Pull request list failed: HTTP 404' };
+  const ONE = {
+    pulls: [{
+      number: 1, title: 'PR 1', author: 'a', draft: false,
+      html_url: 'https://github.com/o/r/pull/1', updated_at: '2026-09-15T11:00:00Z',
+      head_ref: 'f', base_ref: 'main', labels: [],
+      images: null, images_truncated: false, image_error: null,
+    }],
+    probed: false, truncated: false,
+  };
+  const EMPTY = { pulls: [], probed: true, truncated: false };
+
+  // The invariant, stated once and checked after every failure below: a page
+  // that could not load must not tell anyone how many open PRs there are.
+  const claimsEmptiness = p =>
+    /No open pull requests|no image changes/.test(p.listText + ' ' + p.summary);
+
+  const checks = [];
+
+  // A — the first load fails outright.
+  checks.push(drivePage([ERR, ERR]).then(page => {
+    assert.ok(/HTTP 404/.test(page.listText), 'the failure is on the page');
+    assert.ok(!claimsEmptiness(page), 'a failed load claims nothing about the count');
+    page.toggleFilter();
+    assert.ok(/HTTP 404/.test(page.listText),
+      'the failure must survive a filter click, not be redrawn away');
+    assert.ok(!claimsEmptiness(page),
+      'one click after a failed load must not produce "No open pull requests."');
+    page.toggleFilter().toggleFilter();
+    assert.ok(/HTTP 404/.test(page.listText), 'nor any number of clicks');
+  }));
+
+  // B — the first load works and the probing pass fails. Round 2's case; it
+  // stays fixed, and it is here so the two branches are checked together.
+  checks.push(drivePage([ONE, ERR]).then(page => {
+    assert.strictEqual(page.summary, 'Pull request list failed: HTTP 404');
+    assert.strictEqual(page.summaryClass, 'summary-error');
+    assert.deepStrictEqual(page.badges, ['check failed']);
+    page.toggleFilter();
+    assert.strictEqual(page.summary, 'Pull request list failed: HTTP 404',
+      'a failure over rendered rows survives a filter click too');
+    assert.deepStrictEqual(page.badges, ['check failed'],
+      'and the rows it spoke for do not revert to "checking…"');
+  }));
+
+  // C — the fetch itself rejects, which reaches fail() by the other path.
+  checks.push(drivePage([new Error('boom')]).then(page => {
+    assert.ok(/boom/.test(page.listText));
+    page.toggleFilter();
+    assert.ok(/boom/.test(page.listText), 'a rejected fetch is state like any other');
+    assert.ok(!claimsEmptiness(page));
+  }));
+
+  // D — zero rows and then a failure: no rows to keep, so it is case A again.
+  checks.push(drivePage([EMPTY, ERR]).then(page => {
+    page.toggleFilter();
+    assert.ok(/HTTP 404/.test(page.listText));
+    assert.ok(!claimsEmptiness(page));
+  }));
+
+  // E — the control, and the reason this cannot be fixed by never saying it: a
+  // repository that really has no open PRs still says so.
+  checks.push(drivePage([EMPTY, EMPTY]).then(page => {
+    assert.ok(/No open pull requests/.test(page.listText),
+      'an empty repository still reports itself empty');
+    assert.ok(/No open pull requests/.test(page.summary));
+  }));
+
+  Promise.all(checks).then(
+    () => console.log('test_repo_page: page-driven checks passed'),
+    err => { console.error(err); process.exit(1); });
 }
 
 // Every GitHub-supplied string reaches the page as text. A title that is

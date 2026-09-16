@@ -1061,8 +1061,16 @@ async def _pr_image_summary(
         # A transport failure is expected and a bug here is not, but both
         # arrive as one "check failed" badge that reads as bad luck. The log
         # is the only place the second is distinguishable from the first.
-        logger.exception(
-            "_pr_image_summary: probe failed repo=%s pr=%s", github_repo, number,
+        #
+        # WARNING rather than exception(), because this is the expected branch
+        # and it runs once per open PR: a GitHub blip on a repository with
+        # twenty-three open pull requests would otherwise be twenty-three
+        # ERROR-level tracebacks per cold page load, per visitor. The type is
+        # in the message, so a bug is still legible here; the traceback for one
+        # is in the caller's backstop, which is the branch nothing expects.
+        logger.warning(
+            "_pr_image_summary: probe failed repo=%s pr=%s error=%s",
+            github_repo, number, f"{type(e).__name__}: {e}",
         )
         return {"error": f"Files request failed: {type(e).__name__}: {e}"}
 
@@ -1200,9 +1208,10 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
 # is not free — they are three and four segments deep, so the routes they can
 # shadow are narrower — and they carry the same _RESERVED_PATH_PREFIXES guard
 # instead, which is what stops "/api/x/pr/5" being served the viewer. So the
-# ordering assertion below covers all four, and for those two the guard is the
-# whole of the protection rather than a second line of it.
-#
+# ordering assertion below covers these two only, and says so; what covers all
+# four is the guard, and the census test that finds every route taking a
+# leading segment as data. For those two the guard is the whole of the
+# protection rather than a second line of it.
 
 
 @app.get("/{owner}/{repo}")
