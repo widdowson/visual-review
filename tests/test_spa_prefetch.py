@@ -24,9 +24,9 @@ Three instruments, because no one of them sees everything:
 Between them they close the reachability gap that capped #18's structural
 checks at twelve. A regex over source can see that `schedulePrefetch()` is
 written down; it cannot see whether it runs. `if (false) schedulePrefetch();`
-passes there and fails here. Each test's docstring names the mutants it was
-checked against; a count here would go stale the next time one is added, and
-did.
+passes there and fails here. Where a test was checked against a named mutant,
+that mutant is recorded in its own docstring rather than tallied here; a count
+in this docstring would go stale the next time one is added, and did.
 
 Two things on #21's list remain: `cancelPrefetches` keeping the half of a pair
 that already arrived, and the `pendingLoad` clear in `checkReady`.
@@ -430,8 +430,13 @@ def test_an_in_flight_prefetch_is_adopted_rather_than_restarted(page, probe, bas
 
     Waiting for the warm to have *started* is load-bearing rather than
     tidiness: press j before it does and the page builds a fresh pair for the
-    honest reason, two either way, and the test passes against an adoption
-    path that does nothing. The wait is what makes the block reachable.
+    honest reason, two either way, so the Image count below cannot tell an
+    adoption path that works from one that does nothing. The wait is what
+    makes the block reachable. Delete it and the racing assertion catches the
+    vacuous configuration and says so — checked both with `usableCached`
+    returning null and on an unmutated page, RED on `saw []` either way.
+    Mutants: `usableCached -> return null` and the `exceptPath` guard deleted
+    from `cancelPrefetches`, both RED at 4 objects against the 2 asserted.
     """
     open_pr(page, base_url)
     wait_until(lambda: len(probe.images(path_of(1))) == 2, "the warm to be in flight")
@@ -439,8 +444,10 @@ def test_an_in_flight_prefetch_is_adopted_rather_than_restarted(page, probe, bas
     # Logged is not the same as open, and "mid-warm" is this test's whole
     # identity: if the warm ever finished before the keypress, the test would
     # quietly become a second copy of the already-complete path with a name
-    # and a docstring that still said otherwise. Measured open on every run so
-    # far, so this pins what is already true rather than tightening anything.
+    # and a docstring that still said otherwise. It asks nothing new of the
+    # page — both sides measured open on every run — but it does tighten the
+    # test: without it, removing the wait above leaves this passing on two
+    # honestly-built images, which is the vacuous run check 1 asks about.
     racing = [r["path"] for r in probe.in_flight()]
     assert racing.count(path_of(1)) == 2, \
         f"both sides of file 1 should still be in flight at the keypress, saw {racing}"

@@ -191,7 +191,10 @@ window.__vrImgs = [];
   var desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
   function Counted(width, height) {
     var img = new Real(width, height);
-    var rec = {img: img, srcs: []};
+    // Strings only. The element itself is not retained: nothing reads it, and
+    // holding one would pin every Image the page builds alive for the life of
+    // the page, evicted ones included, in a file that also tests cacheRadius.
+    var rec = {srcs: []};
     window.__vrImgs.push(rec);
     // Record each assignment rather than reading the attribute back later.
     // abortImage() does `img.src = ''`, and the IDL getter then resolves the
@@ -207,11 +210,16 @@ window.__vrImgs = [];
   }
   Counted.prototype = Real.prototype;
   window.Image = Counted;
-  // Two divergences left standing, neither reachable from static/index.html:
-  // calling Image() without new returns instead of throwing, and
-  // String(window.Image) is not [native code]. The one that would have bitten
-  // — new Image(w, h) losing its dimensions — is forwarded above, measured
-  // [37, 41] through the wrapper against [0, 0] for the no-arg form.
+  // Three divergences left standing, none reachable from static/index.html:
+  // calling Image() without new returns instead of throwing;
+  // String(window.Image) is not [native code]; and the defineProperty above
+  // gives the image an *own* enumerable `src` where a real one inherits it,
+  // so Object.keys(img), JSON.stringify(img) and {...img} all show it. The
+  // page never enumerates an Image — its Object.keys/for-in/JSON.stringify
+  // sites are over state.prefetching, state.imageCache, the comment counts
+  // and a POST body. The divergence that would have bitten — new Image(w, h)
+  // losing its dimensions — is forwarded above, measured [37, 41] through the
+  // wrapper against [0, 0] for the no-arg form.
 })();
 """
 
@@ -226,18 +234,24 @@ def constructed_images(page, fragment: str) -> list[list[str]]:
     calls, and there is one of those whichever way the page behaves. What does
     change is how many Image objects get built, and that is what this counts.
 
-    Two things it deliberately does not see. It wraps `window.Image`, so the
+    Three things it deliberately does not see. It wraps `window.Image`, so the
     img elements renderComparison builds with createElement are not counted —
-    the decode path alone is the question here. And it records srcs **as they
-    are assigned**, never by reading `img.src` back: `abortImage` clears the
+    the decode path alone is the question here. It records srcs **as they are
+    assigned**, never by reading `img.src` back: `abortImage` clears the
     attribute, so a read-back count silently drops every image the page
     aborted, in the direction that passes. An earlier revision did read it
     back, and a mutant that aborted the adoption target and restarted it went
-    green.
+    green. And because it records assignments to the *property*, a src set
+    with `setAttribute` is invisible to it — an image fetched only that way
+    would drop out of the filter, the same false-pass direction. Unreachable
+    today (`setAttribute` appears 11 times in static/index.html, never for
+    src; every src is a property assignment) and the one thing the read-back
+    version did cover, so it is stated rather than guarded against.
 
     A record matches `fragment` if any src ever assigned to it did, so an
-    aborted-then-cleared image still counts. `fragment` is required: an empty
-    one would match the document URL an aborted image reads back as.
+    aborted-then-cleared image still counts. `fragment` is required because
+    `'' in s` is true of every string: an empty one would match every image
+    built, including one whose only recorded assignment is abortImage's clear.
     """
     records = page.evaluate("window.__vrImgs.map(function (r) { return r.srcs; })")
     return [srcs for srcs in records if any(fragment in src for src in srcs)]
