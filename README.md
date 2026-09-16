@@ -62,10 +62,12 @@ downloads it, pinned in `MODULE.bazel` to the build matching the `playwright`
 pin in `requirements_lock.txt`. Those two must move together, and the test
 asserts it rather than trusting this paragraph — the version in the manifest's
 filename, and each entry's `revision` and `browserVersion`, against the
-`browsers.json` the installed wheel ships. Those two are what select the
-download. Bump `playwright` and the trimmed manifest is to be re-derived from
-that file, not edited. Nothing needs to be installed and `playwright install`
-must not be run.
+`browsers.json` the installed wheel ships. `revision` is what selects the
+download, since the URL is `builds/<name>/<revision>/…`; `browserVersion` says
+which build that revision *is*, and selects nothing, so it is checked to catch
+a manifest edited by hand rather than re-derived. Bump `playwright` and the
+trimmed manifest is to be re-derived from that file, not edited. Nothing needs
+to be installed and `playwright install` must not be run.
 
 **Which Linux build it fetches is a build flag, not autodetection.**
 `@rules_playwright//:linux_distro` defaults to `ubuntu24.04`, so on Debian 12

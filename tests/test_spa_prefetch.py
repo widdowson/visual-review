@@ -179,12 +179,12 @@ def test_the_next_file_is_warmed_while_you_read_this_one(page, probe, base_url):
     # rather than in the scroll test below because the scroll cannot see the
     # debounce at all: replacing the timer with a synchronous runPrefetch()
     # leaves that test's peak at 4 transfers racing and its drain unchanged.
-    # Note the request total is no help there either way, in either direction:
-    # at ahead: 1 the prefetch of file N+1 and the selection of file N+1 ask
-    # for the same URL, so a speculation that fired and one that never did are
-    # indistinguishable in a count. (An earlier revision of this comment said
-    # that count was "the identical 22 requests". It is 20, and the missing
-    # pair is not a speculation at all — see the scroll test's own docstring.)
+    # Note the request total cannot separate a speculation that fired from one
+    # that never did: at ahead: 1 the prefetch of file N+1 and the selection of
+    # file N+1 ask for the same URL. The total does register the debounce being
+    # dropped, by one pair, and the scroll test's docstring says why that pair
+    # is not a speculation. (An earlier revision of this comment called that
+    # count "the identical 22 requests". It is 20.)
     warm_began = min(r["start"] for r in warmed)
     # Only records that closed *before* the warm started. Taking the max over
     # every record for file 0 couples this to the caching behaviour of the
