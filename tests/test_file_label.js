@@ -152,16 +152,17 @@ assert.strictEqual(dirContextFor('dir/name.png', ROOT_COLLIDING), 'dir');
 // shallower file can try is shared, and its answer is its whole directory —
 // which still reads differently from the deeper file's.
 const NESTED = files(['b/c/name.png', 'a/b/c/name.png']);
-
-// A file directly inside its rival's directory, for the display decision
-// below. Declared here rather than beside its own assertions so that the
-// fixture list is genuinely every fixture in the file — one declared after it
-// escapes both property checks while the comment there says it cannot.
-const INSIDE = files(['a/name.png', 'a/b/name.png']);
 assert.strictEqual(dirContextFor('b/c/name.png', NESTED), 'b/c',
   'a file whose directory is a tail of its rival must show that directory');
 assert.strictEqual(dirContextFor('a/b/c/name.png', NESTED), 'a/b/c',
   'and the deeper file must reach past it to the segment that settles it');
+
+// A file directly inside its rival's directory, for the display decision
+// further down. Declared here rather than beside its own assertions so that
+// the fixture list below is genuinely every fixture in the file — one
+// declared after it escapes both property checks while the comment there says
+// it cannot.
+const INSIDE = files(['a/name.png', 'a/b/name.png']);
 
 // Every fixture in this file, now that they are all declared — the check above
 // is only worth having if it runs over the shallow and root-level answers too.
@@ -411,10 +412,14 @@ function render(images) {
   assert.ok(/color\s*:/.test(dir), '.file-dir must set its own colour');
   assert.ok(/text-overflow\s*:\s*ellipsis/.test(dir),
     '.file-dir must ellipsize; these paths are longer than the column');
-  // text-overflow does nothing to text that is allowed to wrap, so without
-  // this the long directory takes a second row instead of an ellipsis.
+  // text-overflow does nothing to text that is allowed to wrap, and nothing to
+  // content that is not clipped, so it leans on both of these: without the
+  // first the long directory takes a second row instead of an ellipsis, and
+  // without the second it simply overflows the column.
   assert.ok(/white-space\s*:\s*nowrap/.test(dir),
     '.file-dir must not wrap, or text-overflow has nothing to act on');
+  assert.ok(/overflow\s*:\s*hidden/.test(dir),
+    '.file-dir must clip, or text-overflow has nothing to act on');
 
   const label = rule('file-label');
   assert.ok(/flex-direction\s*:\s*column/.test(label),
