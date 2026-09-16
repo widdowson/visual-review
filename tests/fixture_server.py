@@ -59,9 +59,11 @@ def png_bytes(seed: int, size: int = 64) -> bytes:
 class FixtureState:
     """Everything a test can vary or read, shared by the handler threads."""
 
-    def __init__(self, file_count: int, renamed_index: int | None = None):
+    def __init__(self, file_count: int, renamed_index: int | None = None,
+                 signed_in_email: str | None = None):
         self.file_count = file_count
         self.renamed_index = renamed_index
+        self.signed_in_email = signed_in_email
         self.image_delay = 0.30       # seconds spread across the response body
         # Asked of app.py rather than copied from it. The SPA never displays
         # the Image objects it decodes — every comparison mode builds fresh
@@ -136,6 +138,14 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path, query = url.path, parse_qs(url.query)
 
+        if path == "/api/me":
+            # The signed-in chip's only input. None models VR_AUTH_MODE=disabled,
+            # where the app answers authenticated=false and the chip stays
+            # hidden.
+            if self.state.signed_in_email is None:
+                return self._json({"authenticated": False})
+            return self._json({"authenticated": True,
+                               "email": self.state.signed_in_email})
         if path == "/__probe/log":
             with self.state.lock:
                 return self._json(list(self.state.log))
@@ -212,9 +222,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(file_count: int, index_html_path: str,
-          renamed_index: int | None = None) -> tuple[ThreadingHTTPServer, FixtureState]:
+          renamed_index: int | None = None,
+          signed_in_email: str | None = None,
+          ) -> tuple[ThreadingHTTPServer, FixtureState]:
     """Start the fixture on an ephemeral port. Caller shuts it down."""
-    state = FixtureState(file_count, renamed_index)
+    state = FixtureState(file_count, renamed_index, signed_in_email)
     with open(index_html_path, "rb") as fh:
         html = fh.read()
 

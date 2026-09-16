@@ -6,3 +6,12 @@ services:
     environment:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - PORT=8080
+      # Local development runs without the Cloudflare Access gate, because
+      # there is no Cloudflare in front of a localhost container to issue a
+      # token. This has to be said explicitly: the app defaults to requiring
+      # authentication and refuses to start unconfigured, so that a deployment
+      # cannot come up open by forgetting a variable.
+      - VR_AUTH_MODE=${VR_AUTH_MODE:-disabled}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN:-}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD:-}
+      - VR_ALLOWED_EMAILS=${VR_ALLOWED_EMAILS:-}

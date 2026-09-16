@@ -105,6 +105,34 @@
         .ci-badge.ci-none { background: #3a3f52; color: #8eb5f0; }
         .ci-badge .ci-icon { font-size: 0.8rem; line-height: 1; }
 
+        /* Signed-in chip. Cloudflare Access gives the app an email and
+           nothing else -- no display name, no avatar -- so the circle is
+           initials taken from the address rather than a picture fetched from
+           somewhere that would then learn who reviews what. */
+        .vr-user {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 0.72rem; color: var(--vr-text-secondary);
+            border: 1px solid var(--vr-border); border-radius: 12px;
+            padding: 2px 8px 2px 3px; max-width: 260px;
+        }
+        .vr-user[hidden] { display: none; }
+        .vr-user .vr-user-initials {
+            flex: 0 0 auto;
+            width: 20px; height: 20px; border-radius: 50%;
+            background: var(--vr-accent); color: #fff;
+            font-size: 0.6rem; font-weight: 700; letter-spacing: 0.02em;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .vr-user .vr-user-email {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .vr-user .vr-user-signout {
+            flex: 0 0 auto;
+            color: var(--vr-text-muted); text-decoration: none; font-size: 0.68rem;
+            border-left: 1px solid var(--vr-border); padding-left: 6px;
+        }
+        .vr-user .vr-user-signout:hover { color: var(--vr-link); }
+
         /* Theme toggle */
         .theme-toggle {
             background: none; border: 1px solid #3a3f52; color: #8eb5f0;
@@ -489,6 +517,12 @@
         <button id="sidebar-toggle" aria-label="Toggle file panel" aria-expanded="false">&#9776;</button>
         <span class="pr-title" id="pr-title">Loading...</span>
         <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+            <span class="vr-user" id="vr-user" hidden>
+                <span class="vr-user-initials" id="vr-user-initials" aria-hidden="true"></span>
+                <span class="vr-user-email" id="vr-user-email"></span>
+                <a class="vr-user-signout" id="vr-user-signout"
+                   href="/cdn-cgi/access/logout" title="Sign out of Cloudflare Access">Sign out</a>
+            </span>
             <button class="theme-toggle" id="theme-toggle" title="Toggle theme">&#9681;</button>
             <span class="kbd-hint" id="kbd-hint" title="Keyboard shortcuts (?)">?</span>
         </div>
@@ -548,6 +582,48 @@
         var repo = pathParts[2] || '';
         var prNumber = parseInt(pathParts[4], 10);
         var apiBase = '/api/' + owner + '/' + repo + '/pr/' + prNumber;
+
+        // ── signed-in-chip:begin ──────────────────────────────────────────
+        // Cloudflare Access hands the server an email and nothing else: an
+        // Access token has no display name in it, and Access exposes no avatar
+        // at all. So the chip's circle is initials derived from the address.
+        // Fetching a Gravatar would look nicer and would tell a third party
+        // which of us is reviewing what, which is a poor trade for a tool whose
+        // whole point is that it is private.
+        //
+        // Splitting on the separators people put in a local part gives "AW" for
+        // andrew.widdowson and "WI" for widdowson. A local part with no
+        // separator falls back to its first two letters, because a single
+        // letter in a 20px circle reads as a bullet rather than as a person.
+        function initialsFor(email) {
+            var local = String(email || '').split('@')[0];
+            var parts = local.split(/[._+-]+/).filter(function(p) { return p.length; });
+            if (!parts.length) return '?';
+            if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+            return (parts[0][0] + parts[1][0]).toUpperCase();
+        }
+        // ── signed-in-chip:end ────────────────────────────────────────────
+
+        // -- Signed-in chip --
+        // Deliberately outside the URL guard below, so an invalid URL still
+        // shows who is signed in. Failing soft is the whole error policy here:
+        // this is an indicator, and a reviewer whose chip did not render should
+        // still get to review. The gate that actually protects anything is
+        // server-side, in auth.py.
+        (function() {
+            fetch('/api/me', {headers: {'Accept': 'application/json'}})
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(me) {
+                    if (!me || !me.authenticated || !me.email) return;
+                    var chip = document.getElementById('vr-user');
+                    document.getElementById('vr-user-initials').textContent =
+                        initialsFor(me.email);
+                    document.getElementById('vr-user-email').textContent = me.email;
+                    chip.title = 'Signed in as ' + me.email;
+                    chip.hidden = false;
+                })
+                .catch(function() { /* indicator only; never blocks review */ });
+        })();
 
         if (!owner || !repo || isNaN(prNumber)) {
             document.getElementById('viewport').innerHTML =

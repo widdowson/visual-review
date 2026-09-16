@@ -21,7 +21,7 @@ A standalone tool for reviewing visual changes (PNG screenshots) in GitHub pull 
 # Clone and start
 git clone https://github.com/your-org/visual-review.git
 cd visual-review
-echo "GITHUB_TOKEN=ghp_your_token_here" > .env
+printf 'GITHUB_TOKEN=ghp_your_token_here\nVR_AUTH_MODE=disabled\n' > .env
 docker compose up
 
 # Open in browser
@@ -33,6 +33,8 @@ open http://localhost:8080/widdowson/apwphotos-appv2/pr/50
 ```bash
 pip install -r requirements.txt
 export GITHUB_TOKEN=ghp_your_token_here
+# Nothing issues an Access token on localhost, so run with the gate off.
+export VR_AUTH_MODE=disabled
 uvicorn app:app --reload --port 8080
 ```
 
@@ -98,11 +100,17 @@ gcloud run deploy visual-review \
   --source . \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars GITHUB_TOKEN=ghp_your_token_here
+  --set-env-vars GITHUB_TOKEN=ghp_your_token_here,\
+CF_ACCESS_TEAM_DOMAIN=yourteam.cloudflareaccess.com,CF_ACCESS_AUD=<aud-tag>
 
 # The deploy command outputs a service URL like:
 # https://visual-review-xxxxx-uc.a.run.app
 ```
+
+`--allow-unauthenticated` here means "no *Google* IAM check"; the app's own
+Cloudflare Access gate is what authenticates callers. See **Authentication**
+below — without `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` the service refuses
+to start rather than coming up open.
 
 **Custom domain (e.g. `vr.apw.photos`):**
 
@@ -124,6 +132,11 @@ Also works on Fly.io, Railway, or any platform that runs Docker containers. The 
 
 The only required secret is `GITHUB_TOKEN` — a GitHub personal access token with `repo` scope (for private repos) or `public_repo` scope (for public repos only).
 
+Note what a `repo`-scoped token means for a deployment: the server will read file
+bytes from any repository that token can reach, for whoever can reach the server.
+That is why the Cloudflare Access gate above is not optional on a public
+deployment holding one.
+
 ## URL Scheme
 
 ```
@@ -141,7 +154,8 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 | POST | `/api/{owner}/{repo}/pr/{number}/comments` | Post a review comment on a file |
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
 | GET | `/api/extensions` | Image extensions this server understands, for clients that would otherwise hardcode them |
-| GET | `/health` | Liveness check |
+| GET | `/api/me` | The signed-in address, or `authenticated: false` |
+| GET | `/health` | Liveness check (the one path the auth gate exempts) |
 
 ## Configuration
 
@@ -149,6 +163,56 @@ The only required secret is `GITHUB_TOKEN` — a GitHub personal access token wi
 |----------|----------|---------|-------------|
 | `GITHUB_TOKEN` | Yes | — | GitHub personal access token |
 | `PORT` | No | `8080` | Port to listen on (set automatically by Cloud Run) |
+| `VR_AUTH_MODE` | No | `cloudflare_access` | `cloudflare_access` or `disabled` |
+| `CF_ACCESS_TEAM_DOMAIN` | When enabled | — | `yourteam.cloudflareaccess.com` (the bare team name also works) |
+| `CF_ACCESS_AUD` | When enabled | — | The Access application's AUD tag |
+| `VR_ALLOWED_EMAILS` | No | — | Optional comma-separated allowlist, checked after the token verifies |
+
+## Authentication
+
+The server verifies the Cloudflare Access JWT on every request. Anything that
+did not come through Access is refused with a 403, whatever hostname or address
+it arrived on. `/health` is the only exempt path, because Cloud Run's liveness
+probe does not come through Cloudflare either.
+
+**Why the app does this rather than leaving it to Access.** Access runs at
+Cloudflare's edge, and the edge is not the only route to the origin. A Cloud Run
+service answers any request carrying the mapped `Host` header, and the address
+it answers on — `ghs.googlehosted.com` — is the documented CNAME target for
+every Cloud Run domain mapping, so it is not a secret. Turning on the orange
+cloud puts a login page in front of the *name* and leaves the origin reachable.
+Verifying the signature here is what actually closes it.
+
+**It fails closed.** `VR_AUTH_MODE` defaults to `cloudflare_access`, and with
+the gate on but unconfigured the app raises at startup instead of serving. To
+run without authentication — local development, and the test suite — say so:
+
+```bash
+VR_AUTH_MODE=disabled uvicorn app:app --reload --port 8080
+```
+
+**Finding the two values.** In the Cloudflare Zero Trust dashboard the team
+domain is under Settings → Custom Pages (it is also the `<team>.cloudflareaccess.com`
+shown on any Access login page), and the AUD tag is on the Access application's
+own Overview tab. The AUD is per-application: it is what stops a token minted
+for some *other* Access application on the same team from opening this one.
+
+**`VR_ALLOWED_EMAILS` is a second gate, not the first.** The Access policy is
+what decides who can sign in at all. Setting this as well means that if the
+policy is ever widened by accident, the app still serves only the addresses it
+was configured with.
+
+### What the app learns about the person
+
+Only their email address. An Access token carries `aud`, `email`, `exp`, `iat`,
+`iss`, `sub`, `type`, `identity_nonce` and `country` — there is no display name
+in it, and Access exposes no avatar at all. `/api/me` returns that address, and
+the SPA draws a chip in the top right with initials derived from it rather than
+fetching a picture from a third party that would then learn who reviews what.
+
+A display name *is* available from `<team>.cloudflareaccess.com/cdn-cgi/access/get-identity`
+when the team authenticates against a real identity provider such as Google;
+with one-time-PIN login there is no name to have. No avatar either way.
 
 ## How It Works
 
