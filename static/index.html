@@ -2220,7 +2220,7 @@
         //
         // ── comments-freshness:begin ────────────────────────────────────────
         // Pure: given what a comments response is for and what the pane is
-        // showing when it arrives, may it render? Indices and strings only, so
+        // showing when it arrives, may it render? A flag and two counters, so
         // it can be tested without a DOM or a clock — the surrounding fetch
         // cannot be.
         //
@@ -2249,8 +2249,12 @@
         //
         // That is a property of those two statements, not of the module: add
         // the check back if some future caller sets state.currentFile without
-        // loading comments, or if the statements between the assignment and
-        // the loadComments call grow something that can throw past it.
+        // loading comments, or if anything between the assignment and the
+        // loadComments call starts throwing before reaching it. Several
+        // statements in that window can throw in principle today —
+        // loadImagePair is ~100 lines of synchronous setup — but a throw there
+        // breaks the file view outright, so the comments pane is not what
+        // anyone would notice.
         function commentsResponseIsCurrent(opts) {
             return opts.ownedPane === true &&
                 opts.generation === opts.currentGeneration;

@@ -89,7 +89,7 @@ for (const [key, value] of inputs) {
 // spinner stays up for good.
 assert.ok(/ownedPane\s*\?\s*\+\+\s*commentsGeneration\s*:\s*commentsGeneration/.test(loadComments),
   'loadComments must take a new generation only when it owns the pane');
-assert.ok(/ownedPane\s*=\s*path\s*===\s*state\.currentFile/.test(loadComments),
+assert.ok(/ownedPane\s*=\s*\(?\s*path\s*===\s*state\s*\.\s*currentFile/.test(loadComments),
   'loadComments must decide ownedPane by comparing its path with the selected file');
 
 // Both arrival paths are guarded. The catch branch renders too -- an empty
@@ -119,32 +119,41 @@ assert.ok(badgeAt < guardAt,
 // they are actually looking at, which is the same defect with a different
 // payload.
 //
-// Containment, not position. The first version of this compared the index of
-// `if (ownedPane) {` against the index of `spinner` and passed on the very
-// defect its message names: hoisting just the innerHTML write out of the block
-// leaves the literal `if (ownedPane) {` in place and still ahead of it. Walk
-// the block and look inside it.
-function blockAfter(source, opener) {
-  const at = source.indexOf(opener);
-  assert.ok(at >= 0, 'loadComments must contain ' + opener);
-  const open = source.indexOf('{', at);
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}' && --depth === 0) return source.slice(open + 1, i);
-  }
-  return assert.fail('no matching close brace for ' + opener);
-}
-
-const ownedBlock = blockAfter(loadComments, 'if (ownedPane) {');
-const spinners = (s) => s.split('spinner').length - 1;
-assert.strictEqual(spinners(ownedBlock), 1,
-  'the spinner must be written inside the ownedPane block');
-assert.strictEqual(spinners(loadComments), spinners(ownedBlock),
-  'loadComments must not write the spinner anywhere outside the ownedPane block: a ' +
-  'reload the user has navigated away from would blank the pane for the file they ' +
+// Two earlier versions of this assertion let the defect it names run green,
+// and each failed for a different reason worth not repeating.
+//
+// The first compared the index of `if (ownedPane) {` against the index of
+// `spinner`: position, not containment, so hoisting only the innerHTML write
+// out of the block left the literal in place and still ahead of it.
+//
+// The second walked the block's braces and looked inside -- which closed that
+// one, but asserted on the *markup token* rather than on the write. Keep the
+// markup inside the block, assign it to a variable and write that variable
+// outside, and the counts are unchanged while a non-owning reload writes ''
+// over the pane and blanks the file the user is looking at. That walk was also
+// a second naive brace walk in a repo whose spa_source.js documents at length
+// why the first one needed a parse check.
+//
+// So: no walk, and the property is about the *write*. One pattern matches the
+// whole block including its closing brace -- there is nothing to over-capture
+// -- and it pins that the reveal and the spinner write both sit inside it and
+// nothing else does.
+const ownedBlock = new RegExp(
+  'if\\s*\\(\\s*ownedPane\\s*\\)\\s*\\{' +
+  '\\s*commentsSection\\s*\\.\\s*style\\s*\\.\\s*display\\s*=\\s*\'\'\\s*;' +
+  '\\s*commentsScroll\\s*\\.\\s*innerHTML\\s*=[^;]*spinner[^;]*;' +
+  '\\s*\\}');
+assert.ok(ownedBlock.test(loadComments),
+  'the ownedPane block must hold exactly the reveal and the spinner write: a reload ' +
+  'the user has navigated away from would otherwise blank the pane for the file they ' +
   'are actually looking at');
-assert.ok(/commentsSection\s*\.\s*style\s*\.\s*display/.test(ownedBlock),
-  'revealing the pane belongs inside the ownedPane block too');
+
+// And the pane is written nowhere else in the function, so there is no second
+// write for a non-owning load to reach. (A `;` inside the markup would fail
+// the pattern above -- it has none today, and an HTML entity would need this
+// assertion rewritten rather than relaxed.)
+const writes = loadComments.match(/commentsScroll\s*\.\s*innerHTML\s*=/g) || [];
+assert.strictEqual(writes.length, 1,
+  'loadComments must write commentsScroll.innerHTML exactly once, inside the ownedPane block');
 
 console.log('comments freshness: all assertions passed');
