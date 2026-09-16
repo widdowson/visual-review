@@ -24,7 +24,9 @@ Three instruments, because no one of them sees everything:
 Between them they close the reachability gap that capped #18's structural
 checks at twelve. A regex over source can see that `schedulePrefetch()` is
 written down; it cannot see whether it runs. `if (false) schedulePrefetch();`
-passes there and fails here — checked, along with eight other mutants.
+passes there and fails here. Each test's docstring names the mutants it was
+checked against; a count here would go stale the next time one is added, and
+did.
 
 Two things on #21's list remain: `cancelPrefetches` keeping the half of a pair
 that already arrived, and the `pendingLoad` clear in `checkReady`.
@@ -41,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fixture_server import BASE_REF, HEAD_REF, serve  # noqa: E402
 from spa_harness import (  # noqa: E402
     IMAGE_COUNTER, LOAD_COUNTER, SLOW_IMAGE, Probe, active_path,
-    decoded_images, find_chromium, index_html_path, issued_requests,
+    constructed_images, find_chromium, index_html_path, issued_requests,
     load_starts, prefetch_tuning, rendered_image_count, repo_root,
     wait_until,
 )
@@ -434,12 +436,21 @@ def test_an_in_flight_prefetch_is_adopted_rather_than_restarted(page, probe, bas
     open_pr(page, base_url)
     wait_until(lambda: len(probe.images(path_of(1))) == 2, "the warm to be in flight")
 
+    # Logged is not the same as open, and "mid-warm" is this test's whole
+    # identity: if the warm ever finished before the keypress, the test would
+    # quietly become a second copy of the already-complete path with a name
+    # and a docstring that still said otherwise. Measured open on every run so
+    # far, so this pins what is already true rather than tightening anything.
+    racing = [r["path"] for r in probe.in_flight()]
+    assert racing.count(path_of(1)) == 2, \
+        f"both sides of file 1 should still be in flight at the keypress, saw {racing}"
+
     page.keyboard.press("j")
     wait_until(lambda: active_path(page) == path_of(1), "file 1 to be selected")
     wait_until(lambda: rendered_image_count(page) == 2, "file 1 to render")
 
-    built = decoded_images(page, "file_01.png")
+    built = constructed_images(page, "file_01.png")
     assert len(built) == 2, (
-        f"file 1 should have been decoded once, as the pair the prefetch "
-        f"started, but the page built {len(built)} Image objects for it: "
-        f"{[s.split('?', 1)[-1] for s in built]}")
+        f"the page should have built one pair of Image objects for file 1, the "
+        f"pair the prefetch started, but it built {len(built)}: "
+        f"{[[s.split('?', 1)[-1] for s in srcs] for srcs in built]}")

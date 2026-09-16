@@ -188,20 +188,59 @@ IMAGE_COUNTER = """
 window.__vrImgs = [];
 (function () {
   var Real = window.Image;
-  function Counted() {
-    var img = new Real();
-    window.__vrImgs.push(img);
+  var desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+  function Counted(width, height) {
+    var img = new Real(width, height);
+    var rec = {img: img, srcs: []};
+    window.__vrImgs.push(rec);
+    // Record each assignment rather than reading the attribute back later.
+    // abortImage() does `img.src = ''`, and the IDL getter then resolves the
+    // empty string against the document, so an aborted image reads back as the
+    // page URL with every trace of what it was fetching gone.
+    Object.defineProperty(img, 'src', {
+      configurable: true,
+      enumerable: true,
+      get: function () { return desc.get.call(img); },
+      set: function (value) { rec.srcs.push(String(value)); desc.set.call(img, value); },
+    });
     return img;
   }
   Counted.prototype = Real.prototype;
   window.Image = Counted;
+  // Two divergences left standing, neither reachable from static/index.html:
+  // calling Image() without new returns instead of throwing, and
+  // String(window.Image) is not [native code]. The one that would have bitten
+  // — new Image(w, h) losing its dimensions — is forwarded above, measured
+  // [37, 41] through the wrapper against [0, 0] for the no-arg form.
 })();
 """
 
 
-def decoded_images(page, fragment: str = "") -> list[str]:
-    srcs = page.evaluate("window.__vrImgs.map(function (i) { return i.src; })")
-    return [s for s in srcs if fragment in s]
+def constructed_images(page, fragment: str) -> list[list[str]]:
+    """Every Image the page built for `fragment`, as the srcs assigned to each.
+
+    The third instrument, and the only one that can separate adopting an
+    in-flight prefetch from restarting it. The request log cannot: the images
+    carry production's `immutable` header, so a restart is a cache hit that
+    never reaches the server. LOAD_COUNTER cannot either: it counts selectFile
+    calls, and there is one of those whichever way the page behaves. What does
+    change is how many Image objects get built, and that is what this counts.
+
+    Two things it deliberately does not see. It wraps `window.Image`, so the
+    img elements renderComparison builds with createElement are not counted —
+    the decode path alone is the question here. And it records srcs **as they
+    are assigned**, never by reading `img.src` back: `abortImage` clears the
+    attribute, so a read-back count silently drops every image the page
+    aborted, in the direction that passes. An earlier revision did read it
+    back, and a mutant that aborted the adoption target and restarted it went
+    green.
+
+    A record matches `fragment` if any src ever assigned to it did, so an
+    aborted-then-cleared image still counts. `fragment` is required: an empty
+    one would match the document URL an aborted image reads back as.
+    """
+    records = page.evaluate("window.__vrImgs.map(function (r) { return r.srcs; })")
+    return [srcs for srcs in records if any(fragment in src for src in srcs)]
 
 
 def load_starts(page) -> int:
