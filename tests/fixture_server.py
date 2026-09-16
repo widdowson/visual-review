@@ -202,6 +202,12 @@ class Handler(BaseHTTPRequestHandler):
             # as an unrelated wait_until timeout somewhere else.
             aborted = True
         finally:
+            # Two residues of closing in a finally, both preferred to the hang:
+            # an exception that is not an OSError closes the record as a
+            # *successful* transfer, and a genuine server-side OSError closes it
+            # as a browser abort, which test_abandoned_transfers_are_cancelled
+            # would accept. Both mean the fixture itself broke, which is a
+            # louder failure than either reading.
             self.state.close_record(rec, aborted=aborted)
 
 

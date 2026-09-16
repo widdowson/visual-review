@@ -44,15 +44,24 @@ def find_chromium() -> str | None:
         + " or ".join(trees))
 
 
-def repo_file(*parts: str) -> str:
-    """A path to a file at the repo root, under Bazel runfiles or a checkout."""
+def repo_root() -> str:
+    """The repo root, under Bazel runfiles or in a plain checkout.
+
+    Probed with a file every caller has in its runfiles rather than with the
+    caller's own argument. repo_file() used to do the latter, so a caller
+    passing a glob could never satisfy os.path.exists and fell through to the
+    checkout branch — which lands inside the runfiles tree anyway, so it
+    returned the right answer through the branch that means "not under Bazel".
+    """
     for root in (os.environ.get("RUNFILES_DIR"), os.environ.get("TEST_SRCDIR")):
-        if root:
-            candidate = os.path.join(root, "_main", *parts)
-            if os.path.exists(candidate):
-                return candidate
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(here, *parts)
+        if root and os.path.exists(os.path.join(root, "_main", "static", "index.html")):
+            return os.path.join(root, "_main")
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def repo_file(*parts: str) -> str:
+    """A path to a file at the repo root. Glob against repo_root() instead."""
+    return os.path.join(repo_root(), *parts)
 
 
 def index_html_path() -> str:
@@ -66,9 +75,19 @@ def prefetch_tuning() -> dict[str, int]:
     A retune to 240ms is a judgement call the author is allowed to make, and it
     must move this test's expectation with it rather than failing it.
 
-    Comments are stripped first and each key must appear exactly once, for the
-    reason tests/spa_source.js carries the same rule: a commented-out previous
-    value sitting above a live one otherwise reads as the live one.
+    Each key must appear exactly once, because a commented-out previous value
+    sitting above a live one would otherwise read as the live one. The line
+    comments stripped to get there are a narrower rule than the one
+    tests/spa_source.js applies -- that one also keeps a `://` out of it and
+    handles `/* */`, and this does neither. Enough for the region it reads,
+    but not the same rule, so it does not claim to be.
+
+    `(\\d+)` takes the leading digits and ignores the rest, so a non-integer
+    would be truncated in silence: `delayMs: 0.5` reads as 0, which makes the
+    scaled assertion in the first test vacuous with nothing saying so. What
+    stops that is in another target -- //:test_prefetch_policy asserts
+    Number.isInteger over every key and fires first -- and it is named here
+    for the same reason the `delayMs > 0` floor is named at its use.
     """
     src = open(index_html_path(), encoding="utf-8").read()
     begin = src.index("prefetch-policy:begin")

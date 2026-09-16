@@ -28,6 +28,7 @@ prefetch is *adopted* rather than restarted is not observable from outside the
 page under either instrument.
 """
 
+import json
 import os
 import sys
 
@@ -39,7 +40,7 @@ from fixture_server import BASE_REF, HEAD_REF, serve  # noqa: E402
 from spa_harness import (  # noqa: E402
     LOAD_COUNTER, SLOW_IMAGE, Probe, active_path, find_chromium,
     index_html_path, issued_requests, load_starts, prefetch_tuning,
-    rendered_image_count, repo_file, wait_until,
+    rendered_image_count, repo_root, wait_until,
 )
 
 TUNING = prefetch_tuning()
@@ -61,11 +62,22 @@ def test_the_browser_build_matches_the_playwright_pin():
     not fail. Playwright refuses a browser whose revision it does not expect,
     so bumping one without the other turns every test in this file into an
     opaque launch error rather than a sentence naming the mismatch.
+
+    Both halves are checked, and the second is the one that bites. The
+    filename carries the version a human reads; `revision` is what actually
+    selects the download, since rules_playwright builds the URL as
+    `builds/<name>/<revision>/...`. Asserting the filename alone passed
+    happily on a manifest whose contents said `1.58.0-MUTANT-LIE`, so the
+    exact mistake this exists for — bump playwright, rename the manifest,
+    leave the old build behind — survived it. The installed wheel ships its
+    own `browsers.json`, which is authoritative and already in the runfiles.
     """
     import glob as _glob
     import importlib.metadata
 
-    manifests = _glob.glob(repo_file("browsers.*.json"))
+    import playwright
+
+    manifests = _glob.glob(os.path.join(repo_root(), "browsers.*.json"))
     assert len(manifests) == 1, f"expected exactly one browsers manifest, found {manifests}"
     pinned = os.path.basename(manifests[0]).removeprefix("browsers.").removesuffix(".json")
 
@@ -73,6 +85,24 @@ def test_the_browser_build_matches_the_playwright_pin():
     assert pinned == installed, (
         f"the browser manifest is pinned to {pinned} but the playwright package is "
         f"{installed}; update MODULE.bazel and requirements_lock.txt together")
+
+    ours = json.load(open(manifests[0], encoding="utf-8"))["browsers"]
+    theirs = json.load(open(os.path.join(
+        os.path.dirname(playwright.__file__),
+        "driver", "package", "browsers.json"), encoding="utf-8"))["browsers"]
+    by_name = {b["name"]: b for b in theirs}
+
+    for browser in ours:
+        upstream = by_name.get(browser["name"])
+        assert upstream, (
+            f"{os.path.basename(manifests[0])} declares {browser['name']}, which "
+            f"playwright {installed} does not ship: {sorted(by_name)}")
+        for field in ("revision", "browserVersion"):
+            assert browser[field] == upstream[field], (
+                f"{browser['name']}.{field} is {browser[field]!r} here and "
+                f"{upstream[field]!r} in playwright {installed}; re-derive the "
+                f"trimmed manifest from the wheel's own browsers.json rather "
+                f"than editing it by hand")
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -220,8 +250,11 @@ def test_the_previous_file_is_warmed_too(page, probe, base_url):
     def issued(name: str) -> list[int]:
         return [i for i, url in enumerate(issued_requests(page)) if name in url]
 
-    wait_until(lambda: len(issued(above)) == 2, "both sides of the file above to be warmed")
-    wait_until(lambda: len(issued(below)) == 2, "both sides of the file below to be warmed")
+    # >=, not ==: a third request for either file would make an == wait spin to
+    # its timeout and report as "never warmed", which is the opposite of what
+    # happened.
+    wait_until(lambda: len(issued(above)) >= 2, "both sides of the file above to be warmed")
+    wait_until(lambda: len(issued(below)) >= 2, "both sides of the file below to be warmed")
 
     # Next before previous, so a reader going forwards never waits on a warm
     # they did not ask for. Read off the renderer's issue order, not the
@@ -238,11 +271,18 @@ def test_a_fast_scroll_does_not_pile_up_transfers(page, probe, base_url):
 
     Before #18 every file passed through kept two transfers racing the one the
     user stopped on. What clears them here is the abort: each selection cancels
-    the last one's transfers. The debounce is not what this measures — with it
-    removed the scroll issued the identical 22 requests, because a file passed
-    through never finishes rendering and so never reaches the code that arms a
-    prefetch at all. The debounce is pinned by the timing assertion in the
-    first test instead.
+    the last one's transfers. Not the debounce — replacing the timer with a
+    synchronous runPrefetch() leaves the peak at 4 racing and the drain
+    unchanged, so nothing below moves.
+
+    It does move the request count, by exactly one pair: 20 issued rather than
+    22, in 5 runs of each. Not a prefetch landing mid-scroll — the pair that
+    goes missing is file 1's, warmed before the scroll starts, because open_pr
+    returns when the first pair renders and the debounce holds that warm past
+    the probe.reset() below. Measured per path, not reasoned about; an earlier
+    revision of this docstring claimed the count was identical, which it is
+    not. The bound below therefore has real slack, so that a warm landing
+    anywhere in the scroll cannot fail it.
     """
     open_pr(page, base_url)
     probe.reset()
@@ -259,9 +299,16 @@ def test_a_fast_scroll_does_not_pile_up_transfers(page, probe, base_url):
         high_water = max(high_water, len(probe.in_flight()))
 
     assert active_path(page) == path_of(FILE_COUNT - 1)
-    assert high_water >= 1, \
-        "the in-flight reader never saw a single transfer during a scroll of " \
-        f"{FILE_COUNT - 1} files, so it cannot bound anything"
+    # 2, not 1, and the floor has to meet the ceiling or it is not a control.
+    # The bound asserted below is "<= 2 racing"; a reader that can never report
+    # more than 2 cannot fail it, so the round-1 fix of moving this from 0 to 1
+    # left most of the band it was for. A pair is two images and the fixture's
+    # delay is a deterministic sleep, so two in flight at a mid-scroll sample is
+    # guaranteed by construction; measured 4 in 15 runs of 16 and 3 in the other.
+    assert high_water >= 2, \
+        f"the in-flight reader peaked at {high_water} during a scroll of " \
+        f"{FILE_COUNT - 1} files, so it cannot tell a drained stack from a " \
+        "racing one and the bound below asserts nothing"
 
     # Bounded re-sample rather than one reading. An aborted transfer stays open
     # in the log until the fixture's next write into that socket raises, which
@@ -275,11 +322,16 @@ def test_a_fast_scroll_does_not_pile_up_transfers(page, probe, base_url):
 
     # The other half of the bound: the scroll really did issue the traffic it
     # was supposed to, so "<= 2 left" is not the emptiness of a scroll that
-    # never happened.
+    # never happened. Deliberately far below the 22 this measures, because that
+    # is the whole of what this half is for. At 22 the bound was an equality
+    # wearing a >=, with zero slack in the one direction a landed warm, a faster
+    # machine or a smaller SLOW_IMAGE all push: dropping the debounce takes it
+    # to 20 and made this assertion, in a test whose docstring says it cannot
+    # see the debounce, the strongest debounce detector in the file.
     issued = probe.images()
-    assert len(issued) >= 2 * (FILE_COUNT - 1), \
+    assert len(issued) >= FILE_COUNT, \
         f"a scroll through {FILE_COUNT - 1} files should have issued at least " \
-        f"{2 * (FILE_COUNT - 1)} requests, saw {len(issued)}"
+        f"{FILE_COUNT} requests, saw {len(issued)}"
 
     wait_until(lambda: rendered_image_count(page) == 2, "the landed file to render")
 
