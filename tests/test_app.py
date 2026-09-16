@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2384,7 +2385,6 @@ class TestRepoPulls:
         assert resp.status_code == 200
         assert resp.json()["pulls"] == []
         assert "connection reset" in resp.json()["error"]
-# -- Client disconnect ---------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_one_pull_requests_transport_failure_does_not_discard_the_list(self):
@@ -2416,6 +2416,44 @@ class TestRepoPulls:
         assert rows[1]["images"] is None
         assert "ReadTimeout" in rows[1]["image_error"]
         assert rows[2]["images"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failure_with_no_message_still_reads_as_a_failure(self):
+        """Round 4, Major 1: ``str(e)`` can be empty, and empty is falsy.
+
+        A read timeout on the list request stringifies to "" the whole way
+        down — anyio raises a bare ``TimeoutError()``, httpcore re-raises it
+        as ``to_exc(exc)``, httpx does ``message = str(exc)`` — so the outer
+        handler's ``{"error": str(e)}`` answered ``{"error": ""}``. The page
+        decided success by truthiness, so it took that for a good load of a
+        repository with no open pull requests, and said so.
+
+        Measured before the fix: the endpoint really did answer
+        ``{"error": "", "pulls": []}``. Both halves are fixed; this is the
+        server's. The client's is scenario F in //:test_repo_page.
+        """
+        class _Timeout:
+            async def get(self, url, **kwargs):
+                raise httpx.ReadTimeout(str(TimeoutError()))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        assert str(httpx.ReadTimeout(str(TimeoutError()))) == "", (
+            "this test is only meaningful while that exception stringifies empty"
+        )
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), \
+             patch("httpx.AsyncClient", return_value=_Timeout()):
+            resp = await _get("/api/owner/repo/pulls")
+
+        body = resp.json()
+        assert body["pulls"] == []
+        assert body["error"], "an error the far side cannot see is not an error"
+        assert "ReadTimeout" in body["error"], "and it names what went wrong"
 
     @pytest.mark.asyncio
     async def test_the_fan_out_survives_a_probe_that_raises(self, caplog):
@@ -2805,6 +2843,16 @@ class TestPrImageSummaryNeverRaises:
         assert "repo=owner/repo" in caplog.text
         assert "pr=7" in caplog.text, "the log must name the PR it is about"
         assert "ReadTimeout" in caplog.text, "and what went wrong"
+
+        # The level and the absence of a traceback, not just the text.
+        # ``caplog.at_level`` is a threshold, so a record emitted at ERROR with
+        # a traceback satisfies everything above exactly as a WARNING does —
+        # measured: putting ``logger.exception`` back here left the suite
+        # green. This branch is the expected one and runs once per open PR, so
+        # a GitHub blip must not be one traceback per PR per cold page load.
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelno == logging.WARNING
+        assert caplog.records[0].exc_info is None, "the expected branch logs no traceback"
 
 
 class TestCatchAllRouteScope:

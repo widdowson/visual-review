@@ -1179,8 +1179,16 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
                 await asyncio.gather(*(fill(row) for row in rows))
 
     except Exception as e:
+        # The type, not a bare str(e). A read timeout stringifies to the empty
+        # string — anyio raises a bare TimeoutError(), httpcore wraps it with
+        # `to_exc(exc)` and httpx with `message = str(exc)` — so `{"error":
+        # str(e)}` answers `{"error": ""}`, which any truthiness test on the
+        # far side reads as a successful load of an empty repository. That is
+        # the one wrong answer this page can give, and it arrives on the most
+        # ordinary failure there is. _pr_image_summary has always written the
+        # type for the same reason; this is the same contract on the list.
         return JSONResponse(
-            content={"error": str(e), "pulls": []},
+            content={"error": f"{type(e).__name__}: {e}", "pulls": []},
             headers={"Cache-Control": "no-store"},
         )
 

@@ -170,12 +170,21 @@
         var hideEmptyEl = document.getElementById('hide-empty');
         var repoLinkEl = document.getElementById('repo-link');
 
-        // Declared before the first thing that can call showMessage, which
-        // reads it: the bad-URL branch below is such a call.
+        // The page's whole state. Everything on screen is drawn from it, and
+        // nothing is written once and left standing — a redraw is one filter
+        // click away, and that click is what turned each of this page's three
+        // failure bugs from a wrong pixel into a wrong sentence.
         var rows = [];
         var probed = false;
         var listTruncated = false;
         var loadError = null;
+        // Whether any answer has come back at all. The filter's change
+        // listener is registered before the first request is sent, so without
+        // this a click during that request draws a zero-row list and reports
+        // "No open pull requests." over a repository that has them — the same
+        // claim the failure path is careful not to make, from the one state
+        // with no evidence behind it either way.
+        var loaded = false;
 
         var where = VRRepo.repoFromPath(location.pathname);
         if (!where) {
@@ -213,6 +222,12 @@
                 showMessage(loadError, true);
                 return;
             }
+            // Before the first answer the served markup already says
+            // "Loading…" and shows nothing; leave it saying that rather than
+            // replacing it with a count of a list that has not arrived.
+            if (!loaded) {
+                return;
+            }
             VRRepo.renderList(listEl, where.owner, where.repo, rows, {
                 hideEmpty: hideEmptyEl.checked,
                 nowMs: Date.now(),
@@ -248,11 +263,20 @@
             return fetch(VRRepo.pullsApiHref(where.owner, where.repo, withProbe))
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
-                    if (data.error) { fail(data.error); return false; }
-                    rows = data.pulls || [];
-                    probed = !!data.probed;
-                    listTruncated = !!data.truncated;
-                    loadError = null;
+                    // The *presence* of the key, not its truthiness. An error
+                    // string can be empty — a read timeout stringifies to ''
+                    // through httpx — and `if (data.error)` read that as a
+                    // successful load of a repository with no open PRs. The
+                    // server no longer sends an empty one, and this no longer
+                    // depends on it not doing so.
+                    if (data && 'error' in data) {
+                        fail(data.error || 'Could not load pull requests.');
+                        return false;
+                    }
+                    rows = (data && data.pulls) || [];
+                    probed = !!(data && data.probed);
+                    listTruncated = !!(data && data.truncated);
+                    loaded = true;
                     draw();
                     return true;
                 });

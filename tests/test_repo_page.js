@@ -283,8 +283,17 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
       'draw() must take the summary line from summaryLine, with the page state in order' + RENAME);
     assert.ok(/VRRepo\.markUncounted\(\s*rows\s*,/.test(page),
       'a failed load must mark the rows it left uncounted' + RENAME);
-    assert.ok(/listTruncated\s*=\s*!!\s*data\.truncated/.test(page),
+    assert.ok(/listTruncated\s*=\s*!!\s*\(?\s*data\s*&&\s*data\.truncated\s*\)?/.test(page),
       "the response's top-level truncated flag must reach the page" + RENAME);
+    // Round 4, Major 1: an error is decided by the key being there, never by
+    // the string being non-empty. Scenario F drives the behaviour; this stops
+    // the check reverting to `if (data.error)` and reading an empty-string
+    // error as a good load.
+    assert.ok(/'error'\s+in\s+data/.test(page),
+      "a load failure must be decided by the presence of the error key, not its truthiness");
+    assert.ok(!/if\s*\(\s*data\.error\s*\)/.test(page),
+      'a bare truthiness test on data.error reads an empty-string error as success');
+
     // The bug itself: nothing may write the error into the element, because the
     // next draw() overwrites it.
     const assignments = page.match(/summaryEl\.textContent\s*=\s*([^;]+);/g) || [];
@@ -310,6 +319,15 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
 // the repository had no open PRs.
 {
   const { drivePage } = require(HARNESS_PATH);
+
+  // Driving the page must not disturb this file's own shim. An earlier harness
+  // assigned global.document and left it assigned, so every assertion after
+  // this block rendered through the harness's element() rather than the node()
+  // documented beside them — harmless while the two agree and invisible the
+  // moment they stop. repo.js is now evaluated inside the vm context, which is
+  // also its real browser path, so nothing outside is touched; this is what
+  // says so.
+  const outerDocument = global.document;
 
   const ERR = { error: 'Pull request list failed: HTTP 404' };
   const ONE = {
@@ -379,8 +397,64 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
     assert.ok(/No open pull requests/.test(page.summary));
   }));
 
+  // F — round 4, Major 1. A read timeout on the list request stringifies to
+  // the empty string all the way through httpx, so the server used to answer
+  // {"error": "", "pulls": []} and `if (data.error)` read it as a good load of
+  // an empty repository. The server no longer sends an empty string and the
+  // page no longer decides by truthiness; either alone would fix the symptom,
+  // and both are held because the contract has two sides.
+  const EMPTY_ERROR = { error: '', pulls: [] };
+  checks.push(drivePage([EMPTY_ERROR, EMPTY_ERROR]).then(page => {
+    assert.ok(!claimsEmptiness(page),
+      'an error with no message is still an error, not an empty repository');
+    assert.ok(/Could not load/.test(page.listText),
+      'and the page says something rather than nothing');
+    page.toggleFilter();
+    assert.ok(!claimsEmptiness(page), 'and a click does not turn it into one');
+  }));
+
+  // G — the same, arriving on the probing pass over a list already rendered.
+  // This is the shape that made it a Major rather than a curiosity: it wiped
+  // rows that were on screen and correct.
+  checks.push(drivePage([ONE, EMPTY_ERROR]).then(page => {
+    assert.ok(!claimsEmptiness(page), 'an empty-string error must not wipe the list');
+    assert.strictEqual(page.badges.length, 1, 'the row that had rendered is still there');
+    assert.deepStrictEqual(page.badges, ['check failed']);
+  }));
+
+  // H — round 4, Minor 1. The filter's listener is registered before the first
+  // request is sent, so a click can land while the page still knows nothing.
+  // It used to answer with "No open pull requests." over a repository that has
+  // them, and then correct itself when the response arrived — a claim made
+  // from the one state with no evidence behind it either way.
+  checks.push(drivePage([ONE, ONE], { defer: true }).then(page => {
+    assert.strictEqual(page.summary, 'Loading…', 'the served markup says this');
+    page.toggleFilter();
+    assert.ok(!claimsEmptiness(page),
+      'a click before the first answer must claim nothing about the count');
+    assert.strictEqual(page.summary, 'Loading…', 'it still says what it knows');
+    return page.release().then(settled => {
+      assert.ok(/1 of 1 have image changes|checking/.test(settled.summary),
+        'and the real answer arrives normally afterwards');
+    });
+  }));
+
+  // I — round 4, Minor 2. The cheap pass goes first. Reversed, the page shows
+  // nothing until the whole fan-out has finished, which is the thing #39 says
+  // the per-PR check must never cause; every other assertion here passes
+  // either way.
+  checks.push(drivePage([ONE, ONE]).then(page => {
+    assert.deepStrictEqual(page.requests,
+      ['/api/o/r/pulls?probe=0', '/api/o/r/pulls'],
+      'the unprobed pass must be asked for first, so the list is never waiting on the counts');
+  }));
+
   Promise.all(checks).then(
-    () => console.log('test_repo_page: page-driven checks passed'),
+    () => {
+      assert.strictEqual(global.document, outerDocument,
+        'driving the page must not replace the outer realm\'s document');
+      console.log('test_repo_page: page-driven checks passed');
+    },
     err => { console.error(err); process.exit(1); });
 }
 
