@@ -43,6 +43,8 @@ py_binary(
         "image_extensions.json",
         "static/favicon.svg",
         "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
     ],
     deps = [":app_lib"],
 )
@@ -57,7 +59,12 @@ py_test(
         "tests/__init__.py",
     ],
     args = ["tests/test_app.py"],
-    data = ["image_extensions.json"],
+    data = [
+        "image_extensions.json",
+        "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
+    ],
     # These tests predate the Cloudflare Access gate and assert on responses,
     # not on authentication. Without this every one of them would get a 403 and
     # the suite would say the app was broken rather than that it was guarded.
@@ -84,6 +91,8 @@ py_test(
         "image_extensions.json",
         "static/favicon.svg",
         "static/index.html",
+        "static/repo.html",
+        "static/repo.js",
     ],
     # Imports app.py, whose module-level auth config is read at import time.
     # The gate is then armed per test by swapping the verifier, so the module
@@ -111,9 +120,12 @@ py_test(
 # the target takes a cache hit instead of running.
 py_test(
     name = "test_spa_prefetch",
-    # "medium" despite an ~8s happy path, which earns Bazel's "size is too big"
-    # advisory: a total-prefetch-failure mutant spends 66s in wait_until
-    # timeouts before reporting, and a browser is not a small-size workload.
+    # "medium" despite an ~9s happy path, which earns Bazel's "size is too big"
+    # advisory: a total-prefetch-failure mutant spends ~83s in wait_until
+    # timeouts before reporting, against medium's 300s cap, and a browser is
+    # not a small-size workload. That number moves with every wait added — it
+    # was 66s until this file's own adoption test added a 15s gate — so read
+    # the headroom rather than the figure.
     size = "medium",
     srcs = [
         "tests/__init__.py",
@@ -270,6 +282,33 @@ js_test(
     data = [
         "static/index.html",
         "tests/spa_source.js",
+    ],
+)
+
+js_test(
+    name = "test_comments_freshness",
+    entry_point = "tests/test_comments_freshness.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+# The repo page's logic is a module rather than a region of its HTML, so this
+# requires it directly. static/repo.js is the entry point's own dependency —
+# without it in data an edit to the page's logic changes no input of this
+# target and the test takes a cache hit against the change.
+js_test(
+    name = "test_repo_page",
+    entry_point = "tests/test_repo_page.js",
+    # repo.html as well as repo.js: the harness runs the page's inline script
+    # and the wiring check reads it as text, and an undeclared input is not in
+    # the sandbox *and* is not a cache key — so such a check fails here and,
+    # once passing, takes a cache hit on the very edit it exists to catch.
+    data = [
+        "static/repo.html",
+        "static/repo.js",
+        "tests/repo_page_harness.js",
     ],
 )
 

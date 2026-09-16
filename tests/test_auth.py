@@ -353,6 +353,18 @@ class TestGate:
         resp = await _get(application, "/api/widdowson/apwphotos-appv2/pr/25/images")
         assert resp.status_code == 403
 
+    async def test_the_repo_page_is_refused_too(self, gated):
+        """Added with the repo browser. Every route but /health is gated by
+        construction, so this is here to notice if that ever stops being true
+        for a page that lists someone's pull requests."""
+        application, _, _ = gated
+        assert (await _get(application, "/widdowson/apwphotos-appv2")).status_code == 403
+
+    async def test_the_pulls_api_is_refused_too(self, gated):
+        application, _, _ = gated
+        resp = await _get(application, "/api/widdowson/apwphotos-appv2/pulls")
+        assert resp.status_code == 403
+
     async def test_static_assets_are_refused_too(self, gated):
         application, _, _ = gated
         resp = await _get(application, "/static/favicon.svg")

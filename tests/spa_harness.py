@@ -184,6 +184,82 @@ document.addEventListener('DOMContentLoaded', () => {
 """
 
 
+IMAGE_COUNTER = """
+window.__vrImgs = [];
+(function () {
+  var Real = window.Image;
+  var desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+  function Counted(width, height) {
+    var img = new Real(width, height);
+    // Strings only. The element itself is not retained: nothing reads it, and
+    // holding one would pin every Image the page builds alive for the life of
+    // the page, evicted ones included, in a file that also tests cacheRadius.
+    var rec = {srcs: []};
+    window.__vrImgs.push(rec);
+    // Record each assignment rather than reading the attribute back later.
+    // abortImage() does `img.src = ''`, and the IDL getter then resolves the
+    // empty string against the document, so an aborted image reads back as the
+    // page URL with every trace of what it was fetching gone.
+    Object.defineProperty(img, 'src', {
+      configurable: true,
+      enumerable: true,
+      get: function () { return desc.get.call(img); },
+      set: function (value) { rec.srcs.push(String(value)); desc.set.call(img, value); },
+    });
+    return img;
+  }
+  Counted.prototype = Real.prototype;
+  window.Image = Counted;
+  // Three divergences left standing, none reachable from static/index.html:
+  // calling Image() without new returns instead of throwing;
+  // String(window.Image) is not [native code]; and the defineProperty above
+  // gives the image an *own* enumerable `src` where a real one inherits it,
+  // so Object.keys(img), JSON.stringify(img) and {...img} all show it. The
+  // page never enumerates an Image — its Object.keys/for-in/JSON.stringify
+  // sites are over state.prefetching, state.imageCache, the comment counts
+  // and a POST body. The divergence that would have bitten — new Image(w, h)
+  // losing its dimensions — is forwarded above, measured [37, 41] through the
+  // wrapper against [0, 0] for the no-arg form.
+})();
+"""
+
+
+def constructed_images(page, fragment: str) -> list[list[str]]:
+    """Every Image the page built for `fragment`, as the srcs assigned to each.
+
+    The third instrument, and the only one that can separate adopting an
+    in-flight prefetch from restarting it. The request log cannot: the images
+    carry production's `immutable` header, so a restart is a cache hit that
+    never reaches the server. LOAD_COUNTER cannot either: it counts selectFile
+    calls, and there is one of those whichever way the page behaves. What does
+    change is how many Image objects get built, and that is what this counts.
+
+    Three things it deliberately does not see. It wraps `window.Image`, so the
+    img elements renderComparison builds with createElement are not counted —
+    the decode path alone is the question here. It records srcs **as they are
+    assigned**, never by reading `img.src` back: `abortImage` clears the
+    attribute, so a read-back count silently drops every image the page
+    aborted, in the direction that passes. An earlier revision did read it
+    back, and a mutant that aborted the adoption target and restarted it went
+    green. And because it records assignments to the *property*, a src set
+    with `setAttribute` is invisible to it — an image fetched only that way
+    would drop out of the filter, the same false-pass direction. Unreachable
+    today (`setAttribute` appears 11 times in static/index.html, never for
+    src; every src is a property assignment) and the one thing the read-back
+    version did cover, so it is stated rather than guarded against.
+
+    A record matches `fragment` if any src ever assigned to it did, so an
+    aborted-then-cleared image still counts. It is matched against the whole
+    request URL, where the path is percent-encoded, so a bare filename works
+    and `path_of(i)` — the spelling `Probe.images()` takes — matches nothing,
+    the separator being `%2F`. `fragment` is required because
+    `'' in s` is true of every string: an empty one would match every image
+    built, including one whose only recorded assignment is abortImage's clear.
+    """
+    records = page.evaluate("window.__vrImgs.map(function (r) { return r.srcs; })")
+    return [srcs for srcs in records if any(fragment in src for src in srcs)]
+
+
 def load_starts(page) -> int:
     return page.evaluate("window.__vrLoads || 0")
 

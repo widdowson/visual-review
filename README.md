@@ -5,6 +5,7 @@ A standalone tool for reviewing visual changes (PNG screenshots) in GitHub pull 
 ## Features
 
 - **Multi-repo support** — one deployment serves any GitHub repository via `/{owner}/{repo}/pr/{number}`
+- **Repo page** — `/{owner}/{repo}` lists every open pull request and says which of them change images, so you can tell what is worth opening without checking each one on GitHub
 - **4 comparison modes** — side-by-side, crossfade, swipe slider, and pixel diff overlay
 - **Pixel loupe** — hold Shift to magnify and inspect individual pixels across base, current, and diff views
 - **Diff gutter** — minimap showing which rows have changes, with scroll indicators
@@ -141,7 +142,9 @@ deployment holding one.
 
 ```
 /{owner}/{repo}/pr/{number}          → Visual review SPA
-/api/{owner}/{repo}/pr/{number}/...  → API endpoints
+/{owner}/{repo}                      → Repo page: open PRs, and which change images
+/{identifier}                        → Short form of the repo page (302)
+/api/{owner}/{repo}/...              → API endpoints
 ```
 
 ### API Endpoints
@@ -153,6 +156,8 @@ deployment holding one.
 | GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file |
 | POST | `/api/{owner}/{repo}/pr/{number}/comments` | Post a review comment on a file |
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
+| GET | `/api/{owner}/{repo}/pr/{number}/checks` | Combined CI status for the PR's head commit |
+| GET | `/api/{owner}/{repo}/pulls?probe=1` | List open PRs with each one's image count. `probe=0` returns the list alone, with no per-PR count, in a single request |
 | GET | `/api/extensions` | Image extensions this server understands, for clients that would otherwise hardcode them |
 | GET | `/api/me` | The signed-in address, or `authenticated: false` |
 | GET | `/health` | Liveness check (the one path the auth gate exempts) |
