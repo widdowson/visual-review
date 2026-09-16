@@ -89,8 +89,18 @@ for (const [key, value] of inputs) {
 // spinner stays up for good.
 assert.ok(/ownedPane\s*\?\s*\+\+\s*commentsGeneration\s*:\s*commentsGeneration/.test(loadComments),
   'loadComments must take a new generation only when it owns the pane');
-assert.ok(/ownedPane\s*=\s*\(?\s*path\s*===\s*state\s*\.\s*currentFile/.test(loadComments),
-  'loadComments must decide ownedPane by comparing its path with the selected file');
+// Anchored on the statement's end, and pinned as assigned exactly once. An
+// unanchored form let `|| true` be appended to the comparison, and a check on
+// the assignment alone let a second one two lines later overwrite it; either
+// makes ownedPane unconditionally true and hands every stale response the
+// pane, which is issue #36 in full rather than a variant. Both are sabotage
+// rather than slips, but they are two lines to close.
+assert.ok(/ownedPane\s*=\s*\(?\s*path\s*===\s*state\s*\.\s*currentFile\s*\)?\s*;/.test(loadComments),
+  'loadComments must decide ownedPane by comparing its path with the selected file, ' +
+  'and by nothing else');
+assert.strictEqual((loadComments.match(/\bownedPane\s*=[^=]/g) || []).length, 1,
+  'ownedPane must be assigned exactly once: a later reassignment would make every ' +
+  'stale response look like the one the pane is waiting for');
 
 // Both arrival paths are guarded. The catch branch renders too -- an empty
 // pane written over the wrong file is the same defect as a full one.
