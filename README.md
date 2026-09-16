@@ -56,6 +56,38 @@ node tests/test_hash_target.js
 `pytest tests/ -v` still works for the Python tests alone, but it misses every
 `js_test`, so it is not enough before pushing.
 
+`//:test_spa_prefetch` drives the real SPA in a browser, against a fake backend
+(`tests/fixture_server.py`) rather than GitHub. Chromium is hermetic — Bazel
+downloads it, pinned in `MODULE.bazel` to the build matching the `playwright`
+pin in `requirements_lock.txt`. Those two must move together, and the test
+asserts it rather than trusting this paragraph — the version in the manifest's
+filename, and each entry's `revision` and `browserVersion`, against the
+`browsers.json` the installed wheel ships. `revision` is what selects the
+download, since the URL is `builds/<name>/<revision>/…`; `browserVersion` says
+which build that revision *is*, and selects nothing, so it is checked to catch
+a manifest edited by hand rather than re-derived. Bump `playwright` and the
+trimmed manifest is to be re-derived from that file, not edited. Nothing needs
+to be installed and `playwright install` must not be run.
+
+**Which Linux build it fetches is a build flag, not autodetection.**
+`@rules_playwright//:linux_distro` defaults to `ubuntu24.04`, so on Debian 12
+or Ubuntu 22.04 Bazel will fetch a shell built for the wrong distro and the
+failure surfaces as an opaque browser launch error. Pass the right one:
+
+```bash
+bazel test //... --@rules_playwright//:linux_distro=debian12
+```
+
+Accepted values are `debian11`, `debian12`, `ubuntu20.04`, `ubuntu22.04` and
+`ubuntu24.04`. CI pins `runs-on: ubuntu-24.04` so the runner and the default
+cannot drift apart.
+
+To poke at the fixture by hand, serve it and open the URL it prints:
+
+```bash
+python3 tests/fixture_server.py
+```
+
 ### Google Cloud Run
 
 The app is stateless and scales to zero, making Cloud Run an ideal deployment target — you only pay when someone is actively reviewing a PR.

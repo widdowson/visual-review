@@ -11,7 +11,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: @rules_playwright//:linux_distro
+    # defaults to ubuntu24.04 and does not detect the host, so when the
+    # latest label moves on, the hermetic Chromium would be built for a
+    # distro the runner no longer is. See README.md.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
