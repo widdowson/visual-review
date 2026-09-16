@@ -159,8 +159,19 @@ function drivePage(responses, opts) {
       els['hide-empty'].fire('change');
       return handle;
     },
-    // For a `defer` run: let every held response through and settle again.
-    release() { pending.splice(0).forEach(fn => fn()); return settle(handle); },
+    // For a `defer` run: let every held response through and settle again —
+    // including the ones the page only asks for *because* the earlier ones
+    // arrived. Splicing once released the first pass only, so the second
+    // request sat held for ever and a test after release() was looking at a
+    // half-loaded page while reading as if it had settled.
+    release() {
+      const drain = rounds => {
+        if (!pending.length || rounds > 8) return settle(handle);
+        pending.splice(0).forEach(fn => fn());
+        return settle(handle).then(() => drain(rounds + 1));
+      };
+      return drain(0);
+    },
   };
 
   return settle(handle);

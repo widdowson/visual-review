@@ -158,7 +158,10 @@
         body.appendChild(line);
 
         const meta = el('div', 'pr-meta');
-        const bits = [row.author, row.head_ref + ' → ' + row.base_ref];
+        // filter(Boolean): a PR opened by a since-deleted GitHub account has no
+        // login, and _pull_row passes that through as "", which joined to a
+        // meta line beginning with a stray separator.
+        const bits = [row.author, row.head_ref + ' → ' + row.base_ref].filter(Boolean);
         const age = relativeTime(row.updated_at, nowMs);
         if (age) bits.push('updated ' + age);
         meta.appendChild(el('span', null, bits.join(' · ')));

@@ -269,13 +269,22 @@
                     // successful load of a repository with no open PRs. The
                     // server no longer sends an empty one, and this no longer
                     // depends on it not doing so.
-                    if (data && 'error' in data) {
+                    //
+                    // Deliberately no `data &&` in front of it. This endpoint
+                    // always answers an object, so the guard could only ever
+                    // catch a body that is not this endpoint's — and for that
+                    // one input its whole effect was to swallow the TypeError
+                    // that used to reach the .catch below as an honest failure,
+                    // and report "No open pull requests." instead. A guard
+                    // whose only reachable effect is to turn an error into this
+                    // page's one forbidden sentence is worse than no guard.
+                    if ('error' in data) {
                         fail(data.error || 'Could not load pull requests.');
                         return false;
                     }
-                    rows = (data && data.pulls) || [];
-                    probed = !!(data && data.probed);
-                    listTruncated = !!(data && data.truncated);
+                    rows = data.pulls || [];
+                    probed = !!data.probed;
+                    listTruncated = !!data.truncated;
                     loaded = true;
                     draw();
                     return true;

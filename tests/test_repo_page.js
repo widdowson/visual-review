@@ -283,7 +283,7 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
       'draw() must take the summary line from summaryLine, with the page state in order' + RENAME);
     assert.ok(/VRRepo\.markUncounted\(\s*rows\s*,/.test(page),
       'a failed load must mark the rows it left uncounted' + RENAME);
-    assert.ok(/listTruncated\s*=\s*!!\s*\(?\s*data\s*&&\s*data\.truncated\s*\)?/.test(page),
+    assert.ok(/listTruncated\s*=\s*!!\s*\(?\s*(?:data\s*&&\s*)?data\.truncated/.test(page),
       "the response's top-level truncated flag must reach the page" + RENAME);
     // Round 4, Major 1: an error is decided by the key being there, never by
     // the string being non-empty. Scenario F drives the behaviour; this stops
@@ -306,17 +306,18 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
 }
 
 // ── The page, run ──────────────────────────────────────────────────────────
-// Round 3, Major 1. Everything above tests repo.js and the shape of the calls
-// repo.html makes. Neither can see *which branch* of fail() runs, and both
-// findings against this page's failure handling have been branch findings: a
-// message written where the next redraw erased it, and a failed first load
-// whose error one filter click replaced with "No open pull requests." — a
-// positive claim about the question the page exists to answer, from a page
-// that had just said it could not answer it.
+// Rounds 3-5. Everything above tests repo.js and the shape of the calls
+// repo.html makes. Neither can see *which branch* runs, and every finding
+// against this page's failure handling has been a branch finding: a message
+// written where the next redraw erased it, a failed first load whose error one
+// filter click replaced with "No open pull requests.", and an error string the
+// page never recognised as one — each a positive claim about the question the
+// page exists to answer, from a page that could not answer it.
 //
-// So these run the real inline script. The reachable route to the second bug
-// was a typo'd repo name: GitHub 404s, the page says so, and one click said
-// the repository had no open PRs.
+// So these run the real inline script, over every way this endpoint's response
+// can arrive. The reachable route to the second bug was a typo'd repo name:
+// GitHub 404s, the page says so, and one click said the repository had no open
+// PRs.
 {
   const { drivePage } = require(HARNESS_PATH);
 
@@ -340,6 +341,10 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
     probed: false, truncated: false,
   };
   const EMPTY = { pulls: [], probed: true, truncated: false };
+  const ONE_COUNTED = {
+    pulls: [Object.assign({}, ONE.pulls[0], { images: 3 })],
+    probed: true, truncated: false,
+  };
 
   // The invariant, stated once and checked after every failure below: a page
   // that could not load must not tell anyone how many open PRs there are.
@@ -427,16 +432,39 @@ for (const [i, state] of [[1, 'empty'], [2, 'unknown'], [3, 'checking']]) {
   // It used to answer with "No open pull requests." over a repository that has
   // them, and then correct itself when the response arrived — a claim made
   // from the one state with no evidence behind it either way.
-  checks.push(drivePage([ONE, ONE], { defer: true }).then(page => {
+  checks.push(drivePage([ONE, ONE_COUNTED], { defer: true }).then(page => {
     assert.strictEqual(page.summary, 'Loading…', 'the served markup says this');
+    assert.deepStrictEqual(page.requests, ['/api/o/r/pulls?probe=0'],
+      'only the first request has been made — the page is genuinely mid-flight');
     page.toggleFilter();
     assert.ok(!claimsEmptiness(page),
       'a click before the first answer must claim nothing about the count');
     assert.strictEqual(page.summary, 'Loading…', 'it still says what it knows');
     return page.release().then(settled => {
-      assert.ok(/1 of 1 have image changes|checking/.test(settled.summary),
+      // The exact string, not an alternation. release() drains both passes, so
+      // this is the fully-loaded page; an alternation tolerating "checking…"
+      // would have passed on a page whose second request was never released.
+      assert.strictEqual(settled.summary, '1 of 1 have image changes',
         'and the real answer arrives normally afterwards');
+      assert.deepStrictEqual(settled.requests,
+        ['/api/o/r/pulls?probe=0', '/api/o/r/pulls'], 'both passes ran');
     });
+  }));
+
+  // J — round 5, Minor 1. A body that is not an object at all. This endpoint
+  // cannot produce one — every exit carries `error` or `pulls`, and anything
+  // else in the chain answers something `r.json()` rejects, which is C — so
+  // this is not a state the page can reach today. It is here because round 4
+  // added `data &&` guards for it whose only effect was to swallow the
+  // TypeError that used to reach the .catch as an honest failure and report
+  // "No open pull requests." instead. The guards are gone; this is what says
+  // the error path is what handles it.
+  checks.push(drivePage([null, null]).then(page => {
+    assert.ok(!claimsEmptiness(page),
+      'a body this page cannot read is a failure, not an empty repository');
+    assert.ok(/Could not load/.test(page.listText), 'and it says so');
+    page.toggleFilter();
+    assert.ok(!claimsEmptiness(page));
   }));
 
   // I — round 4, Minor 2. The cheap pass goes first. Reversed, the page shows
