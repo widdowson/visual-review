@@ -107,7 +107,7 @@ for (let i = 1; i < renders.length; i++) {
 // Moving it below would silently lose the count for a comment the user posted
 // and then navigated away from.
 const badgeAt = loadComments.indexOf('updateCommentBadge');
-const guardAt = loadComments.indexOf('if (!isCurrent()) return;');
+const guardAt = loadComments.search(/if\s*\(\s*!\s*isCurrent\s*\(\s*\)\s*\)\s*return\s*;/);
 assert.ok(badgeAt > 0, 'loadComments must still update the sidebar badge');
 assert.ok(guardAt > 0, 'loadComments must guard on isCurrent()');
 assert.ok(badgeAt < guardAt,
@@ -118,10 +118,33 @@ assert.ok(badgeAt < guardAt,
 // a reload the user has navigated away from would blank the pane for the file
 // they are actually looking at, which is the same defect with a different
 // payload.
-const spinnerAt = loadComments.indexOf('spinner');
-const ownedAt = loadComments.indexOf('if (ownedPane) {');
-assert.ok(spinnerAt > 0, 'loadComments must still show a spinner while it loads');
-assert.ok(ownedAt > 0 && ownedAt < spinnerAt,
-  'the spinner must be written only when this load owns the pane');
+//
+// Containment, not position. The first version of this compared the index of
+// `if (ownedPane) {` against the index of `spinner` and passed on the very
+// defect its message names: hoisting just the innerHTML write out of the block
+// leaves the literal `if (ownedPane) {` in place and still ahead of it. Walk
+// the block and look inside it.
+function blockAfter(source, opener) {
+  const at = source.indexOf(opener);
+  assert.ok(at >= 0, 'loadComments must contain ' + opener);
+  const open = source.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}' && --depth === 0) return source.slice(open + 1, i);
+  }
+  return assert.fail('no matching close brace for ' + opener);
+}
+
+const ownedBlock = blockAfter(loadComments, 'if (ownedPane) {');
+const spinners = (s) => s.split('spinner').length - 1;
+assert.strictEqual(spinners(ownedBlock), 1,
+  'the spinner must be written inside the ownedPane block');
+assert.strictEqual(spinners(loadComments), spinners(ownedBlock),
+  'loadComments must not write the spinner anywhere outside the ownedPane block: a ' +
+  'reload the user has navigated away from would blank the pane for the file they ' +
+  'are actually looking at');
+assert.ok(/commentsSection\s*\.\s*style\s*\.\s*display/.test(ownedBlock),
+  'revealing the pane belongs inside the ownedPane block too');
 
 console.log('comments freshness: all assertions passed');

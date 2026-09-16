@@ -2240,12 +2240,17 @@
         //                flag tells it apart from a live load.
         //
         // Deliberately *not* a third input: re-comparing the response's path
-        // against the selected file on arrival. Selecting a file is the only
-        // thing that changes which file the pane is for, and it always starts
-        // a load and so always takes a new generation — so every response that
-        // check could reject has already failed the generation check, and no
-        // run would ever enter it. (Add it back if some future caller sets
-        // state.currentFile without loading comments; nothing does today.)
+        // against the selected file on arrival. selectFile is the only writer
+        // of state.currentFile in this file, and its last statement is a
+        // loadComments for the path it just assigned — which owns the pane and
+        // so always takes a new generation. Every response that check could
+        // reject has therefore already failed the generation check, and no run
+        // would enter it.
+        //
+        // That is a property of those two statements, not of the module: add
+        // the check back if some future caller sets state.currentFile without
+        // loading comments, or if the statements between the assignment and
+        // the loadComments call grow something that can throw past it.
         function commentsResponseIsCurrent(opts) {
             return opts.ownedPane === true &&
                 opts.generation === opts.currentGeneration;
@@ -2279,12 +2284,20 @@
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     var comments = data.comments || [];
-                    // Deliberately outside the guard. The badge is written to
-                    // the sidebar row with this response's own path, so it is
-                    // right for the file the response is about whether or not
-                    // that file is on screen — and dropping it would lose the
-                    // count for a comment the user just posted and navigated
-                    // away from.
+                    // Deliberately outside the guard. The *row* is right by
+                    // construction: it is chosen by this response's own path,
+                    // so it is the right row whether or not that file is on
+                    // screen, and dropping the call would lose the count for a
+                    // comment the user just posted and navigated away from.
+                    //
+                    // The *count* is whichever answer lands last, which two
+                    // answers for the same path can still get wrong — post a
+                    // comment while the initial load is slow and the badge can
+                    // settle on the older number until that file is reloaded.
+                    // Strictly better than rendering the stale pane as well,
+                    // which is what this guard fixes, but not the same as
+                    // correct: a per-path guard needs a generation per path
+                    // rather than one counter, and is issue #49.
                     updateCommentBadge(path, comments.length);
                     if (!isCurrent()) return;
                     renderComments(comments, path);
