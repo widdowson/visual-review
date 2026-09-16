@@ -129,9 +129,15 @@ def _gh_headers() -> dict[str, str]:
 # just wastes the round trip.
 _GH_PAGE_SIZE = 100
 
-# "List pull requests files" serves at most 3000 files, i.e. 30 pages of 100.
-# The loop stops there itself rather than trusting the sequence to end, so a
-# change at GitHub's end can cost a truncated list but never an endless walk.
+# The default ceiling on a walk, in pages. The number comes from "List pull
+# request files", which serves at most 3000 files, i.e. 30 pages of 100. The
+# loop stops there itself rather than trusting the sequence to end, so a change
+# at GitHub's end can cost a truncated list but never an endless walk.
+#
+# The other endpoints walked here reuse it as that bound rather than because
+# they share the limit: the review-comments endpoint documents no ceiling of
+# its own, and 3000 comments on one pull request is far enough past anything
+# real that stopping there is a safety stop, not a policy.
 _GH_MAX_PAGES = 30
 
 
@@ -153,6 +159,7 @@ async def _gh_paginate(
     headers: dict[str, str],
     params: dict[str, Any] | None = None,
     max_pages: int = _GH_MAX_PAGES,
+    items_key: str | None = None,
 ) -> tuple[list[Any], bool]:
     """Read every page of a GitHub list endpoint.
 
@@ -174,6 +181,14 @@ async def _gh_paginate(
     multiple of ``_GH_PAGE_SIZE`` *below the cap* costs one extra request
     that comes back empty. At the cap itself the walk stops on the page
     count and makes no such request, which is the case above.
+
+    Most GitHub list endpoints answer with a bare JSON array, which is the
+    default. A few wrap the array in an object instead — "List check runs
+    for a Git reference" answers ``{"total_count": N, "check_runs": [...]}``
+    — and ``items_key`` names the key to read in that case. The page's own
+    length still ends the walk: ``total_count`` is not consulted, so an
+    endpoint that reports a count inconsistent with what it serves cannot
+    stop the walk early or send it round again.
     """
     items: list[Any] = []
     base_params = dict(params or {})
@@ -185,6 +200,14 @@ async def _gh_paginate(
             raise _GitHubError(f"HTTP {resp.status_code}", resp.status_code)
 
         batch = resp.json()
+        if items_key is not None:
+            if not isinstance(batch, dict):
+                raise _GitHubError(
+                    f"expected an object carrying {items_key!r}, got {type(batch).__name__}"
+                )
+            if items_key not in batch:
+                raise _GitHubError(f"response object has no {items_key!r} key")
+            batch = batch[items_key]
         if not isinstance(batch, list):
             raise _GitHubError(f"expected a list of items, got {type(batch).__name__}")
 
@@ -704,15 +727,19 @@ async def pr_comments(
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
-                headers=headers,
-                params={"per_page": 100},
-            )
-            if resp.status_code != 200:
-                return {"error": f"HTTP {resp.status_code}", "comments": []}
+            # Walked rather than read one page deep: a pull request with more
+            # than 100 review comments used to lose every one past the first
+            # page, so a file whose only comments sat on page 2 showed none
+            # at all and said nothing about it (#22).
+            try:
+                all_comments, truncated = await _gh_paginate(
+                    client,
+                    f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
+                    headers,
+                )
+            except _GitHubError as e:
+                return {"error": str(e), "comments": []}
 
-            all_comments = resp.json()
             file_comments = []
             for c in all_comments:
                 if c.get("path") == path:
@@ -725,7 +752,9 @@ async def pr_comments(
                         "html_url": c.get("html_url", ""),
                     })
 
-            return {"comments": file_comments}
+            # Carried even though the cap is 3000 comments: the whole point
+            # of #22 is that a list this endpoint cut short must say so.
+            return {"comments": file_comments, "truncated": truncated}
 
     except Exception as e:
         return {"error": str(e), "comments": []}
@@ -743,21 +772,25 @@ async def pr_comment_counts(owner: str, repo: str, number: int):
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
-                headers=headers,
-                params={"per_page": 100},
-            )
-            if resp.status_code != 200:
+            # Same walk as ``pr_comments`` and for the same reason: reading
+            # one page undercounted the per-file badges on any pull request
+            # with more than 100 review comments (#22).
+            try:
+                all_comments, truncated = await _gh_paginate(
+                    client,
+                    f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
+                    headers,
+                )
+            except _GitHubError:
                 return {"counts": {}}
 
             counts: dict[str, int] = {}
-            for c in resp.json():
+            for c in all_comments:
                 p = c.get("path", "")
                 if p:
                     counts[p] = counts.get(p, 0) + 1
 
-            return {"counts": counts}
+            return {"counts": counts, "truncated": truncated}
 
     except Exception:
         return {"counts": {}}
@@ -854,22 +887,35 @@ async def pr_checks(owner: str, repo: str, number: int):
             if cached is not None:
                 return cached
 
-            # Fetch check runs (GitHub Actions, etc.)
-            checks_resp = await client.get(
-                f"https://api.github.com/repos/{github_repo}/commits/{head_sha}/check-runs",
-                headers=headers,
-                params={"per_page": 100},
-            )
+            # Fetch check runs (GitHub Actions, etc.). Walked for the same
+            # reason as the comment endpoints (#22), with one difference:
+            # this endpoint wraps its array in an object, so the walk is told
+            # which key to read. A head commit with more than 100 check runs
+            # is unlikely, but the derived verdict below is a majority vote
+            # over whatever came back, so a partial list does not merely
+            # shorten the report — it can change the answer.
+            check_runs, checks_truncated = [], False
+            try:
+                check_runs, checks_truncated = await _gh_paginate(
+                    client,
+                    f"https://api.github.com/repos/{github_repo}/commits/{head_sha}/check-runs",
+                    headers,
+                    items_key="check_runs",
+                )
+            except _GitHubError:
+                # Unchanged from the single-request version: a checks call
+                # that fails leaves an empty list, which the block below
+                # reports as "none" rather than as a failure of its own.
+                pass
 
             runs = []
-            if checks_resp.status_code == 200:
-                for r in checks_resp.json().get("check_runs", []):
-                    runs.append({
-                        "name": r["name"],
-                        "status": r["status"],
-                        "conclusion": r.get("conclusion"),
-                        "html_url": r.get("html_url", ""),
-                    })
+            for r in check_runs:
+                runs.append({
+                    "name": r["name"],
+                    "status": r["status"],
+                    "conclusion": r.get("conclusion"),
+                    "html_url": r.get("html_url", ""),
+                })
 
             # Derive overall state
             if not runs:
@@ -883,7 +929,12 @@ async def pr_checks(owner: str, repo: str, number: int):
             else:
                 overall = "unknown"
 
-            result = {"overall": overall, "runs": runs, "sha": head_sha[:8]}
+            result = {
+                "overall": overall,
+                "runs": runs,
+                "sha": head_sha[:8],
+                "truncated": checks_truncated,
+            }
             _cache_set(cache_key, result)
             return result
 
