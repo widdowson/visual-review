@@ -157,7 +157,8 @@ assert.ok(badgeAt < guardAt,
 //
 // The reach is what `bodyOf` can see: a write from a helper defined elsewhere
 // is outside it. tests/spa_source.js states that trade as the project's
-// position and it is not chased here.
+// position and it is not chased here -- the instrument for it is a browser
+// test, which does not care where the write lives, and is issue #53.
 // The block is matched whole, opener through closing brace, with `[^{}]*` for
 // its contents -- a regex rather than a brace walk, so it cannot over-capture
 // past the block the way a walk can when a `{` and a `}` are split across two
