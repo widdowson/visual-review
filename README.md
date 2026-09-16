@@ -12,6 +12,7 @@ A standalone tool for reviewing visual changes (PNG screenshots) in GitHub pull 
 - **Keyboard shortcuts** — vim-style navigation (j/k for files, n/p for diff regions, 1-4 for modes)
 - **Dark mode** — automatic or manual light/dark theme toggle
 - **Deep linking** — link directly to a specific file via URL hash
+- **Unambiguous file list** — where a PR repeats a filename across directories, each sidebar row shows the shortest directory context that tells it apart
 
 ## Quick Start
 
