@@ -7,6 +7,8 @@ Browser extension that adds **Visual Review** links to GitHub PR pages. When a P
 - **PR list page** (`/{owner}/{repo}/pulls`): Adds a small purple VR goggles icon next to open PR titles that have image files
 - **PR detail page** (`/{owner}/{repo}/pull/{n}`): Adds a "Visual Review" button in the header actions area
 
+Which file extensions count as images is the server's answer: the extension fetches `GET /api/extensions` from `VR_BASE_URL` on first use and caches it in `localStorage` for a day, so a format added on the server reaches an installed extension without a rebuild. The list generated into `image_config.js` at build time is the fallback, used until that answer arrives and whenever it cannot be had — so a server that is down, refusing, answering nonsense, or accepting the connection and never answering (the request is bounded at 5 seconds) leaves the extension matching exactly what it matched before.
+
 Only PRs in the `widdowson/` owner space are processed. Only open (not merged/closed) PRs are eligible. The extension checks the first 100 changed files for image extensions and caches positive results in `localStorage` for one week.
 
 No API token is needed — the extension piggybacks on your existing GitHub session cookies via GitHub's internal JSON API.
@@ -69,12 +71,13 @@ Requires `rsvg-convert` (`brew install librsvg`).
 
 ## Configuration
 
-Constants at the top of `content.js`:
+Constants in `content.js`. Each row names where it lives:
 
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `VR_BASE_URL` | `https://vr.apw.photos` | Base URL of the Visual Review instance |
-| `OWNER_FILTER` | `widdowson` | Only inject on repos owned by this user/org |
-| `IMAGE_REGEX` | `/\.(png\|bmp\|jpg\|jpeg)$/i` | File extensions that count as images |
-| `MAX_FILES` | `100` | Max files to check per PR |
-| `CACHE_DURATION_MS` | 7 days | How long positive results are cached |
+| Constant | Default | Where | Description |
+|----------|---------|-------|-------------|
+| `VR_BASE_URL` | `https://vr.apw.photos` | `Configuration` | Base URL of the Visual Review instance |
+| `OWNER_FILTER` | `widdowson` | `Configuration` | Only inject on repos owned by this user/org |
+| `MAX_FILES` | `100` | `Configuration` | Max files to check per PR |
+| `CACHE_DURATION_MS` | 7 days | `Configuration` | How long positive results are cached |
+| `EXT_CACHE_DURATION_MS` | 24 hours | `vr:extensions` | How long the fetched extension list is cached |
+| `EXT_FETCH_TIMEOUT_MS` | 5 seconds | `vr:extensions` | Budget for the `/api/extensions` request |

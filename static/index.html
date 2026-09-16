@@ -279,18 +279,23 @@
         }
 
         /* Comments section */
+        /* The pane is a flex column of a fixed-height drag handle over a
+           scrolling body, so the handle stays on the pane's top edge instead
+           of riding over the comment it happens to be scrolled against. The
+           pane is content-sized up to its max-height: 30vh initially, and
+           whatever the drag sets after that. */
         .comments-section {
             border-top: 1px solid var(--vr-border);
             max-width: 800px; margin: 0 auto; width: 100%;
-            max-height: 30vh; overflow-y: auto; position: relative;
-            flex-shrink: 0;
+            max-height: 30vh; position: relative;
+            flex-shrink: 0; display: flex; flex-direction: column; min-height: 0;
         }
+        .comments-scroll { flex: 1; overflow-y: auto; min-height: 0; }
         .comments-section-inner {
             padding: 20px;
         }
         .comments-resize {
-            position: sticky; top: 0; left: 0; right: 0; height: 6px;
-            cursor: row-resize; z-index: 10;
+            height: 6px; cursor: row-resize;
             background: transparent; flex-shrink: 0;
         }
         .comments-resize:hover, .comments-resize.dragging {
@@ -341,6 +346,25 @@
         .image-info .gh-diff-link:hover { color: var(--vr-link-hover); text-decoration: underline; }
         .renamed-label { color: var(--vr-text-muted); font-size: 0.85rem; margin-bottom: 8px; }
         .renamed-label .renamed-arrow { color: var(--vr-accent); margin: 0 6px; }
+        /* A rename that also changed the image keeps the comparison modes, so
+           the viewport has to stack the label above them — its default row
+           direction would put the two side by side. Turning the column on
+           swaps which axis each of the other two properties governs, so both
+           are set to the opposite of the viewport's own value: its
+           `justify-content: center` would otherwise centre the modes
+           vertically rather than horizontally, and its `align-items:
+           flex-start` would left-align them.
+
+           Nothing here constrains the children. A `flex-shrink: 0` was tried
+           and measured inert — a flex item's automatic minimum size is
+           content-based here, so nothing could squash them in the first place
+           — and the `max-width: 100%` beside it made the wide case worse
+           rather than safer, clamping the wrapper while its contents
+           overflowed it: 1192px of horizontal scroll against 1106px without.
+           Measured on 600x3000 and 2400x400 pairs in all four modes. */
+        .viewport.with-rename-label {
+            flex-direction: column; justify-content: flex-start; align-items: center;
+        }
 
         /* Keyboard shortcut hint pill */
         .kbd-hint {
@@ -493,7 +517,10 @@
             <div class="viewport" id="viewport">
                 <div class="empty-msg">Select an image from the sidebar to begin review.</div>
             </div>
-            <div class="comments-section" id="comments-section" style="display:none;"></div>
+            <div class="comments-section" id="comments-section" style="display:none;">
+                <div class="comments-resize" id="comments-resize"></div>
+                <div class="comments-scroll" id="comments-scroll"></div>
+            </div>
         </div>
     </div>
 
@@ -577,6 +604,7 @@
         var modeToolbar = document.getElementById('mode-toolbar');
         var imageInfo = document.getElementById('image-info');
         var commentsSection = document.getElementById('comments-section');
+        var commentsScroll = document.getElementById('comments-scroll');
         var prTitle = document.getElementById('pr-title');
         var imageCount = document.getElementById('image-count');
         var loupeBase = document.getElementById('loupe-base');
@@ -917,6 +945,106 @@
         }
         // ── image-urls:end ───────────────────────────────────────────────────
 
+        // ── gh-diff-link:begin ───────────────────────────────────────────────
+        // Where a file sits in the GitHub PR diff (issue #15). Deterministic
+        // and DOM-free, so the tests can drive it — though not pure in the
+        // sense tests/spa_source.js checks for: it needs Web Crypto, which
+        // that helper's IMPURE list does not cover and should not, since the
+        // digest is the same in node as in a browser.
+        // GitHub anchors a file in the Files tab as `#diff-<sha256 of the
+        // file's path, lower-case hex>` — the path alone, with no trailing
+        // newline and nothing about the repository or the PR mixed in. That
+        // format is GitHub's and it is undocumented: the pair
+        // tests/test_gh_diff_link.js pins comes from a community answer, an
+        // older answer describes the anchor as an md5, and nothing here
+        // observes github.com. So take it as the best-sourced reading rather
+        // than as fact, read that test's comment for where it came from, and
+        // see #34 for what is still unverified — including which side of a
+        // rename GitHub hashes, where this uses the new path.
+        //
+        // Takes owner, repo and the number as arguments rather than closing
+        // over them so it can be tested without a DOM, like buildImageUrls
+        // above — keep the markers.
+        async function ghDiffUrl(owner, repo, prNumber, path) {
+            var bytes = new TextEncoder().encode(path);
+            var digest = await crypto.subtle.digest('SHA-256', bytes);
+            var hash = Array.from(new Uint8Array(digest)).map(function(b) {
+                return b.toString(16).padStart(2, '0');
+            }).join('');
+            return 'https://github.com/' + encodeURIComponent(owner) + '/' +
+                encodeURIComponent(repo) + '/pull/' + encodeURIComponent(prNumber) +
+                '/files#diff-' + hash;
+        }
+        // ── gh-diff-link:end ─────────────────────────────────────────────────
+
+        // ── comments-pane:begin ──────────────────────────────────────────────
+        // The two pieces of arithmetic behind the comments pane, kept pure so
+        // they can be tested without a DOM. Extracted verbatim by
+        // tests/test_comments_pane.js, which evaluates this region and reads
+        // COMMENTS_PANE_TUNING out of it — keep the markers, keep the purity,
+        // and keep the tuning inside them, since a constant declared outside
+        // is one a test can only read by grepping.
+        //
+        // The pane's *initial* cap is the CSS `max-height` on .comments-section
+        // and deliberately not a constant here: a second copy in JS would be a
+        // knob nothing reads.
+        var COMMENTS_PANE_TUNING = {
+            minPaneHeight: 60,      // a dragged-shut pane still shows its top edge
+            minViewportHeight: 120, // pixels the image comparator always keeps
+        };
+
+        // Height for a drag of the pane's top edge to pointerY. Clamped at both
+        // ends: never shorter than minPaneHeight, and never so tall that the
+        // comparator above it is left with less than minViewportHeight. The
+        // ceiling is measured from the comparator's own top rather than from a
+        // fraction of the window, because the header and toolbars sit between
+        // them — 80% of the window used to leave the comparator 46px.
+        // The order of the two clamps is load-bearing and there is deliberately
+        // no third guard: applying the floor last is what makes a window too
+        // short to honour both — a ceiling below minPaneHeight — give up the
+        // comparator's reserve rather than the pane's minimum, so the handle
+        // stays draggable. Raising such a ceiling to minPaneHeight first would
+        // be a branch no input can distinguish.
+        function computeCommentsPaneHeight(opts) {
+            var ceiling = opts.paneBottom - opts.viewportTop - opts.minViewportHeight;
+            var desired = opts.paneBottom - opts.pointerY;
+            if (desired > ceiling) desired = ceiling;
+            if (desired < opts.minPaneHeight) desired = opts.minPaneHeight;
+            return desired;
+        }
+
+        // Scroll offset that puts the newest comment's bottom edge at the bottom
+        // of the visible pane, so a pane at its initial size is full of the
+        // latest comments with the older ones scrolled off the top. Scrolling to
+        // the very bottom instead — which is what this replaced — lands on the
+        // post-a-comment form, which is ~119px of an initial ~269px pane, so five
+        // of six comments were 0px visible and the sixth was cut off mid-sentence.
+        //
+        // Three of the four inputs — scrollTop, clientHeight, scrollHeight —
+        // are the scroll container's own numbers. newestCardBottom is not in
+        // content space: it is measured from the container's top edge, which is
+        // what a rect comparison yields, so adding scrollTop is what converts
+        // it. That addition lives here rather than at the call site so a case
+        // can cover it. It is a no-op on the path that ships today, since
+        // loadComments writes a short spinner first and that resets the offset;
+        // it is here so the helper does not depend on its caller having done so.
+        //
+        // A file with no comments passes 0, which the guard takes to the top of
+        // the pane. Below it the order of the clamps is what covers a pane
+        // taller than its content: a negative maxScroll passes through and the
+        // floor takes it to 0.
+        function computeCommentsScrollTop(opts) {
+            // A file with no comments has nothing to park, and a pane still
+            // scrolled from the last file would otherwise open part-way down.
+            if (opts.newestCardBottom <= 0) return 0;
+            var maxScroll = opts.scrollHeight - opts.clientHeight;
+            var top = opts.scrollTop + opts.newestCardBottom - opts.clientHeight;
+            if (top > maxScroll) top = maxScroll;
+            if (top < 0) top = 0;
+            return top;
+        }
+        // ── comments-pane:end ────────────────────────────────────────────────
+
         function imageUrls(fileData) {
             return buildImageUrls(fileData, apiBase, state.baseRef, state.headRef);
         }
@@ -1142,9 +1270,76 @@
             return 'modified';
         }
 
+        // ── rename-display:begin ─────────────────────────────────────────────
+        // Pure function: how a file GitHub reports as `renamed` should be
+        // displayed.
+        //
+        // `renamed` does not mean "the content is unchanged". GitHub applies
+        // the same similarity detection git does, so a file that was moved
+        // *and* edited comes back as `renamed` as well — git's own R096, of
+        // which apwphotos-appv2 has a real instance (a baseline BMP that moved
+        // and grew by 7,680 bytes in the same commit). Nothing in the API
+        // separates the two for a binary: GitHub sends no patch and reports
+        // zero additions and zero deletions for every binary file, changed or
+        // not. So treating `renamed` alone as "nothing to compare" hid real
+        // changes on exactly the files the comparison modes exist for.
+        //
+        // The decision is made from the pixels instead, which is the question a
+        // reviewer is actually asking. Anything short of a proven match keeps
+        // the modes — including a map that could not be computed at all,
+        // because a side is missing. That direction is deliberate: failing to
+        // prove two images identical must never be read as proof that they are.
+        //
+        // Proving it takes two checks, not one, because a row map alone cannot
+        // do it. `computeRowDiffMap` draws both sides onto a canvas sized to
+        // the larger of the two in each dimension, so the region a smaller
+        // image does not cover reads back as transparent black — which is
+        // indistinguishable from opaque black on the three channels the map
+        // compares. That is what an earlier version of this function got
+        // wrong: measured in Chromium against it, a 200x100 all-black image
+        // against a 200x160 all-black one came back `single`, as did 300x100
+        // against 200x100. So the dimensions are checked first, structurally,
+        // before any pixel is read. (The same measurement is why the map is
+        // asked to compare alpha here: a fully transparent image against a
+        // solid black one of the same size also came back `single`, and PNG is
+        // a format this tool serves. Two images that are *fully* transparent
+        // still compare equal, correctly — the colour under alpha 0 does not
+        // survive the decode, so there is nothing on screen to tell apart.)
+        //
+        // Extracted verbatim by tests/test_rename_display.js — keep the markers.
+        function renameDisplay(status, baseImg, headImg, rowMap) {
+            if (status !== 'renamed') return null;
+            return sameDimensions(baseImg, headImg) && allRowsSame(rowMap)
+                ? 'single' : 'compare';
+        }
+
+        // Both sides present, both non-empty, and the same size. The SPA cannot
+        // reach the zero-sized case — `attach` commits an image to state only
+        // from `onload` or when it is already complete with a non-zero width,
+        // so a broken image leaves `state.baseImg` null and the missing-side
+        // branch fires instead. It is here because this is a pure predicate
+        // and that is its own contract: nothing was compared between two
+        // images with no pixels, so nothing was proven, whoever is asking.
+        function sameDimensions(a, b) {
+            if (!a || !b) return false;
+            if (!a.naturalWidth || !a.naturalHeight) return false;
+            return a.naturalWidth === b.naturalWidth &&
+                a.naturalHeight === b.naturalHeight;
+        }
+
+        function allRowsSame(rowMap) {
+            if (!rowMap || !rowMap.length) return false;
+            for (var i = 0; i < rowMap.length; i++) {
+                if (rowMap[i]) return false;
+            }
+            return true;
+        }
+        // ── rename-display:end ───────────────────────────────────────────────
+
         // -- Render comparison based on current mode --
         function renderComparison() {
             viewport.innerHTML = '';
+            viewport.classList.remove('with-rename-label');
             imageInfo.style.display = '';
             hideLoupes();
             gutterRefreshCallbacks = [];
@@ -1161,7 +1356,22 @@
                 return;
             }
 
-            var rowMap = computeRowDiffMap(state.baseImg, state.headImg, 10);
+            // Issue #14. Asked at an exact threshold, not the gutter's, and
+            // with alpha: a difference too small for the gutter to plot is
+            // still a difference, and the single-image view is the one view in
+            // which it could never be seen.
+            var exactMap = fileStatus === 'renamed'
+                ? computeRowDiffMap(state.baseImg, state.headImg, 0, true)
+                : null;
+            var renameMode = renameDisplay(
+                fileStatus, state.baseImg, state.headImg, exactMap);
+
+            // The gutter plots where the two sides differ, so a file that will
+            // render as one image has no use for it — and building it costs two
+            // more full-image reads.
+            var rowMap = renameMode === 'single'
+                ? null
+                : computeRowDiffMap(state.baseImg, state.headImg, 10);
             state.diffClusters = computeDiffClusters(rowMap);
 
             var infoHtml = '<span>' + escHtml(state.currentFile) + '</span>';
@@ -1178,19 +1388,36 @@
             }
             imageInfo.innerHTML = infoHtml;
 
-            // Add GitHub diff link asynchronously
-            sha256Hex(state.currentFile).then(function(hash) {
+            // Fill that placeholder once the digest is in. The path is
+            // captured here and re-checked on arrival: a navigation during
+            // the digest rebuilds this bar with a new container of the same
+            // id, so an unguarded write puts the file we have left under the
+            // name of the one now on screen.
+            var linkPath = state.currentFile;
+            ghDiffUrl(owner, repo, prNumber, linkPath).then(function(ghUrl) {
+                if (linkPath !== state.currentFile) return;
                 var container = document.getElementById('gh-diff-link-container');
-                if (container) {
-                    var ghUrl = 'https://github.com/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + '/pull/' + prNumber + '/files#diff-' + hash;
-                    container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) + '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
-                }
+                if (!container) return;
+                container.innerHTML = '<a class="gh-diff-link" href="' + escAttr(ghUrl) +
+                    '" target="_blank" title="View in GitHub PR diff">GitHub diff</a>';
+            }).catch(function(err) {
+                // Anything from here: the digest itself (there is no
+                // SubtleCrypto outside a secure context, where an unhandled
+                // rejection was reported once per file) or the write above it.
+                // Either way the rest of the bar stands and only the link is
+                // lost, which is the right trade for a convenience link.
+                console.warn('visual-review: no GitHub diff link for this file', err);
             });
 
-            // Issue #14: renamed files — show single image with rename label, no diff modes
-            if (fileStatus === 'renamed') {
+            if (renameMode === 'single') {
                 renderRenamed();
                 return;
+            }
+            if (renameMode === 'compare') {
+                // Moved *and* changed: keep the modes, and say so above them.
+                viewport.classList.add('with-rename-label');
+                var movedLabel = renameLabel();
+                if (movedLabel) viewport.appendChild(movedLabel);
             }
 
             switch (state.mode) {
@@ -1204,7 +1431,12 @@
         var gutterRefreshCallbacks = [];
 
         // -- Row-level diff map --
-        function computeRowDiffMap(baseImg, headImg, threshold) {
+        // `includeAlpha` is off for the diff gutter, which has always compared
+        // the three colour channels, and on for the rename check, which needs
+        // "the same image" to mean the same image. Keeping it a parameter is
+        // what stops the rename fix from silently changing what the gutter
+        // plots for every other file in the PR.
+        function computeRowDiffMap(baseImg, headImg, threshold, includeAlpha) {
             if (!baseImg || !headImg) return null;
             var w = Math.max(baseImg.naturalWidth, headImg.naturalWidth);
             var h = Math.max(baseImg.naturalHeight, headImg.naturalHeight);
@@ -1223,7 +1455,9 @@
             var hData = hCtx.getImageData(0, 0, w, h).data;
 
             var map = new Array(h);
-            var thr = threshold || 10;
+            // Not `threshold || 10`: that turns an explicit 0 back into 10, and
+            // 0 is the value the rename check below asks for — exact equality.
+            var thr = threshold == null ? 10 : threshold;
             for (var y = 0; y < h; y++) {
                 map[y] = false;
                 var rowStart = y * w * 4;
@@ -1231,7 +1465,8 @@
                     var i = rowStart + x * 4;
                     if (Math.abs(bData[i] - hData[i]) > thr ||
                         Math.abs(bData[i+1] - hData[i+1]) > thr ||
-                        Math.abs(bData[i+2] - hData[i+2]) > thr) {
+                        Math.abs(bData[i+2] - hData[i+2]) > thr ||
+                        (includeAlpha && Math.abs(bData[i+3] - hData[i+3]) > thr)) {
                         map[y] = true;
                         break;
                     }
@@ -1359,7 +1594,15 @@
             } else {
                 var emL = document.createElement('div');
                 emL.className = 'empty-msg';
-                emL.textContent = 'No base image (new file)';
+                // Only an added file legitimately has no base side. A rename can
+                // reach here too, now that one whose base image failed to load
+                // keeps the modes instead of collapsing to a single image, and
+                // telling the reviewer it is a new file would be a lie about a
+                // fetch that failed. Parallel to the head side's own wording
+                // below, which says "Image not available" for the same reason.
+                emL.textContent = getFileStatus(state.currentFile) === 'added'
+                    ? 'No base image (new file)'
+                    : 'Base image not available';
                 emL.style.padding = '40px';
                 leftPanel.appendChild(emL);
             }
@@ -1694,40 +1937,53 @@
             setupLoupes(dw);
         }
 
-        // -- Renamed file (no diff modes) --
-        function renderRenamed() {
-            modeToolbar.style.display = 'none';
+        // -- Renamed file --
+        //
+        // The label is shared by both rename views: above the single image for a
+        // move that changed nothing, and above the ordinary comparison modes for
+        // a move that also changed the image. Returns null when GitHub reported
+        // the rename without a previous path, which it can do (see
+        // buildImageUrls) — there is then nothing to say that the sidebar badge
+        // does not already say.
+        function renameLabel() {
             var fileData = getFileData(state.currentFile);
             var prevPath = fileData && fileData.previous_filename;
+            if (!prevPath) return null;
+
+            var label = document.createElement('div');
+            label.className = 'renamed-label';
+            label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
+                '<span class="renamed-arrow">\u2192</span>' +
+                '<code>' + escHtml(state.currentFile) + '</code>';
+            return label;
+        }
+
+        function renderRenamed() {
+            modeToolbar.style.display = 'none';
 
             var wrap = document.createElement('div');
             wrap.style.textAlign = 'center';
 
-            if (prevPath) {
-                var label = document.createElement('div');
-                label.className = 'renamed-label';
-                label.innerHTML = 'Renamed: <code>' + escHtml(prevPath) + '</code>' +
-                    '<span class="renamed-arrow">\u2192</span>' +
-                    '<code>' + escHtml(state.currentFile) + '</code>';
-                wrap.appendChild(label);
-            }
+            var label = renameLabel();
+            if (label) wrap.appendChild(label);
 
-            var img = state.headImg || state.baseImg;
-            if (img) {
-                var imgEl = document.createElement('img');
-                imgEl.src = img.src;
-                imgEl.style.maxWidth = '90vw';
-                imgEl.style.height = 'auto';
-                imgEl.style.display = 'block';
-                imgEl.style.margin = '0 auto';
-                imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
-                wrap.appendChild(imgEl);
-            } else {
-                var msg = document.createElement('div');
-                msg.className = 'empty-msg';
-                msg.textContent = 'Image not available.';
-                wrap.appendChild(msg);
-            }
+            // There is always a head image here, and it is always the one to
+            // show. Reaching this function means renameDisplay returned
+            // 'single', which needs both sides loaded, both non-empty and both
+            // the same size — so the `state.headImg || state.baseImg` fallback
+            // and the "Image not available" branch this used to carry were code
+            // no run could enter, reading as one-sided handling that is not
+            // there. Breaking that invariant now throws, which is the right
+            // way round: a view that claims there is nothing to compare must
+            // not be able to render without having compared anything.
+            var imgEl = document.createElement('img');
+            imgEl.src = state.headImg.src;
+            imgEl.style.maxWidth = '90vw';
+            imgEl.style.height = 'auto';
+            imgEl.style.display = 'block';
+            imgEl.style.margin = '0 auto';
+            imgEl.style.background = 'repeating-conic-gradient(var(--vr-checker-a) 0% 25%, var(--vr-checker-b) 0% 50%) 50% / 16px 16px';
+            wrap.appendChild(imgEl);
 
             viewport.appendChild(wrap);
         }
@@ -1957,8 +2213,7 @@
         // -- Comments --
         function loadComments(path) {
             commentsSection.style.display = '';
-            commentsSection.innerHTML = '<div class="comments-resize" id="comments-resize"></div><div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
-            initCommentsResize();
+            commentsScroll.innerHTML = '<div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
 
             fetch(apiBase + '/comments?path=' + encodeURIComponent(path))
                 .then(function(r) { return r.json(); })
@@ -1973,8 +2228,7 @@
         }
 
         function renderComments(comments, path) {
-            var html = '<div class="comments-resize" id="comments-resize"></div>';
-            html += '<div class="comments-section-inner">';
+            var html = '<div class="comments-section-inner">';
             html += '<h4>Comments on this file (' + comments.length + ')</h4>';
 
             comments.forEach(function(c) {
@@ -1996,10 +2250,8 @@
             html += '</div>';
             html += '</div>'; // close .comments-section-inner
 
-            commentsSection.innerHTML = html;
-            initCommentsResize();
-            // Scroll to show latest comments (bottom of comment list, above the form)
-            commentsSection.scrollTop = commentsSection.scrollHeight;
+            commentsScroll.innerHTML = html;
+            scrollToNewestComment();
 
             var textarea = document.getElementById('comment-text');
             var submitBtn = document.getElementById('comment-submit');
@@ -2030,6 +2282,29 @@
                     submitBtn.disabled = false;
                     submitBtn.textContent = 'Post Comment';
                 });
+            });
+        }
+
+        // Park the newest comment against the bottom of the pane. The card's
+        // bottom is measured through getBoundingClientRect rather than
+        // offsetTop, which is relative to whichever ancestor is positioned —
+        // .comments-section is, so offsetTop would carry the drag handle's
+        // height and its border. .comments-scroll has no padding or border, so
+        // its border-box top and its scroll origin are the same point, which is
+        // what lets computeCommentsScrollTop add the scroll offset back.
+        function scrollToNewestComment() {
+            var cards = commentsScroll.querySelectorAll('.comment-card');
+            var newestCardBottom = 0;
+            if (cards.length) {
+                var last = cards[cards.length - 1];
+                newestCardBottom = last.getBoundingClientRect().bottom -
+                    commentsScroll.getBoundingClientRect().top;
+            }
+            commentsScroll.scrollTop = computeCommentsScrollTop({
+                newestCardBottom: newestCardBottom,
+                scrollTop: commentsScroll.scrollTop,
+                clientHeight: commentsScroll.clientHeight,
+                scrollHeight: commentsScroll.scrollHeight,
             });
         }
 
@@ -2096,13 +2371,6 @@
 
         function escAttr(s) {
             return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
-
-        // SHA-256 hash for GitHub diff anchors (async, uses SubtleCrypto)
-        async function sha256Hex(str) {
-            var data = new TextEncoder().encode(str);
-            var buf = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(buf)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
         }
 
         function getFileData(path) {
@@ -2255,36 +2523,50 @@
         });
 
         // -- Comments pane resize handle --
-        var commentsResizeDragging = false;
-        function initCommentsResize() {
+        // Set the pane's height for a drag of its top edge to pointerY. The
+        // comparator's top is the reference for the ceiling, so the reserve is
+        // measured against the space the comparator actually has.
+        function resizeCommentsPane(pointerY) {
+            commentsSection.style.maxHeight = computeCommentsPaneHeight({
+                paneBottom: commentsSection.getBoundingClientRect().bottom,
+                viewportTop: viewport.getBoundingClientRect().top,
+                pointerY: pointerY,
+                minPaneHeight: COMMENTS_PANE_TUNING.minPaneHeight,
+                minViewportHeight: COMMENTS_PANE_TUNING.minViewportHeight,
+            }) + 'px';
+        }
+
+        // The handle is part of the pane's static markup rather than of the
+        // comment HTML, so it is bound once here instead of after every render.
+        // All three handlers are named rather than inline so the test can read
+        // them: an anonymous handler can be emptied out with every assertion
+        // about resizeCommentsPane still green, and emptying the mousedown one
+        // leaves the pane no more resizable than emptying the mousemove one.
+        (function() {
             var handle = document.getElementById('comments-resize');
-            if (!handle) return;
-            handle.addEventListener('mousedown', function(e) {
+            var dragging = false;
+            function onCommentsDragStart(e) {
                 e.preventDefault();
-                commentsResizeDragging = true;
+                dragging = true;
                 handle.classList.add('dragging');
                 document.body.style.cursor = 'row-resize';
                 document.body.style.userSelect = 'none';
-            });
-        }
-        document.addEventListener('mousemove', function(e) {
-            if (!commentsResizeDragging) return;
-            // Calculate new height: bottom of viewport minus mouse Y
-            var rect = commentsSection.getBoundingClientRect();
-            var newHeight = rect.bottom - e.clientY;
-            // Clamp: min 60px, max 80% of viewport height
-            var maxH = window.innerHeight * 0.8;
-            newHeight = Math.max(60, Math.min(newHeight, maxH));
-            commentsSection.style.maxHeight = newHeight + 'px';
-        });
-        document.addEventListener('mouseup', function() {
-            if (!commentsResizeDragging) return;
-            commentsResizeDragging = false;
-            var handle = document.getElementById('comments-resize');
-            if (handle) handle.classList.remove('dragging');
-            document.body.style.cursor = '';
-            document.body.style.userSelect = '';
-        });
+            }
+            function onCommentsDragMove(e) {
+                if (!dragging) return;
+                resizeCommentsPane(e.clientY);
+            }
+            function onCommentsDragEnd() {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+            handle.addEventListener('mousedown', onCommentsDragStart);
+            document.addEventListener('mousemove', onCommentsDragMove);
+            document.addEventListener('mouseup', onCommentsDragEnd);
+        })();
 
         // -- Sidebar resize handle --
         (function() {

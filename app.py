@@ -123,6 +123,78 @@ def _gh_headers() -> dict[str, str]:
     }
 
 
+# -- Paginated GitHub list endpoints -------------------------------------------
+
+# GitHub clamps ``per_page`` to 100 on every list endpoint, so asking for more
+# just wastes the round trip.
+_GH_PAGE_SIZE = 100
+
+# "List pull requests files" serves at most 3000 files, i.e. 30 pages of 100.
+# The loop stops there itself rather than trusting the sequence to end, so a
+# change at GitHub's end can cost a truncated list but never an endless walk.
+_GH_MAX_PAGES = 30
+
+
+class _GitHubError(Exception):
+    """A GitHub API list request could not be completed.
+
+    ``status_code`` is the HTTP status that stopped the walk, or ``None`` when
+    the request succeeded but the body was not the list the endpoint promises.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _gh_paginate(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    params: dict[str, Any] | None = None,
+    max_pages: int = _GH_MAX_PAGES,
+) -> tuple[list[Any], bool]:
+    """Read every page of a GitHub list endpoint.
+
+    Returns ``(items, truncated)``. ``truncated`` is true when the walk ran
+    out of pages rather than reaching a short one, so the list may be
+    incomplete — it does not establish that more remained. Exactly
+    ``max_pages`` full pages with nothing beyond them reports true, because
+    settling it would cost a probe request that GitHub cannot answer
+    meaningfully at its own ceiling anyway. The flag errs toward "may be
+    incomplete", which is the direction that matters for the bug it exists
+    to prevent. Raises :class:`_GitHubError` if any page fails.
+
+    Pages are walked by incrementing ``page`` rather than by following the
+    ``Link: rel="next"`` header. Both terminate correctly; counting means the
+    ``Authorization`` header is only ever sent to a URL this function built,
+    and it makes the page cap above a straightforward bound on the walk.
+
+    A short page ends the sequence, so an item count that is an exact
+    multiple of ``_GH_PAGE_SIZE`` *below the cap* costs one extra request
+    that comes back empty. At the cap itself the walk stops on the page
+    count and makes no such request, which is the case above.
+    """
+    items: list[Any] = []
+    base_params = dict(params or {})
+    base_params["per_page"] = _GH_PAGE_SIZE
+
+    for page in range(1, max_pages + 1):
+        resp = await client.get(url, headers=headers, params={**base_params, "page": page})
+        if resp.status_code != 200:
+            raise _GitHubError(f"HTTP {resp.status_code}", resp.status_code)
+
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise _GitHubError(f"expected a list of items, got {type(batch).__name__}")
+
+        items.extend(batch)
+        if len(batch) < _GH_PAGE_SIZE:
+            return items, False
+
+    return items, True
+
+
 # -- Repo resolver for short URLs ---------------------------------------------
 
 def _base36_decode(s: str) -> int | None:
@@ -274,6 +346,41 @@ async def short_url_redirect(identifier: str, number: int):
 
 # -- API endpoints -------------------------------------------------------------
 
+@app.get("/api/extensions")
+async def supported_extensions():
+    """The image extensions this server understands.
+
+    Exists so a client does not have to keep its own copy of the list. The
+    browser extension reads this instead of the copy baked into its bundle, so
+    a format added to ``image_extensions.json`` reaches an already-installed
+    extension without anyone rebuilding and reloading it.
+
+    ``public`` rather than the ``private`` the proxied images use: this answer
+    is derived from a file in the image, not from any repository or token, so
+    it is the same for every caller and there is nothing to keep an
+    intermediary from holding.
+
+    The hour here is deliberately not the day the browser extension keeps its
+    copy for, and the two are independent rather than one being a leftover of
+    the other. On the normal path the day governs and this header never comes
+    up, because the extension does not re-request inside its own window. The
+    hour is what covers the client whose store is gone: where localStorage
+    throws — site data blocked, or a quota error — the extension's own cache
+    silently never holds, and it asks again on every full page load. This
+    header is then the only thing bounding that.
+
+    The CORS header the middleware adds is part of the contract rather than
+    incidental. A Manifest V3 content script's ``fetch`` carries the page's
+    origin (github.com) and is subject to CORS — ``host_permissions`` cannot
+    exempt it, that moved to the service worker in V3 — so this endpoint is
+    reachable from the extension only while it answers cross-origin.
+    """
+    return JSONResponse(
+        content={"extensions": list(IMAGE_EXTENSIONS)},
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/api/{owner}/{repo}/pr/{number}/images")
 async def pr_images(owner: str, repo: str, number: int):
     """List all changed image files in a PR."""
@@ -286,7 +393,13 @@ async def pr_images(owner: str, repo: str, number: int):
         )
 
     headers = _gh_headers()
-    result = {"pr_number": number, "images": [], "base_ref": None, "head_ref": None}
+    result = {
+        "pr_number": number,
+        "images": [],
+        "base_ref": None,
+        "head_ref": None,
+        "truncated": False,
+    }
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -321,19 +434,47 @@ async def pr_images(owner: str, repo: str, number: int):
             result["pr_url"] = pr_data["html_url"]
             result["repo_id"] = pr_data["base"]["repo"]["id"]
 
-            # Compare API to find changed files
-            compare_resp = await client.get(
-                f"https://api.github.com/repos/{github_repo}/compare/{base_ref}...{head_ref}",
-                headers=headers,
-            )
-            if compare_resp.status_code != 200:
+            # The changed-file list comes from "List pull request files"
+            # rather than the compare API, because compare's ``files`` array
+            # is capped at 300 entries and offers no page beyond that. Two
+            # measurements against apwphotos-appv2 PR 352 (489 changed files,
+            # 4 commits), which are separate responses and say different
+            # things:
+            #
+            #   compare/e47246ef...f190bf2d
+            #       -> 300 files, and no Link header at all, so nothing
+            #          advertises a next page
+            #   compare/e47246ef...f190bf2d?per_page=100&page=2
+            #       -> 0 files, 0 commits, and a Link header offering only
+            #          first and prev
+            #
+            # Together those say compare paginates its *commits*, not its
+            # files: with 4 commits there is one page, so the remaining 189
+            # files were unreachable however the request was phrased, and
+            # they went missing with nothing said (#12).
+            #
+            # Both endpoints diff the merge base against the head, so below
+            # the cap they agree exactly — measured on three apwphotos-appv2
+            # PRs (27, 9 and 4 files): identical path sets both ways. On PR
+            # 352 itself compare's 300 paths are a strict subset of the 489,
+            # so this adds files rather than exchanging one set for another.
+            try:
+                files, files_truncated = await _gh_paginate(
+                    client,
+                    f"https://api.github.com/repos/{github_repo}/pulls/{number}/files",
+                    headers,
+                )
+            except _GitHubError as e:
                 return JSONResponse(
-                    content={"error": f"Compare failed: HTTP {compare_resp.status_code}", "images": []},
+                    content={"error": f"Files request failed: {e}", "images": []},
                     headers={"Cache-Control": "no-store"},
                 )
 
-            compare_data = compare_resp.json()
-            files = compare_data.get("files", [])
+            # Set when the walk hit its page cap, i.e. when GitHub may have
+            # more files than it served. Left in the payload so a list that
+            # may be incomplete says so, rather than repeating this bug one
+            # order of magnitude up.
+            result["truncated"] = files_truncated
 
             for f in files:
                 filename = f.get("filename", "")
@@ -362,9 +503,91 @@ async def pr_images(owner: str, repo: str, number: int):
     )
 
 
+# -- Client-disconnect handling -----------------------------------------------
+#
+# The SPA aborts an image load the moment the user navigates away from a file,
+# so a fast scroll leaves requests in flight that nobody is waiting for. Each
+# one still costs a GitHub API call against a rate limit shared by everyone on
+# the deployment, and a proxied image can need up to three.
+#
+# Whether a check is worth making depends on the server reporting the abort
+# while there is still a call left to skip, so that was measured before any of
+# this was built, against this endpoint under real uvicorn 0.42 with a stubbed
+# upstream and raw sockets aborted mid-flight.
+#
+# Detection is prompt. On both the httptools and the h11 implementation, and
+# for an abort delivered as a FIN, as an RST and as a half-close,
+# ``is_disconnected()`` returned True at the first poll after the abort landed
+# — six runs, all six inside one 5ms poll, which is the harness's resolution
+# rather than a latency figure.
+#
+# The yield, against a control build with the checks removed: 50 requests one
+# per connection, which is the only shape a browser produces, all aborted
+# while the contents call was in flight — 100 upstream calls became 50. Every
+# second call was skipped.
+#
+# What no check can do is refund a call already sent, which is why there is
+# deliberately no check before the *first* upstream call. One was written and
+# then removed on the measurement: it fired in none of 900 aborted requests
+# across every timing and concurrency tried, including with the event loop
+# blocked for 1.5s while requests were both sent and aborted, and it cannot
+# fire on the case that looked most promising. Only a request dispatched from
+# behind another one on the same connection could begin already disconnected,
+# and uvicorn never dispatches one: ``on_response_complete`` opens with ``if
+# self.transport.is_closing(): return`` in both implementations, so a queued
+# pipelined cycle on a closing connection is dropped rather than run. That is
+# read off the source rather than inferred from the wire, deliberately — an
+# RST discards the unread receive buffer instead of queueing behind it, so
+# how many of those requests were ever parsed varies with the abort shape,
+# and the conclusion should not rest on that.
+#
+# Pipelining does save calls here, and it is worth knowing that the saving is
+# not a check firing, because the obvious reading of the call counts is wrong.
+# Four pipelined and aborted at 50ms cost 4 upstream calls with no checks and
+# 2 with them — but a third arm that polls ``is_disconnected()`` and *throws
+# the verdict away* also costs 2, with both checks evaluating False. The poll
+# itself is what does it: it calls ``receive()``, which resumes reading, which
+# lets uvicorn notice the pending EOF and abandon the queued request.
+#
+# Either surviving check's poll alone reproduces that, so the removed one
+# bought nothing on a request that reaches a check. It is not nothing on one
+# that does not: an inline-content request returns from case 1 having polled
+# zero times, measured, where the removed check polled on every request — so
+# four pipelined small files cost 2 upstream calls now against 1 before.
+# Small files are the common case in an image diff, so that is a real loss
+# and not a rounding error. It does not change the removal: this saving is a
+# side effect of polling rather than anything the check was for, a browser
+# does not pipeline, and a poll kept solely for its side effect on a shape we
+# never serve is a worse thing to own than the loss.
+#
+# Unverified from here: in production the browser talks to Cloud Run's front
+# end, which talks HTTP/1.1 to this container. Whether it closes that backend
+# connection when the client cancels decides whether any of this fires in the
+# deployment. The checks are inert, not harmful, if it does not.
+
+CLIENT_GONE_STATUS = 499
+
+
+def _client_gone_response() -> Response:
+    return Response(content=b"", status_code=CLIENT_GONE_STATUS)
+
+
+async def _client_gone(request: Request, where: str, path: str) -> bool:
+    """True when the client has disconnected, logging where we noticed.
+
+    ``where`` names the upstream call this check is about to skip, because
+    that is the only thing the log line can usefully say: the two call sites
+    save different amounts and are worth telling apart.
+    """
+    if not await request.is_disconnected():
+        return False
+    logger.info("pr_image: client gone before %s, skipping it for path=%s", where, path)
+    return True
+
+
 @app.get("/api/{owner}/{repo}/pr/{number}/image")
 async def pr_image(
-    owner: str, repo: str, number: int,
+    owner: str, repo: str, number: int, request: Request,
     path: str = Query(...), ref: str = Query(...),
 ):
     """Proxy image content from a specific git ref via GitHub contents API."""
@@ -410,9 +633,20 @@ async def pr_image(
                     headers=img_headers,
                 )
 
+            # Everything from here needs a further upstream call, and an
+            # abort issued while the contents call was in flight lands exactly
+            # here. That first call is spent either way; the ones that
+            # transfer the bytes are not. Both checks sit below case 1 on
+            # purpose — a small file's bytes came back with the contents call,
+            # so there is nothing left to save by not returning them — and
+            # each sits immediately before a single call, so the call it
+            # skips is the one its log line names.
+
             # Case 2: Large file — use Git Blob API
             file_sha = data.get("sha")
             if file_sha:
+                if await _client_gone(request, "the blob call", path):
+                    return _client_gone_response()
                 blob_resp = await client.get(
                     f"https://api.github.com/repos/{github_repo}/git/blobs/{file_sha}",
                     headers=headers,
@@ -430,6 +664,8 @@ async def pr_image(
             # Case 3: Fallback — try download_url
             download_url = data.get("download_url")
             if download_url:
+                if await _client_gone(request, "the download_url fetch", path):
+                    return _client_gone_response()
                 logger.info(
                     "pr_image: falling back to download_url for path=%s (size=%s)",
                     path, data.get("size"),
