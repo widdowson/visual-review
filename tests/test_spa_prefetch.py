@@ -6,8 +6,8 @@ without a DOM: the two pure functions and the tuning that drives them. The
 stateful half was mutated green by a reviewer on #18, and the property the
 whole feature exists for was asserted by nothing at all.
 
-These tests drive the real page in a real browser against a fake backend. Two
-instruments, because one is not enough:
+These tests drive the real page in a real browser against a fake backend.
+Three instruments, because no one of them sees everything:
 
 - **The fixture's request log.** A request that reaches the server is one the
   browser could not answer for itself, which is exactly what "renders from
@@ -16,16 +16,20 @@ instruments, because one is not enough:
 - **A count of load starts inside the page** (`LOAD_COUNTER`). The log is blind
   to a repeated load, because images carry production's `immutable` header and
   the second load is a cache hit. Counting spinner insertions is not.
+- **A count of Image constructions** (`IMAGE_COUNTER`), which is what separates
+  adopting an in-flight prefetch from restarting it. Both of the above are
+  blind to that: the restart is a cache hit, and it is one selectFile call
+  either way.
 
 Between them they close the reachability gap that capped #18's structural
 checks at twelve. A regex over source can see that `schedulePrefetch()` is
 written down; it cannot see whether it runs. `if (false) schedulePrefetch();`
-passes there and fails here — checked, along with eight other mutants.
+passes there and fails here. Where a test was checked against a named mutant,
+that mutant is recorded in its own docstring rather than tallied here; a count
+in this docstring would go stale the next time one is added, and did.
 
-One thing on #21's list is still not covered, and the comment above
-`test_each_selection_costs_exactly_one_load` says why: whether an in-flight
-prefetch is *adopted* rather than restarted is not observable from outside the
-page under either instrument.
+Two things on #21's list remain: `cancelPrefetches` keeping the half of a pair
+that already arrived, and the `pendingLoad` clear in `checkReady`.
 """
 
 import json
@@ -38,9 +42,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fixture_server import BASE_REF, HEAD_REF, serve  # noqa: E402
 from spa_harness import (  # noqa: E402
-    LOAD_COUNTER, SLOW_IMAGE, Probe, active_path, find_chromium,
-    index_html_path, issued_requests, load_starts, prefetch_tuning,
-    rendered_image_count, repo_root, wait_until,
+    IMAGE_COUNTER, LOAD_COUNTER, SLOW_IMAGE, Probe, active_path,
+    constructed_images, find_chromium, index_html_path, issued_requests,
+    load_starts, prefetch_tuning, rendered_image_count, repo_root,
+    wait_until,
 )
 
 TUNING = prefetch_tuning()
@@ -135,6 +140,7 @@ def page(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 900})
     p = ctx.new_page()
     p.add_init_script(LOAD_COUNTER)
+    p.add_init_script(IMAGE_COUNTER)
     # The order the renderer issued requests in. The fixture cannot answer
     # that: its `start` is stamped inside a ThreadingHTTPServer handler
     # thread, so four near-simultaneous requests are ordered by the OS
@@ -362,17 +368,15 @@ def test_abandoned_transfers_are_cancelled(page, probe, base_url):
 
 # ── the stateful paths a source-text check cannot see ───────────────────────
 
-# Not tested here: that a prefetch the user catches up with is *adopted* rather
-# than restarted. With `usableCached` stubbed to return null — adoption off —
-# this whole file stays green, and a probe counting PerformanceResourceTiming
-# entries for the URL read the same either way. So neither instrument sees it.
-# The request log certainly cannot: a restarted load is a cache hit and never
-# reaches the server. Why resource timing did not separate them was not
-# established, and the probe's timing may simply have missed the in-flight
-# window; it is recorded as unverified rather than explained away.
-#
-# A test that passes whatever the code does is worse than an acknowledged gap,
-# so this one is left to #21 instead of written.
+# Adoption — a prefetch the user catches up with being reused rather than
+# restarted — is covered at the bottom of this file, and it took a third
+# instrument to do it. Neither of the two above can see it: the request log
+# cannot, because a restarted load is a cache hit that never reaches the
+# server, and the load counter cannot, because there is one selectFile call
+# either way. An earlier attempt with PerformanceResourceTiming read the same
+# under both, and why was never established. IMAGE_COUNTER counts Image
+# constructions instead, which is the thing the adoption path actually
+# changes: 2 when it works, 4 when it does not.
 
 
 def test_each_selection_costs_exactly_one_load(page, probe, base_url):
@@ -410,3 +414,50 @@ def test_a_renamed_file_is_warmed_at_its_previous_path(page, probe, base_url):
         f"the base side should be warmed at the previous path, got {by_ref}"
     assert by_ref.get(HEAD_REF) == path_of(RENAMED_INDEX), \
         f"the head side should be warmed at the current path, got {by_ref}"
+
+
+def test_an_in_flight_prefetch_is_adopted_rather_than_restarted(page, probe, base_url):
+    """Arriving on a file mid-warm reuses that transfer instead of starting a second.
+
+    The last item of #21's list, and the one that needed a third instrument.
+    Neither of the other two can see it. The request log cannot, because the
+    images carry production's `immutable` header, so a restarted load is a
+    cache hit that never reaches the server. The load counter cannot either:
+    it counts selectFile calls, and there is exactly one here whichever way
+    the page behaves. What separates them is how many Image objects the page
+    builds, which IMAGE_COUNTER counts by wrapping the constructor before any
+    page script runs.
+
+    Waiting for the warm to have *started* is load-bearing rather than
+    tidiness: press j before it does and the page builds a fresh pair for the
+    honest reason, two either way, so the Image count below cannot tell an
+    adoption path that works from one that does nothing. The wait is what
+    makes the block reachable. Delete it and the racing assertion catches the
+    vacuous configuration and says so — checked both with `usableCached`
+    returning null and on an unmutated page, RED on `saw []` either way.
+    Mutants: `usableCached -> return null` and the `exceptPath` guard deleted
+    from `cancelPrefetches`, both RED at 4 objects against the 2 asserted.
+    """
+    open_pr(page, base_url)
+    wait_until(lambda: len(probe.images(path_of(1))) == 2, "the warm to be in flight")
+
+    # Logged is not the same as open, and "mid-warm" is this test's whole
+    # identity: if the warm ever finished before the keypress, the test would
+    # quietly become a second copy of the already-complete path with a name
+    # and a docstring that still said otherwise. It asks nothing new of the
+    # page — both sides measured open on every run — but it does tighten the
+    # test: without it, removing the wait above leaves this passing on two
+    # honestly-built images, which is the vacuous run check 1 asks about.
+    racing = [r["path"] for r in probe.in_flight()]
+    assert racing.count(path_of(1)) == 2, \
+        f"both sides of file 1 should still be in flight at the keypress, saw {racing}"
+
+    page.keyboard.press("j")
+    wait_until(lambda: active_path(page) == path_of(1), "file 1 to be selected")
+    wait_until(lambda: rendered_image_count(page) == 2, "file 1 to render")
+
+    built = constructed_images(page, "file_01.png")
+    assert len(built) == 2, (
+        f"the page should have built one pair of Image objects for file 1, the "
+        f"pair the prefetch started, but it built {len(built)}: "
+        f"{[[s.split('?', 1)[-1] for s in srcs] for srcs in built]}")
