@@ -148,6 +148,32 @@ py_test(
     ],
 )
 
+# The deploy workflow is the only place the app's production environment is
+# written down, and `bazel test` does not otherwise read .github/. Both defects
+# it guards against surface only on a merge to main.
+py_test(
+    name = "test_deploy_workflow",
+    srcs = [
+        "tests/__init__.py",
+        "tests/run_tests.py",
+        "tests/spa_harness.py",
+        "tests/test_deploy_workflow.py",
+    ],
+    args = ["tests/test_deploy_workflow.py"],
+    data = [
+        ".github/workflows/deploy.yml",
+        "auth.py",
+        "static/index.html",
+    ],
+    env = {"VR_AUTH_MODE": "disabled"},
+    main = "tests/run_tests.py",
+    deps = [
+        ":app_lib",
+        requirement("pytest"),
+        requirement("pyyaml"),
+    ],
+)
+
 py_test(
     name = "test_spa_signed_in_chip",
     size = "medium",
