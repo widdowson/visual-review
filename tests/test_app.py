@@ -584,6 +584,14 @@ class TestPrImagesPagination:
         data = resp.json()
         assert data["images"] == []
         assert "500" in data["error"]
+        # And it does not claim the empty list is complete. This assertion
+        # lives here rather than in TestTruncatedIsNeverAbsent because that
+        # class is parameterised by failure mode — no token, everything 404s,
+        # the client throws — and none of those constructs this shape: a PR
+        # fetch that succeeds followed by a files walk that fails partway.
+        # Without it, `"truncated": False` on this return passes the whole
+        # suite, which is the claim of completeness this PR exists to prevent.
+        assert data["truncated"] is True
         # It stopped at the failure rather than walking on past it.
         assert instance.requested_pages == [1, 2]
 
@@ -2242,6 +2250,14 @@ class TestTruncatedIsNeverAbsent:
 
         Every case above asserts true, so all of them would pass with the key
         hard-coded true everywhere and the flag reduced to a constant.
+
+        This covers the two comment endpoints only. `/images` and `/checks`
+        are falsifiable too, but their false side is asserted elsewhere —
+        `TestPrImagesPagination.test_all_files_returned_past_the_compare_cap`
+        and `TestPrChecksPagination.test_a_failure_on_page_two_flips_the_verdict`
+        each assert `truncated is False` on a complete read. Said here so a
+        reader auditing this class alone does not conclude those two are
+        pinned in one direction only.
         """
         instance = _comment_client(_comment_pages(3))
 

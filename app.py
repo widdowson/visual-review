@@ -151,6 +151,12 @@ _GH_MAX_PAGES = 30
 # this whole pair of issues exists to stop it making. So the flag means "this
 # list may be incomplete", it is never absent, and every path that could not
 # establish completeness errs toward saying so.
+#
+# The flag is subordinate to ``error``: it qualifies a list that was read, so
+# on a response carrying an ``error`` it means nothing was read at all, and a
+# consumer shows the error rather than a note about a partial list. The SPA
+# already does — ``loadPrImages`` returns on ``data.error`` before it reaches
+# the truncation note — and anything reading these flags in future has to.
 
 
 class _GitHubError(Exception):
