@@ -2131,8 +2131,15 @@ class TestPrChecksPagination:
 
     @pytest.mark.asyncio
     async def test_a_failing_page_leaves_no_runs(self):
-        """Unchanged from the single-request version: a checks call that
-        fails reports ``none`` rather than a partial verdict."""
+        """A checks call that fails reports ``none`` rather than a partial
+        verdict. That half is inherited from the single-request version.
+
+        The shape being driven is not: page 1 answers and page 2 does not,
+        which one request cannot produce. Nor is the flag — the single-request
+        version had none to answer with. So the assertions below split the
+        same way the handler's own comment does, and this docstring says so
+        rather than repeating the claim Round 1 corrected there: that the
+        error path is unchanged. Half of it is."""
         instance = self._client([self._runs(_GH_PAGE_SIZE)], status_by_page={2: 500})
 
         with (
