@@ -184,6 +184,26 @@ document.addEventListener('DOMContentLoaded', () => {
 """
 
 
+IMAGE_COUNTER = """
+window.__vrImgs = [];
+(function () {
+  var Real = window.Image;
+  function Counted() {
+    var img = new Real();
+    window.__vrImgs.push(img);
+    return img;
+  }
+  Counted.prototype = Real.prototype;
+  window.Image = Counted;
+})();
+"""
+
+
+def decoded_images(page, fragment: str = "") -> list[str]:
+    srcs = page.evaluate("window.__vrImgs.map(function (i) { return i.src; })")
+    return [s for s in srcs if fragment in s]
+
+
 def load_starts(page) -> int:
     return page.evaluate("window.__vrLoads || 0")
 
