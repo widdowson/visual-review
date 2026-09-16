@@ -2211,18 +2211,103 @@
         }
 
         // -- Comments --
+        //
+        // The pane is shared by every file, and a fetch for one file can land
+        // after the user has moved to another: j/k moves faster than the API
+        // answers. So a response has to prove it is still wanted before it
+        // writes to the pane, the same way loadImagePair's generation counter
+        // makes a decoded image prove it before it renders.
+        //
+        // ── comments-freshness:begin ────────────────────────────────────────
+        // Pure: given what a comments response is for and what the pane is
+        // showing when it arrives, may it render? A flag and two counters, so
+        // it can be tested without a DOM or a clock — the surrounding fetch
+        // cannot be.
+        //
+        // Two inputs, each covering a case the other cannot:
+        //
+        //   generation — a load that owns the pane takes a new number, so the
+        //                reported bug (A's answer landing after the user has
+        //                selected B) and the subtler one (two answers for the
+        //                *same* file, when posting a comment reloads it while
+        //                the initial load is still open) both fail here.
+        //   ownedPane  — whether the call that started this fetch was the one
+        //                driving the pane. A comment posted on file A reloads
+        //                A's comments by path, and that reload can fire after
+        //                the user has moved to B. It takes no generation
+        //                number — see loadComments for why it must not — so it
+        //                carries whatever the current one was, and only this
+        //                flag tells it apart from a live load.
+        //
+        // Deliberately *not* a third input: re-comparing the response's path
+        // against the selected file on arrival. selectFile is the only writer
+        // of state.currentFile in this file, and its last statement is a
+        // loadComments for the path it just assigned — which owns the pane and
+        // so always takes a new generation. Every response that check could
+        // reject has therefore already failed the generation check, and no run
+        // would enter it.
+        //
+        // That is a property of those two statements, not of the module: add
+        // the check back if some future caller sets state.currentFile without
+        // loading comments, or if anything between the assignment and the
+        // loadComments call starts throwing before reaching it. Several
+        // statements in that window can throw in principle today —
+        // loadImagePair is ~100 lines of synchronous setup — but a throw there
+        // breaks the file view outright, so the comments pane is not what
+        // anyone would notice.
+        function commentsResponseIsCurrent(opts) {
+            return opts.ownedPane === true &&
+                opts.generation === opts.currentGeneration;
+        }
+        // ── comments-freshness:end ──────────────────────────────────────────
+
+        var commentsGeneration = 0;
+
         function loadComments(path) {
-            commentsSection.style.display = '';
-            commentsScroll.innerHTML = '<div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
+            // Only a load for the file on screen owns the pane. Bumping the
+            // counter from a load that does not own it would strand the load
+            // that does: its response would find a generation it no longer
+            // matches and drop itself, leaving the spinner up for good.
+            var ownedPane = path === state.currentFile;
+            var generation = ownedPane ? ++commentsGeneration : commentsGeneration;
+
+            if (ownedPane) {
+                commentsSection.style.display = '';
+                commentsScroll.innerHTML = '<div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
+            }
+
+            function isCurrent() {
+                return commentsResponseIsCurrent({
+                    ownedPane: ownedPane,
+                    generation: generation,
+                    currentGeneration: commentsGeneration,
+                });
+            }
 
             fetch(apiBase + '/comments?path=' + encodeURIComponent(path))
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     var comments = data.comments || [];
-                    renderComments(comments, path);
+                    // Deliberately outside the guard. The *row* is right by
+                    // construction: it is chosen by this response's own path,
+                    // so it is the right row whether or not that file is on
+                    // screen, and dropping the call would lose the count for a
+                    // comment the user just posted and navigated away from.
+                    //
+                    // The *count* is whichever answer lands last, which two
+                    // answers for the same path can still get wrong — post a
+                    // comment while the initial load is slow and the badge can
+                    // settle on the older number until that file is reloaded.
+                    // Strictly better than rendering the stale pane as well,
+                    // which is what this guard fixes, but not the same as
+                    // correct: a per-path guard needs a generation per path
+                    // rather than one counter, and is issue #49.
                     updateCommentBadge(path, comments.length);
+                    if (!isCurrent()) return;
+                    renderComments(comments, path);
                 })
                 .catch(function() {
+                    if (!isCurrent()) return;
                     renderComments([], path);
                 });
         }

@@ -176,6 +176,15 @@ js_test(
     ],
 )
 
+js_test(
+    name = "test_comments_freshness",
+    entry_point = "tests/test_comments_freshness.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
 # The repo page's logic is a module rather than a region of its HTML, so this
 # requires it directly. static/repo.js is the entry point's own dependency —
 # without it in data an edit to the page's logic changes no input of this
