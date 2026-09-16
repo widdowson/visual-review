@@ -2386,6 +2386,83 @@ class TestRepoPulls:
         assert "connection reset" in resp.json()["error"]
 # -- Client disconnect ---------------------------------------------------------
 
+    @pytest.mark.asyncio
+    async def test_one_pull_requests_transport_failure_does_not_discard_the_list(self):
+        """Round 1, Major 2: a read timeout on one PR blanked the whole page.
+
+        ``_gh_paginate`` raises ``_GitHubError`` for a non-200 and a body that
+        is not a list, and nothing else — so an ``httpx.ReadTimeout`` escaped
+        the probe, aborted the ``gather``, reached the endpoint's own handler
+        and answered ``{"pulls": []}``, which the page renders by wiping rows
+        it had already drawn. Over a six-wide fan-out on a 30s timeout that is
+        the failure that actually happens, and it is the one the HTTP-500 case
+        above does not reach.
+        """
+        class _TimingOut(_RepoClient):
+            async def get(self, url, **kwargs):
+                if url.endswith("/pulls/1/files"):
+                    raise httpx.ReadTimeout("read timed out")
+                return await super().get(url, **kwargs)
+
+        client = _TimingOut([[_pull(1), _pull(2)]], files_by_number={2: [{"filename": "a.png"}]})
+        token, http = _patched(client)
+        with token, http:
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert "error" not in data
+        rows = {row["number"]: row for row in data["pulls"]}
+        assert len(rows) == 2, "the other PRs are still listed"
+        assert rows[1]["images"] is None
+        assert "ReadTimeout" in rows[1]["image_error"]
+        assert rows[2]["images"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_fan_out_survives_a_probe_that_raises(self):
+        """The backstop in ``fill``, driven — otherwise no run enters it.
+
+        ``_pr_image_summary`` promises not to raise, and with that promise kept
+        the ``try`` around the call is a block no test reaches, which is a
+        guard that passes under any implementation. So the promise is broken on
+        purpose here. What it protects is out of proportion to one row: a
+        ``gather`` re-raises, the endpoint answers with no pulls, and a page
+        that had already rendered is wiped.
+        """
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("probe blew up")
+
+        client = _RepoClient([[_pull(1), _pull(2)]])
+        token, http = _patched(client)
+        with token, http, patch("app._pr_image_summary", _boom):
+            resp = await _get("/api/owner/repo/pulls")
+
+        data = resp.json()
+        assert "error" not in data
+        assert len(data["pulls"]) == 2
+        for row in data["pulls"]:
+            assert row["images"] is None
+            assert "probe blew up" in row["image_error"]
+
+    @pytest.mark.asyncio
+    async def test_a_pull_request_with_no_head_sha_is_not_cached(self):
+        """An empty SHA would key a count no push could ever invalidate.
+
+        Nothing should produce one; the point is that a PR that does gets a
+        fresh count rather than a stale one pinned under a meaningless key.
+        """
+        client = _RepoClient([[_pull(1, head_sha="")]], files_by_number={1: [{"filename": "a.png"}]})
+        client.pull_pages[0][0]["head"]["sha"] = ""
+        token, http = _patched(client)
+        with token, http:
+            first = await _get("/api/owner/repo/pulls")
+            calls_after_first = len(client.file_requests())
+            second = await _get("/api/owner/repo/pulls")
+
+        assert first.json()["pulls"][0]["images"] == 1
+        assert second.json()["pulls"][0]["images"] == 1
+        assert len(client.file_requests()) == calls_after_first * 2, "probed again, not served from a cache"
+        assert not any(k.endswith(":") for k in _cache), "no key with an empty SHA was written"
+
 class TestPrImageClientDisconnect:
     """A request the browser has cancelled must stop costing GitHub API calls.
 
@@ -2656,84 +2733,6 @@ class TestPrImageClientDisconnect:
         assert "client gone before the download_url fetch" in caplog.text
         assert "before the blob call" not in caplog.text
 
-    @pytest.mark.asyncio
-    async def test_one_pull_requests_transport_failure_does_not_discard_the_list(self):
-        """Round 1, Major 2: a read timeout on one PR blanked the whole page.
-
-        ``_gh_paginate`` raises ``_GitHubError`` for a non-200 and a body that
-        is not a list, and nothing else — so an ``httpx.ReadTimeout`` escaped
-        the probe, aborted the ``gather``, reached the endpoint's own handler
-        and answered ``{"pulls": []}``, which the page renders by wiping rows
-        it had already drawn. Over a six-wide fan-out on a 30s timeout that is
-        the failure that actually happens, and it is the one the HTTP-500 case
-        above does not reach.
-        """
-        class _TimingOut(_RepoClient):
-            async def get(self, url, **kwargs):
-                if url.endswith("/pulls/1/files"):
-                    raise httpx.ReadTimeout("read timed out")
-                return await super().get(url, **kwargs)
-
-        client = _TimingOut([[_pull(1), _pull(2)]], files_by_number={2: [{"filename": "a.png"}]})
-        token, http = _patched(client)
-        with token, http:
-            resp = await _get("/api/owner/repo/pulls")
-
-        data = resp.json()
-        assert "error" not in data
-        rows = {row["number"]: row for row in data["pulls"]}
-        assert len(rows) == 2, "the other PRs are still listed"
-        assert rows[1]["images"] is None
-        assert "ReadTimeout" in rows[1]["image_error"]
-        assert rows[2]["images"] == 1
-
-    @pytest.mark.asyncio
-    async def test_the_fan_out_survives_a_probe_that_raises(self):
-        """The backstop in ``fill``, driven — otherwise no run enters it.
-
-        ``_pr_image_summary`` promises not to raise, and with that promise kept
-        the ``try`` around the call is a block no test reaches, which is a
-        guard that passes under any implementation. So the promise is broken on
-        purpose here. What it protects is out of proportion to one row: a
-        ``gather`` re-raises, the endpoint answers with no pulls, and a page
-        that had already rendered is wiped.
-        """
-        async def _boom(*args, **kwargs):
-            raise RuntimeError("probe blew up")
-
-        client = _RepoClient([[_pull(1), _pull(2)]])
-        token, http = _patched(client)
-        with token, http, patch("app._pr_image_summary", _boom):
-            resp = await _get("/api/owner/repo/pulls")
-
-        data = resp.json()
-        assert "error" not in data
-        assert len(data["pulls"]) == 2
-        for row in data["pulls"]:
-            assert row["images"] is None
-            assert "probe blew up" in row["image_error"]
-
-    @pytest.mark.asyncio
-    async def test_a_pull_request_with_no_head_sha_is_not_cached(self):
-        """An empty SHA would key a count no push could ever invalidate.
-
-        Nothing should produce one; the point is that a PR that does gets a
-        fresh count rather than a stale one pinned under a meaningless key.
-        """
-        client = _RepoClient([[_pull(1, head_sha="")]], files_by_number={1: [{"filename": "a.png"}]})
-        client.pull_pages[0][0]["head"]["sha"] = ""
-        token, http = _patched(client)
-        with token, http:
-            first = await _get("/api/owner/repo/pulls")
-            calls_after_first = len(client.file_requests())
-            second = await _get("/api/owner/repo/pulls")
-
-        assert first.json()["pulls"][0]["images"] == 1
-        assert second.json()["pulls"][0]["images"] == 1
-        assert len(client.file_requests()) == calls_after_first * 2, "probed again, not served from a cache"
-        assert not any(k.endswith(":") for k in _cache), "no key with an empty SHA was written"
-
-
 class TestPrImageSummaryNeverRaises:
     """The probe's contract, driven directly.
 
@@ -2767,6 +2766,26 @@ class TestPrImageSummaryNeverRaises:
 
         await _pr_image_summary(_Failing(), "owner/repo", 1, "abc", {})
         assert _cache == {}
+
+    @pytest.mark.asyncio
+    async def test_a_swallowed_failure_is_logged(self, caplog):
+        """Round 2, Minor 3: the wide ``except`` made bugs look like bad luck.
+
+        A transport failure and an ``AttributeError`` from a malformed file
+        entry both render as one "check failed" badge, which a user reads as
+        GitHub being slow. The log is the only place the two are distinct, so
+        swallowing without logging is what the catch costs.
+        """
+        class _Failing:
+            async def get(self, url, **kwargs):
+                raise httpx.ReadTimeout("read timed out")
+
+        caplog.clear()
+        with caplog.at_level("ERROR", logger="visual-review"):
+            await _pr_image_summary(_Failing(), "owner/repo", 7, "abc", {})
+
+        assert "owner/repo" in caplog.text and "7" in caplog.text
+        assert "ReadTimeout" in caplog.text, "the traceback must reach the log"
 
 
 class TestCatchAllRouteScope:
@@ -2806,6 +2825,41 @@ class TestCatchAllRouteScope:
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/api/x/pr/5", "/static/x/pr/5", "/docs/x/pr/5"])
+    async def test_reserved_prefixes_are_not_the_viewer(self, path):
+        """Round 2, Minor 2: the two older catch-alls had no guard at all.
+
+        ``/{owner}/{repo}/pr/{number}`` is declared above every API route and
+        cannot move — so unlike the two page routes, the guard is the whole of
+        its protection rather than a second line of it. ``/api/x/pr/5`` used to
+        answer 200 with the viewer's HTML.
+        """
+        resp = await _get(path)
+        assert resp.status_code == 404, f"{path} must not be answered by the viewer"
+        assert "text/html" not in resp.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_a_reserved_prefix_short_pr_url_costs_no_github_request(self):
+        """``/{identifier}/pr/{n}`` resolves through a GitHub search too."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=200))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.GITHUB_TOKEN", "fake-token"), patch("httpx.AsyncClient") as MockClient:
+            MockClient.return_value = instance
+            resp = await _get("/api/pr/5")
+
+        assert resp.status_code == 404
+        assert instance.get.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_real_viewer_url_still_answers(self):
+        resp = await _get("/widdowson/visual-review/pr/43")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers.get("content-type", "")
+
     def test_the_catch_alls_are_registered_last(self):
         """Ordering, so a route added later is reached rather than swallowed.
 
@@ -2813,12 +2867,45 @@ class TestCatchAllRouteScope:
         covers the one it does not own yet. Starlette matches in registration
         order, so a two-segment route declared above these is tried first and
         one declared below never runs at all.
+
+        Scoped to the two page routes on purpose. The other two catch-alls are
+        *not* registered last and are not asserted to be — they predate this
+        and sit above every API route, which is why they carry the guard the
+        two cases above drive. An assertion here covering all four would have
+        to fail on the tree as it is.
         """
         paths = [r.path for r in app.routes if getattr(r, "path", None)]
         assert paths.index("/{owner}/{repo}") > max(
             i for i, p in enumerate(paths) if p.startswith("/api/")
         ), "the repo page must be registered after every API route"
         assert paths.index("/{identifier}") > paths.index("/{owner}/{repo}")
+
+    def test_every_leading_segment_route_is_guarded(self):
+        """The census, so a fifth such route cannot arrive unguarded.
+
+        Registration order protects the two page routes and the guard protects
+        all four, so the property that actually holds file-wide is "a route
+        whose first segment is data checks it". That is what this asserts, by
+        finding those routes in the app rather than from a list kept here.
+        """
+        import inspect
+
+        guarded = {"/{owner}/{repo}", "/{identifier}",
+                   "/{owner}/{repo}/pr/{number}", "/{identifier}/pr/{number}"}
+        found = {
+            r.path for r in app.routes
+            if getattr(r, "path", "").startswith("/{")
+        }
+        assert found == guarded, (
+            f"a route taking a leading segment as data changed: {found ^ guarded}. "
+            "Add _RESERVED_PATH_PREFIXES to it and list it here."
+        )
+        for route in app.routes:
+            if getattr(route, "path", "") in guarded:
+                source = inspect.getsource(route.endpoint)
+                assert "_RESERVED_PATH_PREFIXES" in source, (
+                    f"{route.path} does not check its first segment"
+                )
 
 
 class TestStaticMount:

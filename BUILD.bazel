@@ -135,7 +135,14 @@ js_test(
 js_test(
     name = "test_repo_page",
     entry_point = "tests/test_repo_page.js",
-    data = ["static/repo.js"],
+    # repo.html as well as repo.js: the wiring check reads the page's inline
+    # script, and an undeclared input is not in the sandbox *and* is not a
+    # cache key — so the check would fail here and, once passing, would take a
+    # cache hit on the very edit it exists to catch.
+    data = [
+        "static/repo.html",
+        "static/repo.js",
+    ],
 )
 
 # ── OCI container image ─────────────────────────────────────────────────────

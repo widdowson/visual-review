@@ -325,11 +325,51 @@ async def health_check():
     return {"status": "ok"}
 
 
+# -- What the app serves itself -----------------------------------------------
+#
+# Four routes below take a leading path segment as data: the two page routes
+# and the two "/{x}/pr/{n}" routes. Registration order alone is not enough to
+# keep them out of the app's own way, because a prefix the app owns can still
+# be reached by a path that is not a route: "/api/pulls" is a typo for a real
+# endpoint, and answering it with a page hides that. So all four check their
+# first segment against this set.
+#
+# It is deliberately wider than any one route needs. Only "api" and "static"
+# can shadow a real two-segment route — "health", "docs", "redoc" and
+# "openapi.json" are single-segment, so on "/{owner}/{repo}" those four only
+# forbid a repo page for an owner of that name. That is the trade taken
+# knowingly: a GitHub user called "docs" is a worse bet than a route this app
+# adds later and cannot reach.
+
+_RESERVED_PATH_PREFIXES = frozenset({
+    "api",
+    "static",
+    "health",
+    "docs",
+    "redoc",
+    "openapi.json",
+})
+
+# Single-segment paths a browser asks for on its own. Resolving one costs a
+# GitHub search request, so they are answered here instead: a page view that
+# declares no icon otherwise spends a search — and an hour of cache — on the
+# word "favicon.ico".
+_RESERVED_IDENTIFIERS = frozenset({
+    "favicon.ico",
+    "robots.txt",
+    "sitemap.xml",
+    "apple-touch-icon.png",
+    "apple-touch-icon-precomposed.png",
+})
+
+
 # -- Visual review SPA ---------------------------------------------------------
 
 @app.get("/{owner}/{repo}/pr/{number}")
 async def visual_review_page(owner: str, repo: str, number: int):
     """Serve the visual review SPA for any owner/repo/PR."""
+    if owner in _RESERVED_PATH_PREFIXES:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
     return FileResponse(os.path.join(static_dir, "index.html"))
 
 
@@ -341,6 +381,9 @@ async def short_url_redirect(identifier: str, number: int):
     - /{repo_name}/pr/{number} — resolve owner by searching for repo name
     - /{repo_id}/pr/{number} — resolve owner + name by numeric GitHub repo ID
     """
+    if identifier in _RESERVED_PATH_PREFIXES:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+
     matches = await _resolve_repo(identifier)
 
     if len(matches) == 1:
@@ -984,8 +1027,13 @@ async def _pr_image_summary(
     the way to the page, because the two read identically to whoever is
     deciding which PRs to open.
 
-    **Every** failure returns rather than raises, which is why the ``except``
-    is as wide as it is. This runs once per open PR inside an
+    **Every failure of the request** returns rather than raises, which is why
+    the ``except`` is as wide as it is — and the sentence is that narrow on
+    purpose: the count itself is taken outside the ``try``, and
+    ``_gh_paginate`` checks that the body is a list without checking that its
+    items are dicts, so a malformed entry still raises ``AttributeError`` from
+    here. The caller's backstop is what covers that, and this is why it has
+    one rather than trusting this docstring. This runs once per open PR inside an
     ``asyncio.gather``, so an exception escaping here does not cost one row —
     it aborts the gather, reaches the endpoint's own handler, and answers with
     an empty list, wiping a page that had already rendered. A read timeout is
@@ -1010,6 +1058,12 @@ async def _pr_image_summary(
     except _GitHubError as e:
         return {"error": f"Files request failed: {e}"}
     except Exception as e:
+        # A transport failure is expected and a bug here is not, but both
+        # arrive as one "check failed" badge that reads as bad luck. The log
+        # is the only place the second is distinguishable from the first.
+        logger.exception(
+            "_pr_image_summary: probe failed repo=%s pr=%s", github_repo, number,
+        )
         return {"error": f"Files request failed: {type(e).__name__}: {e}"}
 
     summary = {
@@ -1019,7 +1073,6 @@ async def _pr_image_summary(
     if head_sha:
         _cache_set(cache_key, summary)
     return summary
-
 
 
 @app.get("/api/{owner}/{repo}/pulls")
@@ -1102,6 +1155,12 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
                                 client, github_repo, row["number"], row["head_sha"], headers,
                             )
                     except Exception as e:
+                        # Reaching here means the promise above was broken, so
+                        # this one is logged whatever it turns out to be.
+                        logger.exception(
+                            "repo_pulls: probe raised repo=%s pr=%s",
+                            github_repo, row["number"],
+                        )
                         summary = {"error": f"Probe failed: {type(e).__name__}: {e}"}
                     if "error" in summary:
                         row["image_error"] = summary["error"]
@@ -1136,30 +1195,14 @@ async def repo_pulls(owner: str, repo: str, probe: bool = Query(True)):
 # reached rather than silently swallowed, which for a page route means a 200
 # with the wrong body, the worst shape that mistake can take.
 #
-# Registration order is not enough by itself, because the prefixes this app
-# already owns can still be reached by a path that is not a route: "/api/pulls"
-# is a typo for a real endpoint, and answering it with the repo page hides that.
-# So the first segment is checked against what the app serves itself.
-_RESERVED_PATH_PREFIXES = frozenset({
-    "api",
-    "static",
-    "health",
-    "docs",
-    "redoc",
-    "openapi.json",
-})
-
-# Single-segment paths a browser asks for on its own. Resolving one costs a
-# GitHub search request, so they are answered here instead: a page view that
-# declares no icon otherwise spends a search — and an hour of cache — on the
-# word "favicon.ico".
-_RESERVED_IDENTIFIERS = frozenset({
-    "favicon.ico",
-    "robots.txt",
-    "sitemap.xml",
-    "apple-touch-icon.png",
-    "apple-touch-icon-precomposed.png",
-})
+# The two older catch-alls, visual_review_page and short_url_redirect, are
+# *not* last: they predate this and sit above every /api/ route. Moving them
+# is not free — they are three and four segments deep, so the routes they can
+# shadow are narrower — and they carry the same _RESERVED_PATH_PREFIXES guard
+# instead, which is what stops "/api/x/pr/5" being served the viewer. So the
+# ordering assertion below covers all four, and for those two the guard is the
+# whole of the protection rather than a second line of it.
+#
 
 
 @app.get("/{owner}/{repo}")

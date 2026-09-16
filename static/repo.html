@@ -25,6 +25,7 @@
             --vr-badge-empty-bg: #eceef2; --vr-badge-empty-fg: #6b7280;
             --vr-badge-unknown-bg: #fef9c3; --vr-badge-unknown-fg: #854d0e;
             --vr-tag-bg: #eceef2; --vr-tag-fg: #555;
+            --vr-error: #cf222e;
         }
         [data-theme="dark"] {
             --vr-bg-body: #1a1d23;
@@ -42,6 +43,7 @@
             --vr-badge-empty-bg: #2a2d38; --vr-badge-empty-fg: #8b90a0;
             --vr-badge-unknown-bg: #3a3a1a; --vr-badge-unknown-fg: #facc15;
             --vr-tag-bg: #2a2d38; --vr-tag-fg: #bbb;
+            --vr-error: #ff7b72;
         }
 
         * { box-sizing: border-box; }
@@ -124,6 +126,7 @@
             border-radius: 8px; padding: 18px; color: var(--vr-text-secondary);
         }
         .message.error { border-color: #cf222e; }
+        .summary-error { color: var(--vr-error); font-weight: 600; }
 
         @media (max-width: 600px) {
             .pr-row { flex-wrap: wrap; }
@@ -171,6 +174,8 @@
         // reads it: the bad-URL branch below is such a call.
         var rows = [];
         var probed = false;
+        var listTruncated = false;
+        var loadError = null;
 
         var where = VRRepo.repoFromPath(location.pathname);
         if (!where) {
@@ -194,38 +199,54 @@
             draw();
         });
 
+        // The whole of the page, drawn from state. The summary line is a
+        // function of that state rather than somewhere messages get written,
+        // which is what lets an error survive the next redraw — and a redraw
+        // is one click on the filter away.
+        function draw() {
+            VRRepo.renderList(listEl, where.owner, where.repo, rows, {
+                hideEmpty: hideEmptyEl.checked,
+                nowMs: Date.now(),
+            });
+            var line = VRRepo.summaryLine(rows, probed, loadError, listTruncated);
+            summaryEl.textContent = line.text;
+            summaryEl.className = line.isError ? 'summary-error' : '';
+        }
+
         // An error replaces the list only while there is no list. Once the
         // first, cheap pass has rendered rows, those rows are correct and
-        // useful on their own — the counts are what failed — so a later
-        // failure says so above them rather than throwing them away.
-        function showMessage(text, isError) {
-            if (rows.length) {
-                summaryEl.textContent = text;
+        // useful on their own — the counts are what failed — so the failure
+        // becomes page state instead of replacing them, and every row still
+        // waiting on a count is told the count is not coming.
+        function fail(text) {
+            if (!rows.length) {
+                showMessage(text, true);
                 return;
             }
+            loadError = text;
+            VRRepo.markUncounted(rows, text);
+            draw();
+        }
+
+        function showMessage(text, isError) {
             listEl.textContent = '';
             var box = document.createElement('div');
             box.className = 'message' + (isError ? ' error' : '');
             box.textContent = text;
             listEl.appendChild(box);
             summaryEl.textContent = '';
-        }
-
-        function draw() {
-            VRRepo.renderList(listEl, where.owner, where.repo, rows, {
-                hideEmpty: hideEmptyEl.checked,
-                nowMs: Date.now(),
-            });
-            summaryEl.textContent = VRRepo.summaryText(VRRepo.summarize(rows), probed);
+            summaryEl.className = '';
         }
 
         function load(withProbe) {
             return fetch(VRRepo.pullsApiHref(where.owner, where.repo, withProbe))
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
-                    if (data.error) { showMessage(data.error, true); return false; }
+                    if (data.error) { fail(data.error); return false; }
                     rows = data.pulls || [];
                     probed = !!data.probed;
+                    listTruncated = !!data.truncated;
+                    loadError = null;
                     draw();
                     return true;
                 });
@@ -238,7 +259,7 @@
         // ask GitHub for the same list.
         load(false)
             .then(function (ok) { if (ok) return load(true); })
-            .catch(function (err) { showMessage('Could not load pull requests: ' + err, true); });
+            .catch(function (err) { fail('Could not load pull requests: ' + err); });
     })();
     </script>
 </body>

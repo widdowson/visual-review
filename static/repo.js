@@ -170,9 +170,6 @@
         gh.href = row.html_url;
         gh.target = '_blank';
         gh.rel = 'noopener';
-        // The row itself is the link where there is one, so a nested link has
-        // to stop the click reaching it.
-        gh.addEventListener('click', function (e) { e.stopPropagation(); });
         links.appendChild(gh);
         node.appendChild(links);
 
@@ -199,6 +196,43 @@
         }
     }
 
+    // ── failure:begin ──────────────────────────────────────────────────────
+    // What the line above the list says, which is not always the summary.
+    //
+    // A load that fails after the first pass leaves rows on screen — those
+    // rows are right, the counts are what failed — so the line carries the
+    // error instead. It is computed here rather than written into the element
+    // because the element is rewritten on every redraw: a message assigned
+    // straight to it vanishes the first time the user touches the filter, and
+    // the summary that replaces it says the page is still checking.
+    function summaryLine(rows, probed, loadError, listTruncated) {
+        if (loadError) return { text: String(loadError), isError: true };
+        let text = summaryText(summarize(rows), probed);
+        // The listing itself can be cut short, and a count taken over a list
+        // that was cut is a floor like any other. Out of reach for any
+        // repository this tool is pointed at, but a field the server sets and
+        // the page drops is the same silent under-report the per-PR walk goes
+        // out of its way not to make.
+        if (listTruncated) text += ' · list cut short, more open PRs than shown';
+        return { text: text, isError: false };
+    }
+
+    // A row nothing has counted says "checking…", which stops being true the
+    // moment the thing that was going to count it has failed. Without this the
+    // page sits on "checking…" for ever after a failed probe pass — quieter
+    // than calling the PR empty, and the same kind of lie. Rows that already
+    // carry a count, or an error of their own, are left alone.
+    function markUncounted(rows, message) {
+        for (const row of rows) {
+            if (!row || row.image_error) continue;
+            if (row.images === null || row.images === undefined) {
+                row.image_error = String(message);
+            }
+        }
+        return rows;
+    }
+    // ── failure:end ────────────────────────────────────────────────────────
+
     function summaryText(counts, probed) {
         if (!counts.total) return 'No open pull requests.';
         if (!probed || counts.checking) {
@@ -214,6 +248,8 @@
         verdictFor: verdictFor,
         summarize: summarize,
         summaryText: summaryText,
+        summaryLine: summaryLine,
+        markUncounted: markUncounted,
         repoFromPath: repoFromPath,
         viewerHref: viewerHref,
         pullsApiHref: pullsApiHref,
