@@ -1,0 +1,11 @@
+{
+  "comment": "Trimmed from Playwright 1.57.0's own browsers.json to the single browser this repo runs. Keeping the other nine would make @playwright//... expand to every browser for every platform \u2014 about 7 GB of archives \u2014 so the mistake is removed rather than documented. What went with them, should anyone need it back: 'ffmpeg', which Playwright's record_video_dir requires, and full 'chromium', which a headed or trace run wants \u2014 re-add the entry verbatim from the wheel's playwright/driver/package/browsers.json rather than writing one, since 'revision' is what selects the download. Must stay in step with the playwright pin in requirements_lock.txt; //:test_spa_prefetch compares both the filename and every entry against that same file.",
+  "browsers": [
+    {
+      "name": "chromium-headless-shell",
+      "revision": "1200",
+      "installByDefault": true,
+      "browserVersion": "143.0.7499.4"
+    }
+  ]
+}
