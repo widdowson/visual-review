@@ -13,8 +13,8 @@
 // Three parts. The decision is a pure region, extracted and run. renderFileList
 // touches a DOM, so it is run against stubs rather than matched by pattern — a
 // regex that matches the text of a call passes whether or not the call does
-// anything. The last part reads the stylesheet, for a rule whose absence no
-// assertions on the markup cannot see.
+// anything. The last part reads the stylesheet, for two rules whose absence no
+// assertion on the markup can see.
 
 const assert = require('assert');
 const { extract, bodyOf, stylesheet } = require('./spa_source');
@@ -152,6 +152,12 @@ assert.strictEqual(dirContextFor('dir/name.png', ROOT_COLLIDING), 'dir');
 // shallower file can try is shared, and its answer is its whole directory —
 // which still reads differently from the deeper file's.
 const NESTED = files(['b/c/name.png', 'a/b/c/name.png']);
+
+// A file directly inside its rival's directory, for the display decision
+// below. Declared here rather than beside its own assertions so that the
+// fixture list is genuinely every fixture in the file — one declared after it
+// escapes both property checks while the comment there says it cannot.
+const INSIDE = files(['a/name.png', 'a/b/name.png']);
 assert.strictEqual(dirContextFor('b/c/name.png', NESTED), 'b/c',
   'a file whose directory is a tail of its rival must show that directory');
 assert.strictEqual(dirContextFor('a/b/c/name.png', NESTED), 'a/b/c',
@@ -159,7 +165,7 @@ assert.strictEqual(dirContextFor('a/b/c/name.png', NESTED), 'a/b/c',
 
 // Every fixture in this file, now that they are all declared — the check above
 // is only worth having if it runs over the shallow and root-level answers too.
-const FIXTURES = [BASELINES, SHALLOW, THREE, UNEVEN, ROOT_COLLIDING, NESTED];
+const FIXTURES = [BASELINES, SHALLOW, THREE, UNEVEN, ROOT_COLLIDING, NESTED, INSIDE];
 for (const images of FIXTURES) {
   for (const img of images) shortestAnswer(img, images);
 }
@@ -248,7 +254,6 @@ assert.strictEqual(dirLabelFor('b/c/name.png', NESTED), 'b/c/');
 assert.strictEqual(dirLabelFor('a/b/c/name.png', NESTED), 'a/b/c/');
 
 // A tail of one is marked, so it cannot be read as the whole path.
-const INSIDE = files(['a/name.png', 'a/b/name.png']);
 assert.deepStrictEqual(
   INSIDE.map(i => dirLabelFor(i.path, INSIDE)), ['a/', '\u2026/b/'],
   'a file inside its rival must not print as a sibling of it');
@@ -385,7 +390,7 @@ function render(images) {
     'and no row from the previous render may survive it');
 }
 
-// ── The rules that make the second line a second line ──────────────────────
+// ── The rules that make the second line a second line ───────────────────────
 //
 // Markup alone cannot show this: an unstyled .file-dir inherits the row's font
 // size and colour, so the directory renders as a second filename — louder than
@@ -406,12 +411,25 @@ function render(images) {
   assert.ok(/color\s*:/.test(dir), '.file-dir must set its own colour');
   assert.ok(/text-overflow\s*:\s*ellipsis/.test(dir),
     '.file-dir must ellipsize; these paths are longer than the column');
+  // text-overflow does nothing to text that is allowed to wrap, so without
+  // this the long directory takes a second row instead of an ellipsis.
+  assert.ok(/white-space\s*:\s*nowrap/.test(dir),
+    '.file-dir must not wrap, or text-overflow has nothing to act on');
 
   const label = rule('file-label');
   assert.ok(/flex-direction\s*:\s*column/.test(label),
     '.file-label must stack its two lines');
+  // flex-direction is inert on a block, so asserting it without this asserts
+  // nothing: the filename and the directory would render on one line.
+  assert.ok(/display\s*:\s*flex/.test(label),
+    '.file-label must be a flex container, or flex-direction does nothing');
   assert.ok(/min-width\s*:\s*0/.test(label),
     '.file-label must be allowed to shrink, or neither line can ellipsize');
+  // This PR moved `flex: 1` off .filename onto this block. Without it the
+  // block sizes to its content and the comment badge slides in beside the
+  // filename instead of sitting at the right edge of the row.
+  assert.ok(/flex\s*:\s*1/.test(label),
+    '.file-label must take the free space .filename used to take');
 }
 
 console.log('test_file_label: all checks passed');
