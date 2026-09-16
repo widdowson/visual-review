@@ -60,11 +60,12 @@ node tests/test_hash_target.js
 (`tests/fixture_server.py`) rather than GitHub. Chromium is hermetic — Bazel
 downloads it, pinned in `MODULE.bazel` to the build matching the `playwright`
 pin in `requirements_lock.txt`. Those two must move together, and the test
-asserts it rather than trusting this paragraph — both the version in the
-manifest's filename and every field of its entries, against the `browsers.json`
-the installed wheel ships. Bump `playwright` and the trimmed manifest is to be
-re-derived from that file, not edited. Nothing needs to be installed and
-`playwright install` must not be run.
+asserts it rather than trusting this paragraph — the version in the manifest's
+filename, and each entry's `revision` and `browserVersion`, against the
+`browsers.json` the installed wheel ships. Those two are what select the
+download. Bump `playwright` and the trimmed manifest is to be re-derived from
+that file, not edited. Nothing needs to be installed and `playwright install`
+must not be run.
 
 **Which Linux build it fetches is a build flag, not autodetection.**
 `@rules_playwright//:linux_distro` defaults to `ubuntu24.04`, so on Debian 12

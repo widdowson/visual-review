@@ -176,9 +176,15 @@ def test_the_next_file_is_warmed_while_you_read_this_one(page, probe, base_url):
     # And warmed *after a pause*, not the instant the current pair lands. This
     # is the whole of the debounce's observable contract: a fast scroll must
     # not speculate on a file it only passes through. It is asserted here
-    # rather than in the scroll test below because during a fast scroll the
-    # abort already prevents the speculation — measured, with the debounce
-    # removed, as the identical 22 requests — so the scroll cannot see it.
+    # rather than in the scroll test below because the scroll cannot see the
+    # debounce at all: replacing the timer with a synchronous runPrefetch()
+    # leaves that test's peak at 4 transfers racing and its drain unchanged.
+    # Note the request total is no help there either way, in either direction:
+    # at ahead: 1 the prefetch of file N+1 and the selection of file N+1 ask
+    # for the same URL, so a speculation that fired and one that never did are
+    # indistinguishable in a count. (An earlier revision of this comment said
+    # that count was "the identical 22 requests". It is 20, and the missing
+    # pair is not a speculation at all — see the scroll test's own docstring.)
     warm_began = min(r["start"] for r in warmed)
     # Only records that closed *before* the warm started. Taking the max over
     # every record for file 0 couples this to the caching behaviour of the
@@ -299,12 +305,14 @@ def test_a_fast_scroll_does_not_pile_up_transfers(page, probe, base_url):
         high_water = max(high_water, len(probe.in_flight()))
 
     assert active_path(page) == path_of(FILE_COUNT - 1)
-    # 2, not 1, and the floor has to meet the ceiling or it is not a control.
-    # The bound asserted below is "<= 2 racing"; a reader that can never report
-    # more than 2 cannot fail it, so the round-1 fix of moving this from 0 to 1
-    # left most of the band it was for. A pair is two images and the fixture's
-    # delay is a deterministic sleep, so two in flight at a mid-scroll sample is
+    # 2, not 1, so that the floor meets the ceiling. The bound asserted below is
+    # "<= 2 racing", and a reader capped at 1 cannot fail it — which is what an
+    # earlier `>= 1` here left open. A pair is two images and the fixture's delay
+    # is a deterministic sleep, so two in flight at a mid-scroll sample is
     # guaranteed by construction; measured 4 in 15 runs of 16 and 3 in the other.
+    # A reader capped at exactly 2 still passes both, and no control of this
+    # shape can exclude one: the floor cannot go above the ceiling it defends.
+    # That residue is irreducible here rather than an oversight.
     assert high_water >= 2, \
         f"the in-flight reader peaked at {high_water} during a scroll of " \
         f"{FILE_COUNT - 1} files, so it cannot tell a drained stack from a " \
