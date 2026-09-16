@@ -711,7 +711,7 @@
                 // The filename, and under it the directory context needed to
                 // tell this row from another carrying the same basename. Two
                 // rows reading `cuj_01_login.bmp` and distinguishable only by
-                // hovering each one is what #31 is about; dirContextFor
+                // hovering each one is what #31 is about; dirLabelFor
                 // answers null for the ordinary case, and no second line is
                 // drawn then.
                 var label = document.createElement('span');
@@ -723,11 +723,11 @@
                 fname.textContent = basenameOf(img.path);
                 label.appendChild(fname);
 
-                var context = dirContextFor(img.path, state.images);
-                if (context !== null) {
+                var dirLabel = dirLabelFor(img.path, state.images);
+                if (dirLabel !== null) {
                     var dir = document.createElement('span');
                     dir.className = 'file-dir';
-                    dir.textContent = context === '' ? './' : context + '/';
+                    dir.textContent = dirLabel;
                     label.appendChild(dir);
                 }
                 li.appendChild(label);
@@ -768,13 +768,23 @@
         // stays the common case and the long one appears only where the short
         // one would be a lie.
         function hashTargetFor(path, images) {
+            return rivalsOf(path, images).length ? path : basenameOf(path);
+        }
+
+        // The other files in `images` that carry `path`'s basename, as their
+        // directory segments. One scan serves both halves: the hash asks
+        // whether there are any, the sidebar asks what tells them apart, and
+        // writing that predicate twice is how the two could come to disagree
+        // about which files collide.
+        function rivalsOf(path, images) {
             var name = basenameOf(path);
+            var rivals = [];
             for (var i = 0; i < images.length; i++) {
                 if (images[i].path !== path && basenameOf(images[i].path) === name) {
-                    return path;
+                    rivals.push(dirSegmentsOf(images[i].path));
                 }
             }
-            return name;
+            return rivals;
         }
 
         // The index `target` names, or -1. A whole path is matched before any
@@ -801,7 +811,7 @@
         }
 
         // The file name a fragment holds. A fragment can carry a percent
-        // escape that decodes to nothing — `#%E0%A4%A`, from a URL
+        // escape that does not decode at all — `#%E0%A4%A`, from a URL
         // hand-edited or truncated by a chat client that wrapped it — and
         // decodeURIComponent raises URIError on one. Nothing the app writes
         // can be malformed, since encodeHashTarget produces well-formed
@@ -832,24 +842,18 @@
         // segment shorter some file still matched — so what a narrow column
         // truncates off the right is the part every candidate has in common.
         //
-        // '' is a real answer, not an absent one: a file at the repository
-        // root colliding with a nested one is distinguished by being at the
-        // root, and that is what the loop exhausting means for it.
-        //
-        // The other way the loop exhausts is a rival nested deeper whose tail
-        // is this file's whole directory — `b/c/name.png` against
-        // `a/b/c/name.png`, where no suffix of the shallower one is its own.
-        // Its whole directory is the answer there, which still reads
+        // Two ways past the loop, and '' is a real answer rather than an
+        // absent one. A file at the repository root has no segments to try,
+        // so the loop runs zero times and falls straight to the return: being
+        // at the root is what distinguishes it, and '' says so. The loop can
+        // also genuinely exhaust, against a rival nested deeper whose tail is
+        // this file's whole directory — `b/c/name.png` against
+        // `a/b/c/name.png`, where every run the shallower one can try is
+        // shared. Its whole directory is the answer there, which still reads
         // differently from the deeper file's.
         function dirContextFor(path, images) {
-            var name = basenameOf(path);
             var own = dirSegmentsOf(path);
-            var rivals = [];
-            for (var i = 0; i < images.length; i++) {
-                if (images[i].path !== path && basenameOf(images[i].path) === name) {
-                    rivals.push(dirSegmentsOf(images[i].path));
-                }
-            }
+            var rivals = rivalsOf(path, images);
             if (!rivals.length) return null;
 
             for (var take = 1; take <= own.length; take++) {
@@ -873,6 +877,22 @@
                 if (!shared) return suffix;
             }
             return own.join('/');
+        }
+
+        // That context as the sidebar prints it. Three shapes, because a run
+        // of segments rendered as though it were a path is a lie the reader
+        // cannot see through: `a/name.png` beside `a/b/name.png` would read
+        // `a/` and `b/` as two siblings when the second is inside the first,
+        // and a genuinely root-relative `./` in the same list is what teaches
+        // the reader to read every other row that way. So a whole directory
+        // prints as itself, a tail of one is marked with a leading ellipsis,
+        // and the repository root is './'.
+        function dirLabelFor(path, images) {
+            var context = dirContextFor(path, images);
+            if (context === null) return null;
+            if (context === '') return './';
+            var own = dirSegmentsOf(path).join('/');
+            return (context === own ? '' : '\u2026/') + context + '/';
         }
 
         function dirSegmentsOf(path) {
