@@ -1355,6 +1355,8 @@ class TestPrCommentsPagination:
         data = resp.json()
         assert data["comments"] == []
         assert "502" in data["error"]
+        # And it does not claim the empty list is the whole of them.
+        assert data["truncated"] is True
         assert instance.requested_pages == [1, 2]
 
 
@@ -1421,7 +1423,9 @@ class TestPrCommentCountsPagination:
             async with AsyncClient(transport=transport, base_url="http://test") as ac:
                 resp = await ac.get("/api/owner/repo/pr/1/comment-counts")
 
-        assert resp.json()["counts"] == {}
+        data = resp.json()
+        assert data["counts"] == {}
+        assert data["truncated"] is True
 
 
 class TestPostPrComment:
@@ -2135,6 +2139,124 @@ class TestPrChecksPagination:
         data = resp.json()
         assert data["overall"] == "none"
         assert data["runs"] == []
+        # The finding this pins: reporting `truncated: false` here would be a
+        # positive claim that an empty list the walk could not read is the
+        # complete set of checks — on the one endpoint whose derived verdict
+        # a reader acts on directly.
+        assert data["truncated"] is True
+
+
+class TestTruncatedIsNeverAbsent:
+    """Every walked endpoint reports `truncated` on every response.
+
+    #23's own audit asked for this: an error return that omits the key hands
+    a consumer `undefined` where it has to tell "complete" from "could not
+    tell", and answering `false` on a list the endpoint never read is the
+    claim of completeness both issues exist to stop it making. So the rule is
+    uniform — present always, true on every path that did not establish
+    completeness — and these cases are what hold it there.
+
+    Without them each error return could drop the key, or answer `false`,
+    with the rest of the suite green.
+    """
+
+    ENDPOINTS = [
+        "/api/owner/repo/pr/1/images",
+        "/api/owner/repo/pr/1/comments?path=test.png",
+        "/api/owner/repo/pr/1/comment-counts",
+        "/api/owner/repo/pr/1/checks",
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    async def test_no_token_says_it_could_not_read(self, path):
+        """No token is not an empty list; it is an unread one.
+
+        `pr_comment_counts` is the one to watch here: it reports no error at
+        all, so `truncated` is the only thing distinguishing "no comments"
+        from "could not look".
+        """
+        with patch("app.GITHUB_TOKEN", ""):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(path)
+
+        assert resp.json()["truncated"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    async def test_an_unreachable_pr_says_it_could_not_read(self, path):
+        """Every GitHub call 404s, by whichever route the endpoint takes."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=404))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(path)
+
+        assert resp.json()["truncated"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    async def test_a_thrown_client_says_it_could_not_read(self, path):
+        """The outer catch-all is a path too, and it is where the two
+        endpoints that no longer catch `_GitHubError` themselves land."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(side_effect=RuntimeError("connection reset"))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(path)
+
+        data = resp.json()
+        assert data["truncated"] is True
+
+        # `pr_comment_counts` is the one endpoint that reports no error at
+        # all — badges are decoration, so it drops them and leaves the page
+        # working. That is deliberate and pre-dates this PR, and it is
+        # exactly why the flag has to carry the news there: `truncated` is
+        # the only thing on that response distinguishing "no comments" from
+        # "could not look".
+        if path.endswith("/comment-counts"):
+            assert "error" not in data
+        else:
+            assert "connection reset" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_complete_read_says_so(self):
+        """The rule has a false side, or it says nothing.
+
+        Every case above asserts true, so all of them would pass with the key
+        hard-coded true everywhere and the flag reduced to a constant.
+        """
+        instance = _comment_client(_comment_pages(3))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                comments = await ac.get("/api/owner/repo/pr/1/comments?path=test.png")
+                counts = await ac.get("/api/owner/repo/pr/1/comment-counts")
+
+        assert comments.json()["truncated"] is False
+        assert counts.json()["truncated"] is False
 
 
 class TestImageExtensionsJson:
