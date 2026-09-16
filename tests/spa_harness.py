@@ -249,7 +249,10 @@ def constructed_images(page, fragment: str) -> list[list[str]]:
     version did cover, so it is stated rather than guarded against.
 
     A record matches `fragment` if any src ever assigned to it did, so an
-    aborted-then-cleared image still counts. `fragment` is required because
+    aborted-then-cleared image still counts. It is matched against the whole
+    request URL, where the path is percent-encoded, so a bare filename works
+    and `path_of(i)` — the spelling `Probe.images()` takes — matches nothing,
+    the separator being `%2F`. `fragment` is required because
     `'' in s` is true of every string: an empty one would match every image
     built, including one whose only recorded assignment is abortImage's clear.
     """
