@@ -134,26 +134,57 @@ assert.ok(badgeAt < guardAt,
 // a second naive brace walk in a repo whose spa_source.js documents at length
 // why the first one needed a parse check.
 //
-// So: no walk, and the property is about the *write*. One pattern matches the
-// whole block including its closing brace -- there is nothing to over-capture
-// -- and it pins that the reveal and the spinner write both sit inside it and
-// nothing else does.
-const ownedBlock = new RegExp(
-  'if\\s*\\(\\s*ownedPane\\s*\\)\\s*\\{' +
-  '\\s*commentsSection\\s*\\.\\s*style\\s*\\.\\s*display\\s*=\\s*\'\'\\s*;' +
-  '\\s*commentsScroll\\s*\\.\\s*innerHTML\\s*=[^;]*spinner[^;]*;' +
-  '\\s*\\}');
-assert.ok(ownedBlock.test(loadComments),
-  'the ownedPane block must hold exactly the reveal and the spinner write: a reload ' +
-  'the user has navigated away from would otherwise blank the pane for the file they ' +
-  'are actually looking at');
+// The third asserted on the write and not the markup, which closed that one
+// -- but spelled the write out as `.innerHTML =`, so it enumerated a mechanism
+// rather than a property. An alias, `textContent`, `replaceChildren`,
+// `insertAdjacentHTML`, bracket notation and `+=` each blank the pane past it,
+// and of those `+=` is a slip a maintainer could make while appending a notice.
+//
+// So this counts *references to the element* instead. It cannot be told apart
+// by spelling, there is no next mechanism to enumerate, and it is a shorter
+// regex than the one it replaces -- which is the point: the fix for each of
+// these has to remove specificity, or the next round finds the next spelling.
+//
+// The reach is what `bodyOf` can see: a write from a helper defined elsewhere
+// is outside it. tests/spa_source.js states that trade as the project's
+// position and it is not chased here.
+// The block is matched whole, opener through closing brace, with `[^{}]*` for
+// its contents -- a regex rather than a brace walk, so it cannot over-capture
+// past the block the way a walk can when a `{` and a `}` are split across two
+// strings. A nested brace inside the block fails this loudly rather than
+// quietly widening it, which is the way round spa_source.js argues for.
+//
+// Deliberately tolerant of everything that is not the property: spacing, extra
+// parens, quote style, and the order of the statements inside.
+const ownedBlock = /if\s*\(+\s*ownedPane\s*\)+\s*\{([^{}]*)\}/.exec(loadComments);
+assert.ok(ownedBlock, 'loadComments must guard the pane write with an ownedPane block');
+const guarded = ownedBlock[1];
 
-// And the pane is written nowhere else in the function, so there is no second
-// write for a non-owning load to reach. (A `;` inside the markup would fail
-// the pattern above -- it has none today, and an HTML entity would need this
-// assertion rewritten rather than relaxed.)
-const writes = loadComments.match(/commentsScroll\s*\.\s*innerHTML\s*=/g) || [];
-assert.strictEqual(writes.length, 1,
-  'loadComments must write commentsScroll.innerHTML exactly once, inside the ownedPane block');
+// Every mention of either element must be inside that block. Counting mentions
+// rather than writes is what makes this mechanism-blind; comparing the count
+// inside against the count in the whole body is what keeps it from punishing a
+// statement *added* inside the block, which is guarded by construction.
+const refs = (source, name) => (source.match(new RegExp('\\b' + name + '\\b', 'g')) || []).length;
+for (const name of ['commentsScroll', 'commentsSection']) {
+  assert.ok(refs(guarded, name) > 0, name + ' must be touched inside the ownedPane block');
+  assert.strictEqual(refs(loadComments, name), refs(guarded, name),
+    'loadComments must touch ' + name + ' only inside the ownedPane block: a write ' +
+    'outside it, however spelled, is one a reload the user has navigated away from ' +
+    'would reach, blanking the pane for the file they are actually looking at');
+}
+
+assert.ok(/commentsScroll\s*\.\s*innerHTML\s*=/.test(guarded),
+  'the spinner write must be inside the ownedPane block');
+// Requiring the markup itself, rather than merely "not the empty string", is
+// the one place this stays literal on purpose: the alternative is enumerating
+// the ways of spelling an empty write, which is the trap the reference count
+// above exists to avoid. The cost is that hoisting the markup to a named
+// constant outside the block fails here with nothing wrong. That is a loud
+// failure naming what the pattern wants, which spa_source.js argues is the
+// right way round -- move the constant inside the block, or teach this line.
+assert.ok(/spinner/.test(guarded),
+  'the ownedPane block must write the spinner markup, not blank the pane');
+assert.ok(/commentsSection\s*\.\s*style\s*\.\s*display\s*=/.test(guarded),
+  'revealing the pane belongs inside the ownedPane block too');
 
 console.log('comments freshness: all assertions passed');
