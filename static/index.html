@@ -131,6 +131,12 @@
             font-size: 0.8rem; color: var(--vr-text-muted); text-transform: uppercase;
             letter-spacing: 0.5px; font-weight: 600;
         }
+        .truncation-note {
+            padding: 8px 16px; border-bottom: 1px solid var(--vr-border);
+            font-size: 0.75rem; line-height: 1.4;
+            background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg);
+        }
+        .truncation-note[hidden] { display: none; }
         .file-list { list-style: none; padding: 0; margin: 0; flex: 1; overflow-y: auto; }
         .file-item {
             padding: 8px 16px; cursor: pointer; border-bottom: 1px solid var(--vr-border-subtle);
@@ -510,6 +516,7 @@
             <div class="sidebar-header">
                 Changed Images <span id="image-count"></span>
             </div>
+            <div class="truncation-note" id="file-list-truncated" hidden></div>
             <ul class="file-list" id="file-list"></ul>
         </div>
 
@@ -616,6 +623,7 @@
         var commentsScroll = document.getElementById('comments-scroll');
         var prTitle = document.getElementById('pr-title');
         var imageCount = document.getElementById('image-count');
+        var truncationNote = document.getElementById('file-list-truncated');
         var loupeBase = document.getElementById('loupe-base');
         var loupeHead = document.getElementById('loupe-head');
         var loupeDiff = document.getElementById('loupe-diff');
@@ -677,6 +685,7 @@
                     }
 
                     imageCount.textContent = '(' + state.images.length + ')';
+                    renderTruncationNote(data.truncated);
                     renderFileList();
                     loadCommentCounts();
                     loadCIStatus();
@@ -738,6 +747,40 @@
 
                 fileList.appendChild(li);
             });
+        }
+
+        // -- A file list GitHub cut short ----------------------------------
+        //
+        // The /images walk stops at GitHub's own 3000-file ceiling and sets
+        // `truncated` when it does. Until this, nothing read that flag, so a
+        // cut-off list rendered exactly like a complete one and the count in
+        // the sidebar header read as the whole of the PR (#23).
+
+        // ── truncation-note:begin ────────────────────────────────────────────
+        // What to say about a list that may be incomplete, and when to say
+        // anything at all. Pure, so it can be tested without a DOM; extracted
+        // verbatim by tests/test_truncation_note.js, which is what the markers
+        // are for.
+
+        var TRUNCATION_NOTE = 'GitHub served only part of this PR\u2019s file list, ' +
+            'so there may be changed images missing below.';
+
+        // Any truthy flag warns, rather than only a literal `true`. The server
+        // sends a boolean, so the two readings differ on nothing it actually
+        // sends — and where they would differ, warning is the direction that
+        // matches the flag's own bias: `_gh_paginate` sets it when the walk ran
+        // out of pages, which may or may not mean anything was really left
+        // behind. An absent key is falsy, so a response predating the flag says
+        // nothing, which is right: it carries no claim either way.
+        function truncationNotice(truncated) {
+            return truncated ? TRUNCATION_NOTE : null;
+        }
+        // ── truncation-note:end ──────────────────────────────────────────────
+
+        function renderTruncationNote(truncated) {
+            var notice = truncationNotice(truncated);
+            truncationNote.textContent = notice || '';
+            truncationNote.hidden = !notice;
         }
 
         // -- Deep-link: the hash a file is named by ------------------------
