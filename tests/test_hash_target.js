@@ -15,6 +15,7 @@ const basenameOf = extract('hash-target', 'basenameOf');
 const hashTargetFor = extract('hash-target', 'hashTargetFor');
 const resolveHashTarget = extract('hash-target', 'resolveHashTarget');
 const encodeHashTarget = extract('hash-target', 'encodeHashTarget');
+const decodeHashTarget = extract('hash-target', 'decodeHashTarget');
 
 const files = paths => paths.map(p => ({path: p}));
 
@@ -211,9 +212,9 @@ function driver(opts) {
     return selectFile(path, skipHash, direction);
   };
   const selectFileFromHash = new Function(
-    'state', 'location', 'selectFile', 'resolveHashTarget',
+    'state', 'location', 'selectFile', 'resolveHashTarget', 'decodeHashTarget',
     bodyOf('selectFileFromHash') + '\nreturn selectFileFromHash;')(
-      state, location, spy, resolveHashTarget);
+      state, location, spy, resolveHashTarget, decodeHashTarget);
 
   return {
     state: state, selected: selected, loaded: loaded, rows: rows,
@@ -221,6 +222,28 @@ function driver(opts) {
     hash: () => stored,
   };
 }
+
+// ── Decoding what is in the bar ─────────────────────────────────────────────
+//
+// #32. Well-formed escapes decode, as they always did.
+
+assert.strictEqual(decodeHashTarget('a%20b.png'), 'a b.png');
+assert.strictEqual(decodeHashTarget('x/y/a%23b.png'), 'x/y/a#b.png');
+assert.strictEqual(decodeHashTarget('plain.bmp'), 'plain.bmp');
+assert.strictEqual(decodeHashTarget(''), '');
+
+// A malformed one is handed back as it came rather than thrown. Both shapes
+// URIError has: a truncated sequence, and a lone escape that is not one.
+for (const bad of ['%E0%A4%A', '%', '%zz', 'dir/%E0%A4%A/x.png', '%C0%80']) {
+  assert.strictEqual(decodeHashTarget(bad), bad,
+    'a malformed escape must come back as the raw text: ' + bad);
+}
+
+// It is a fallback, not a bypass: raw text that happens to name a file still
+// resolves to it, which is the reason to return the text rather than ''.
+assert.strictEqual(
+  resolveHashTarget(decodeHashTarget('100%.png'), files(['a/100%.png'])), 0,
+  'a literal filename that is not valid percent-encoding must still resolve');
 
 // ── Writing ─────────────────────────────────────────────────────────────────
 
@@ -353,6 +376,19 @@ for (const [label, opts] of [
   assert.strictEqual(d.selectFileFromHash(), false, label + ' must resolve to nothing');
   assert.deepStrictEqual(d.selected, [], label + ' must select nothing');
   assert.strictEqual(d.state.currentFile, null);
+}
+
+// A malformed hash at the call site. This is the half #32 is filed for: the
+// decode runs inside selectFileFromHash, so an unguarded one throws out of it
+// — past the hashchange listener as an uncaught error, or into loadPrImages's
+// catch, which blanks the viewport and blames the PR data. Restore
+// decodeURIComponent here and this case raises URIError instead of asserting.
+for (const bad of ['#%E0%A4%A', '#%', '#dir/%zz.png']) {
+  const d = driver({images: COLLIDING, hash: bad});
+  assert.strictEqual(d.selectFileFromHash(), false,
+    'a malformed hash must resolve to nothing rather than throw: ' + bad);
+  assert.deepStrictEqual(d.selected, [], 'and must select nothing');
+  assert.strictEqual(d.hash(), bad, 'and must leave the bar as the person typed it');
 }
 
 console.log('test_hash_target: all checks passed');
