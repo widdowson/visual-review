@@ -19,9 +19,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import auth
+
 logger = logging.getLogger("visual-review")
 
 app = FastAPI(title="Visual Review")
+
+# -- Cloudflare Access gate ----------------------------------------------------
+# Registered before CORS so that CORS ends up the outer layer: Starlette wraps
+# the last-added middleware outermost, and a preflight OPTIONS carries no Access
+# token, so a gate outside CORS would reject the preflight rather than answer it.
+ACCESS_CONFIG = auth.load_config()
+_access_verifier = auth.AccessVerifier(ACCESS_CONFIG) if ACCESS_CONFIG else None
+
+if ACCESS_CONFIG is None:
+    logger.warning(
+        "VR_AUTH_MODE=disabled - every request is served unauthenticated. "
+        "This is for local development only."
+    )
+
+app.add_middleware(
+    auth.AccessMiddleware,
+    get_verifier=lambda: _access_verifier,
+    logger=logger,
+)
 
 # CORS: allow crossOrigin='anonymous' image loads for canvas-based pixel diffing
 app.add_middleware(
@@ -451,6 +472,24 @@ async def short_url_redirect(identifier: str, number: int):
 
 
 # -- API endpoints -------------------------------------------------------------
+
+@app.get("/api/me")
+async def whoami(request: Request):
+    """Who Cloudflare Access says is making this request.
+
+    Only the email. An Access token carries aud, email, exp, iat, iss, sub,
+    type, identity_nonce and country — there is no display name in it and no
+    avatar anywhere in Access, so the SPA draws initials from the address
+    rather than fetching a picture from a third party.
+
+    Returns authenticated=false rather than 403 when auth is off, so the SPA
+    can simply not draw the chip in local development.
+    """
+    claims = getattr(request.state, "access_claims", None)
+    if not claims:
+        return {"authenticated": False}
+    return {"authenticated": True, "email": claims.get("email", "")}
+
 
 @app.get("/api/extensions")
 async def supported_extensions():
