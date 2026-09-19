@@ -186,6 +186,15 @@ js_test(
 )
 
 js_test(
+    name = "test_truncation_note",
+    entry_point = "tests/test_truncation_note.js",
+    data = [
+        "static/index.html",
+        "tests/spa_source.js",
+    ],
+)
+
+js_test(
     name = "test_comments_freshness",
     entry_point = "tests/test_comments_freshness.js",
     data = [
