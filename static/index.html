@@ -153,9 +153,18 @@
         .file-item .status-badge.removed { background: var(--vr-badge-removed-bg); color: var(--vr-badge-removed-fg); }
         .file-item .status-badge.modified { background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg); }
         .file-item .status-badge.renamed { background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg); }
+        /* The filename and, where its basename is shared, the directory
+           context under it. min-width:0 on the column is what lets the two
+           lines ellipsize instead of forcing the row wider than the sidebar. */
+        .file-item .file-label {
+            flex: 1; min-width: 0; display: flex; flex-direction: column;
+        }
         .file-item .filename {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            flex: 1;
+        }
+        .file-item .file-dir {
+            font-size: 0.72rem; color: var(--vr-text-dim); line-height: 1.3;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .file-item .comment-badge {
             font-size: 0.6rem; padding: 1px 6px; border-radius: 8px;
@@ -708,11 +717,29 @@
                 badge.textContent = img.status === 'modified' ? 'M' : img.status === 'added' ? 'A' : img.status === 'removed' ? 'D' : img.status === 'renamed' ? 'R' : img.status.charAt(0).toUpperCase();
                 li.appendChild(badge);
 
+                // The filename, and under it the directory context needed to
+                // tell this row from another carrying the same basename. Two
+                // rows reading `cuj_01_login.bmp` and distinguishable only by
+                // hovering each one is what #31 is about; dirLabelFor
+                // answers null for the ordinary case, and no second line is
+                // drawn then.
+                var label = document.createElement('span');
+                label.className = 'file-label';
+                label.title = img.path;
+
                 var fname = document.createElement('span');
                 fname.className = 'filename';
                 fname.textContent = basenameOf(img.path);
-                fname.title = img.path;
-                li.appendChild(fname);
+                label.appendChild(fname);
+
+                var dirLabel = dirLabelFor(img.path, state.images);
+                if (dirLabel !== null) {
+                    var dir = document.createElement('span');
+                    dir.className = 'file-dir';
+                    dir.textContent = dirLabel;
+                    label.appendChild(dir);
+                }
+                li.appendChild(label);
 
                 li.addEventListener('click', function() {
                     selectFile(img.path);
@@ -767,9 +794,12 @@
         // directories repeat names like cuj_01_login.bmp.
 
         // ── hash-target:begin ──────────────────────────────────────────
-        // Naming a file in the hash, and reading that name back. Pure, so it
-        // can be tested without a DOM; extracted verbatim by
-        // tests/test_hash_target.js, which is what the markers are for.
+        // Naming a file: in the hash, and in the sidebar. Both turn on the
+        // same question — is this basename shared with another file in the PR
+        // — so they answer it from one basenameOf rather than three. Pure, so
+        // it can be tested without a DOM; extracted verbatim by
+        // tests/test_hash_target.js and tests/test_file_label.js, which is
+        // what the markers are for.
 
         function basenameOf(path) {
             var parts = path.split('/');
@@ -781,13 +811,23 @@
         // stays the common case and the long one appears only where the short
         // one would be a lie.
         function hashTargetFor(path, images) {
+            return rivalsOf(path, images).length ? path : basenameOf(path);
+        }
+
+        // The other files in `images` that carry `path`'s basename, as their
+        // directory segments. One scan serves both halves: the hash asks
+        // whether there are any, the sidebar asks what tells them apart, and
+        // writing that predicate twice is how the two could come to disagree
+        // about which files collide.
+        function rivalsOf(path, images) {
             var name = basenameOf(path);
+            var rivals = [];
             for (var i = 0; i < images.length; i++) {
                 if (images[i].path !== path && basenameOf(images[i].path) === name) {
-                    return path;
+                    rivals.push(dirSegmentsOf(images[i].path));
                 }
             }
-            return name;
+            return rivals;
         }
 
         // The index `target` names, or -1. A whole path is matched before any
@@ -812,13 +852,104 @@
                 return encodeURIComponent(seg);
             }).join('/');
         }
+
+        // The file name a fragment holds. A fragment can carry a percent
+        // escape that does not decode at all — `#%E0%A4%A`, from a URL
+        // hand-edited or truncated by a chat client that wrapped it — and
+        // decodeURIComponent raises URIError on one. Nothing the app writes
+        // can be malformed, since encodeHashTarget produces well-formed
+        // escapes, so the throw only ever comes from a hash a person typed,
+        // and it used to reach the caller: from the hashchange listener as an
+        // uncaught error that silently left the selection alone, and from
+        // loadPrImages as `Failed to load PR data: URI malformed`, which
+        // blames the PR for a character in the URL (#32). The raw text is the
+        // better answer than an exception: text that is not valid
+        // percent-encoding may still be a literal filename, and where it is
+        // not it simply resolves to no file, which is what an unknown hash
+        // does anyway.
+        function decodeHashTarget(hash) {
+            try {
+                return decodeURIComponent(hash);
+            } catch (err) {
+                return hash;
+            }
+        }
+
+        // The directory context the sidebar has to show to tell `path` apart
+        // from the other files sharing its basename: the shortest trailing run
+        // of its directory segments that no such file shares, or null while
+        // nothing shares the basename and the filename alone is unambiguous
+        // (#31). Shortest rather than whole, because these paths
+        // (django/apps/shoots/tests/visual/…) do not fit a sidebar, and the
+        // segment that settles it is the leftmost one of the answer — at one
+        // segment shorter some file still matched — so what a narrow column
+        // truncates off the right is the part every candidate has in common.
+        //
+        // Two ways past the loop, and '' is a real answer rather than an
+        // absent one. A file at the repository root has no segments to try,
+        // so the loop runs zero times and falls straight to the return: being
+        // at the root is what distinguishes it, and '' says so. The loop can
+        // also genuinely exhaust, against a rival nested deeper whose tail is
+        // this file's whole directory — `b/c/name.png` against
+        // `a/b/c/name.png`, where every run the shallower one can try is
+        // shared. Its whole directory is the answer there, which still reads
+        // differently from the deeper file's.
+        function dirContextFor(path, images) {
+            var own = dirSegmentsOf(path);
+            var rivals = rivalsOf(path, images);
+            if (!rivals.length) return null;
+
+            for (var take = 1; take <= own.length; take++) {
+                var suffix = own.slice(own.length - take).join('/');
+                var shared = false;
+                for (var r = 0; r < rivals.length; r++) {
+                    // A rival with fewer than `take` segments joins to fewer
+                    // separators than `suffix` has and so cannot equal it,
+                    // which is what distinguishes a shallower rival rather
+                    // than skipping it. The clamp is for the reader, not for
+                    // that: a negative slice index takes a tail instead of
+                    // throwing, and that tail is shorter than `take` too, so
+                    // both spellings behave identically and no test separates
+                    // them. It is here because `slice(-n)` reads like a bug.
+                    var from = Math.max(0, rivals[r].length - take);
+                    if (rivals[r].slice(from).join('/') === suffix) {
+                        shared = true;
+                        break;
+                    }
+                }
+                if (!shared) return suffix;
+            }
+            return own.join('/');
+        }
+
+        // That context as the sidebar prints it. Three shapes, because a run
+        // of segments rendered as though it were a path is a lie the reader
+        // cannot see through: `a/name.png` beside `a/b/name.png` would read
+        // `a/` and `b/` as two siblings when the second is inside the first,
+        // and a genuinely root-relative `./` in the same list is what teaches
+        // the reader to read every other row that way. So a whole directory
+        // prints as itself, a tail of one is marked with a leading ellipsis,
+        // and the repository root is './'.
+        function dirLabelFor(path, images) {
+            var context = dirContextFor(path, images);
+            if (context === null) return null;
+            if (context === '') return './';
+            var own = dirSegmentsOf(path).join('/');
+            return (context === own ? '' : '\u2026/') + context + '/';
+        }
+
+        function dirSegmentsOf(path) {
+            var parts = path.split('/');
+            parts.pop();
+            return parts;
+        }
         // ── hash-target:end ────────────────────────────────────────────
 
         // -- Deep-link: select file from URL hash --
         function selectFileFromHash() {
             var hash = location.hash.replace(/^#/, '');
             if (!hash || !state.images.length) return false;
-            var idx = resolveHashTarget(decodeURIComponent(hash), state.images);
+            var idx = resolveHashTarget(decodeHashTarget(hash), state.images);
             if (idx < 0) return false;
             // selectFile writes the hash, so its own hashchange lands back
             // here. Reloading the current file would double every request and
