@@ -588,6 +588,14 @@ class TestPrImagesPagination:
         data = resp.json()
         assert data["images"] == []
         assert "500" in data["error"]
+        # And it does not claim the empty list is complete. This assertion
+        # lives here rather than in TestTruncatedIsNeverAbsent because that
+        # class is parameterised by failure mode — no token, everything 404s,
+        # the client throws — and none of those constructs this shape: a PR
+        # fetch that succeeds followed by a files walk that fails partway.
+        # Without it, `"truncated": False` on this return passes the whole
+        # suite, which is the claim of completeness this PR exists to prevent.
+        assert data["truncated"] is True
         # It stopped at the failure rather than walking on past it.
         assert instance.requested_pages == [1, 2]
 
@@ -726,6 +734,85 @@ class TestGhPaginate:
             await _gh_paginate(client, "http://gh/list", {})
         assert exc.value.status_code is None
         assert "dict" in str(exc.value)
+
+    # -- items_key: endpoints that wrap their array in an object (#22) -------
+
+    @pytest.mark.asyncio
+    async def test_items_key_reads_the_wrapped_array(self):
+        """"List check runs" answers an object, not a bare array."""
+        client = self._client([
+            {"total_count": 3, "check_runs": [1, 2, 3]},
+        ])
+        items, truncated = await _gh_paginate(
+            client, "http://gh/list", {}, items_key="check_runs")
+        assert items == [1, 2, 3]
+        assert truncated is False
+
+    @pytest.mark.asyncio
+    async def test_items_key_walks_every_page(self):
+        """The page's own length ends the walk, not ``total_count``.
+
+        ``total_count`` here says 1 while the endpoint serves a full page and
+        then some. A walk that trusted the count would stop at page 1 and
+        report a complete list.
+        """
+        client = self._client([
+            {"total_count": 1, "check_runs": list(range(_GH_PAGE_SIZE))},
+            {"total_count": 1, "check_runs": [999]},
+        ])
+        items, truncated = await _gh_paginate(
+            client, "http://gh/list", {}, items_key="check_runs")
+        assert len(items) == _GH_PAGE_SIZE + 1
+        assert items[-1] == 999
+        assert truncated is False
+        assert client.requested == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_items_key_truncates_at_max_pages(self):
+        client = self._client([
+            {"total_count": 0, "check_runs": list(range(_GH_PAGE_SIZE))},
+        ] * 3)
+        items, truncated = await _gh_paginate(
+            client, "http://gh/list", {}, items_key="check_runs", max_pages=2)
+        assert len(items) == 2 * _GH_PAGE_SIZE
+        assert truncated is True
+
+    @pytest.mark.asyncio
+    async def test_items_key_on_a_bare_array_raises(self):
+        """Naming a key the body has no place for is a caller error."""
+        client = self._client([[1, 2, 3]])
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {}, items_key="check_runs")
+        assert exc.value.status_code is None
+        assert "list" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_a_missing_items_key_raises(self):
+        """An absent key must not read as "the list ended here".
+
+        Defaulting to ``[]`` would end the walk on a short page and report a
+        complete list, which is this issue's own bug one level down.
+        """
+        client = self._client([{"total_count": 0}])
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {}, items_key="check_runs")
+        assert exc.value.status_code is None
+        assert "check_runs" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_a_non_list_under_items_key_raises(self):
+        client = self._client([{"check_runs": {"nope": 1}}])
+        with pytest.raises(_GitHubError) as exc:
+            await _gh_paginate(client, "http://gh/list", {}, items_key="check_runs")
+        assert "dict" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_without_items_key_a_bare_array_is_still_read(self):
+        """The default is unchanged: no key named, no object expected."""
+        client = self._client([[1, 2]])
+        items, truncated = await _gh_paginate(client, "http://gh/list", {})
+        assert items == [1, 2]
+        assert truncated is False
 
 
 # -- PR image proxy endpoint --------------------------------------------------
@@ -1137,6 +1224,220 @@ class TestPrCommentCounts:
         data = resp.json()
         assert data["counts"]["test.png"] == 2
         assert data["counts"]["other.png"] == 1
+
+
+# -- Paginated review comments (#22) ------------------------------------------
+
+def _comment_pages(total, path="test.png", start=0):
+    """``total`` synthetic review comments on ``path``, split into full pages."""
+    comments = [
+        {
+            "id": start + i,
+            "body": f"comment {start + i}",
+            "user": {"login": "reviewer"},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "path": path,
+            "html_url": f"http://gh/comment/{start + i}",
+        }
+        for i in range(total)
+    ]
+    return [
+        comments[i:i + _GH_PAGE_SIZE]
+        for i in range(0, len(comments), _GH_PAGE_SIZE)
+    ] or [[]]
+
+
+def _comment_client(pages, status_by_page=None):
+    """Mock an httpx.AsyncClient serving ``pages`` from pulls/{n}/comments.
+
+    Page numbers are recorded on ``instance.requested_pages``: a walk that
+    stops one page early and one that never stops both return plausible
+    lists, so the requests are the only thing that tells them apart.
+    """
+    requested_pages = []
+
+    async def mock_get(url, **kwargs):
+        if url.endswith("/comments"):
+            page = kwargs.get("params", {}).get("page")
+            requested_pages.append(page)
+            status = (status_by_page or {}).get(page, 200)
+            resp = MagicMock()
+            resp.status_code = status
+            if status == 200:
+                resp.json.return_value = pages[page - 1] if 1 <= page <= len(pages) else []
+            return resp
+        return MagicMock(status_code=404)
+
+    instance = AsyncMock()
+    instance.get = mock_get
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=False)
+    instance.requested_pages = requested_pages
+    return instance
+
+
+class TestPrCommentsPagination:
+    """#22: every review comment past the first 100 was dropped, silently."""
+
+    @pytest.mark.asyncio
+    async def test_a_comment_on_page_two_is_found(self):
+        """The reported symptom: a file whose only comments are past page 1.
+
+        Every one of the first 100 comments is on another file, so reading a
+        single page returns an empty list for this path and says nothing —
+        which is what the endpoint did.
+        """
+        page_one = _comment_pages(_GH_PAGE_SIZE, path="other.png")[0]
+        page_two = _comment_pages(3, path="test.png", start=_GH_PAGE_SIZE)[0]
+        instance = _comment_client([page_one, page_two])
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comments?path=test.png")
+
+        data = resp.json()
+        assert [c["id"] for c in data["comments"]] == [100, 101, 102]
+        assert data["truncated"] is False
+        assert instance.requested_pages == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_all_comments_for_a_path_across_pages(self):
+        """250 comments on one file come back whole, not just the first 100."""
+        instance = _comment_client(_comment_pages(250))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comments?path=test.png")
+
+        data = resp.json()
+        assert len(data["comments"]) == 250
+        assert data["comments"][-1]["body"] == "comment 249"
+        assert instance.requested_pages == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_comments_truncated_reaches_the_response(self):
+        """A capped walk is reported in the payload, not just internally.
+
+        This drives the real ``_GH_MAX_PAGES``, which is a default argument
+        bound at definition time — patching the module constant would not
+        reach it. Without this case, ``"truncated": truncated`` could be cut
+        to a literal ``False`` and every other comments test would still pass.
+        """
+        instance = _comment_client(_comment_pages(_GH_PAGE_SIZE * _GH_MAX_PAGES))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comments?path=test.png")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert len(data["comments"]) == _GH_PAGE_SIZE * _GH_MAX_PAGES
+        assert instance.requested_pages == list(range(1, _GH_MAX_PAGES + 1))
+
+    @pytest.mark.asyncio
+    async def test_a_failing_page_is_an_error_not_a_short_list(self):
+        """Page 2 failing must not be served as "these are all the comments"."""
+        instance = _comment_client(_comment_pages(250), status_by_page={2: 502})
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comments?path=test.png")
+
+        data = resp.json()
+        assert data["comments"] == []
+        assert "502" in data["error"]
+        # And it does not claim the empty list is the whole of them.
+        assert data["truncated"] is True
+        assert instance.requested_pages == [1, 2]
+
+
+class TestPrCommentCountsPagination:
+    """The per-file badges undercounted for the same reason (#22)."""
+
+    @pytest.mark.asyncio
+    async def test_counts_span_every_page(self):
+        """A count that stops at page 1 is wrong on both files here."""
+        page_one = _comment_pages(_GH_PAGE_SIZE, path="test.png")[0]
+        page_two = (
+            _comment_pages(40, path="test.png", start=100)[0]
+            + _comment_pages(10, path="other.png", start=200)[0]
+        )
+        instance = _comment_client([page_one, page_two])
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comment-counts")
+
+        data = resp.json()
+        assert data["counts"] == {"test.png": 140, "other.png": 10}
+        assert data["truncated"] is False
+        assert instance.requested_pages == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_counts_report_truncation(self):
+        instance = _comment_client(_comment_pages(_GH_PAGE_SIZE * _GH_MAX_PAGES))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comment-counts")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert data["counts"]["test.png"] == _GH_PAGE_SIZE * _GH_MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_a_failing_page_yields_no_counts(self):
+        """Unchanged from before the walk: this endpoint stays quiet on error.
+
+        Badges are decoration, so a failure here drops them rather than
+        breaking the page. What must not happen is the partial count from
+        page 1 being served as if it were the whole tally.
+        """
+        instance = _comment_client(_comment_pages(250), status_by_page={2: 502})
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/comment-counts")
+
+        data = resp.json()
+        assert data["counts"] == {}
+        assert data["truncated"] is True
 
 
 class TestPostPrComment:
@@ -1734,6 +2035,255 @@ class TestPrChecks:
 
         data = resp.json()
         assert data["overall"] == "pending"
+
+
+class TestPrChecksPagination:
+    """#22's aside: check-runs was read one page deep too.
+
+    Less likely to bite than the comments endpoints — a head commit with more
+    than 100 check runs is rare — but the stakes are higher per occurrence,
+    because ``overall`` is derived from whatever came back. A partial list
+    does not just shorten the report, it can invert it.
+    """
+
+    def _client(self, pages, status_by_page=None, sha="abc123def456"):
+        requested_pages = []
+
+        mock_pr_resp = MagicMock()
+        mock_pr_resp.status_code = 200
+        mock_pr_resp.json.return_value = {"head": {"sha": sha}}
+
+        async def mock_get(url, **kwargs):
+            if "/check-runs" in url:
+                page = kwargs.get("params", {}).get("page")
+                requested_pages.append(page)
+                status = (status_by_page or {}).get(page, 200)
+                resp = MagicMock()
+                resp.status_code = status
+                if status == 200:
+                    runs = pages[page - 1] if 1 <= page <= len(pages) else []
+                    resp.json.return_value = {"total_count": 0, "check_runs": runs}
+                return resp
+            if "/pulls/" in url:
+                return mock_pr_resp
+            return MagicMock(status_code=404)
+
+        instance = AsyncMock()
+        instance.get = mock_get
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+        instance.requested_pages = requested_pages
+        return instance
+
+    @staticmethod
+    def _runs(count, conclusion="success", start=0):
+        return [
+            {
+                "name": f"check {start + i}",
+                "status": "completed",
+                "conclusion": conclusion,
+                "html_url": "",
+            }
+            for i in range(count)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_on_page_two_flips_the_verdict(self):
+        """The reason this endpoint is worth walking at all.
+
+        100 passing checks then one failure. Reading page 1 alone reports
+        ``success`` for a head commit whose CI is red — the one answer a
+        reviewer acts on directly.
+        """
+        instance = self._client([
+            self._runs(_GH_PAGE_SIZE),
+            self._runs(1, conclusion="failure", start=_GH_PAGE_SIZE),
+        ])
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+
+        data = resp.json()
+        assert data["overall"] == "failure"
+        assert len(data["runs"]) == _GH_PAGE_SIZE + 1
+        assert data["truncated"] is False
+        assert instance.requested_pages == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_checks_truncated_reaches_the_response(self):
+        instance = self._client([self._runs(_GH_PAGE_SIZE)] * _GH_MAX_PAGES)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+
+        data = resp.json()
+        assert data["truncated"] is True
+        assert len(data["runs"]) == _GH_PAGE_SIZE * _GH_MAX_PAGES
+        assert instance.requested_pages == list(range(1, _GH_MAX_PAGES + 1))
+
+    @pytest.mark.asyncio
+    async def test_a_failing_page_leaves_no_runs(self):
+        """A checks call that fails reports ``none`` rather than a partial
+        verdict. That half is inherited from the single-request version.
+
+        The shape being driven is not: page 1 answers and page 2 does not,
+        which one request cannot produce. Nor is the flag — the single-request
+        version had none to answer with. So the assertions below split the
+        same way the handler's own comment does, and this docstring says so
+        rather than repeating the claim Round 1 corrected there: that the
+        error path is unchanged. Half of it is."""
+        instance = self._client([self._runs(_GH_PAGE_SIZE)], status_by_page={2: 500})
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get("/api/owner/repo/pr/1/checks")
+
+        data = resp.json()
+        assert data["overall"] == "none"
+        assert data["runs"] == []
+        # The finding this pins: reporting `truncated: false` here would be a
+        # positive claim that an empty list the walk could not read is the
+        # complete set of checks — on the one endpoint whose derived verdict
+        # a reader acts on directly.
+        assert data["truncated"] is True
+
+
+class TestTruncatedIsNeverAbsent:
+    """Every walked endpoint reports `truncated` on every response.
+
+    #23's own audit asked for this: an error return that omits the key hands
+    a consumer `undefined` where it has to tell "complete" from "could not
+    tell", and answering `false` on a list the endpoint never read is the
+    claim of completeness both issues exist to stop it making. So the rule is
+    uniform — present always, true on every path that did not establish
+    completeness — and these cases are what hold it there.
+
+    Without them each error return could drop the key, or answer `false`,
+    with the rest of the suite green.
+    """
+
+    ENDPOINTS = [
+        "/api/owner/repo/pr/1/images",
+        "/api/owner/repo/pr/1/comments?path=test.png",
+        "/api/owner/repo/pr/1/comment-counts",
+        "/api/owner/repo/pr/1/checks",
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    async def test_no_token_says_it_could_not_read(self, path):
+        """No token is not an empty list; it is an unread one.
+
+        `pr_comment_counts` is the one to watch here: it reports no error at
+        all, so `truncated` is the only thing distinguishing "no comments"
+        from "could not look".
+        """
+        with patch("app.GITHUB_TOKEN", ""):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(path)
+
+        assert resp.json()["truncated"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    async def test_an_unreachable_pr_says_it_could_not_read(self, path):
+        """Every GitHub call 404s, by whichever route the endpoint takes."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(return_value=MagicMock(status_code=404))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(path)
+
+        assert resp.json()["truncated"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ENDPOINTS)
+    async def test_a_thrown_client_says_it_could_not_read(self, path):
+        """The outer catch-all is a path too, and it is where the two
+        endpoints that no longer catch `_GitHubError` themselves land."""
+        instance = AsyncMock()
+        instance.get = AsyncMock(side_effect=RuntimeError("connection reset"))
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.get(path)
+
+        data = resp.json()
+        assert data["truncated"] is True
+
+        # `pr_comment_counts` is the one endpoint that reports no error at
+        # all — badges are decoration, so it drops them and leaves the page
+        # working. That is deliberate and pre-dates this PR, and it is
+        # exactly why the flag has to carry the news there: `truncated` is
+        # the only thing on that response distinguishing "no comments" from
+        # "could not look".
+        if path.endswith("/comment-counts"):
+            assert "error" not in data
+        else:
+            assert "connection reset" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_a_complete_read_says_so(self):
+        """The rule has a false side, or it says nothing.
+
+        Every case above asserts true, so all of them would pass with the key
+        hard-coded true everywhere and the flag reduced to a constant.
+
+        This covers the two comment endpoints only. `/images` and `/checks`
+        are falsifiable too, but their false side is asserted elsewhere —
+        `TestPrImagesPagination.test_all_files_returned_past_the_compare_cap`
+        and `TestPrChecksPagination.test_a_failure_on_page_two_flips_the_verdict`
+        each assert `truncated is False` on a complete read. Said here so a
+        reader auditing this class alone does not conclude those two are
+        pinned in one direction only.
+        """
+        instance = _comment_client(_comment_pages(3))
+
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                comments = await ac.get("/api/owner/repo/pr/1/comments?path=test.png")
+                counts = await ac.get("/api/owner/repo/pr/1/comment-counts")
+
+        assert comments.json()["truncated"] is False
+        assert counts.json()["truncated"] is False
 
 
 class TestImageExtensionsJson:
