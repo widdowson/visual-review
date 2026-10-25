@@ -31,6 +31,28 @@ jobs:
       - name: Run all tests
         run: bazel test //...
 
+      # Before touching GCP, because the app now refuses to start without
+      # these and a container that will not start is a failed revision with a
+      # crash log, rather than a sentence naming the variable that is missing.
+      # Cloud Run keeps serving the previous revision when a new one fails, so
+      # the cost of getting here is a red job rather than an outage -- but the
+      # red job should say why.
+      - name: Require the Cloudflare Access configuration
+        env:
+          CF_ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
+          CF_ACCESS_AUD: ${{ vars.CF_ACCESS_AUD }}
+        run: |
+          missing=""
+          [ -n "$CF_ACCESS_TEAM_DOMAIN" ] || missing="$missing CF_ACCESS_TEAM_DOMAIN"
+          [ -n "$CF_ACCESS_AUD" ] || missing="$missing CF_ACCESS_AUD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository variable(s):$missing. Set them under"
+            echo "::error::Settings -> Secrets and variables -> Actions -> Variables."
+            echo "::error::CF_ACCESS_TEAM_DOMAIN is <team>.cloudflareaccess.com and"
+            echo "::error::CF_ACCESS_AUD is the Access application's AUD tag."
+            exit 1
+          fi
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -44,12 +66,23 @@ jobs:
       - name: Build and push OCI image
         run: bazel run //:push -- --tag ${{ github.sha }}
 
+      # Two things about this --set-env-vars that are easy to get wrong.
+      #
+      # It REPLACES the service's whole environment rather than adding to it,
+      # so every variable the app needs has to be listed here. A value set by
+      # hand in the Cloud Run console survives exactly until the next deploy.
+      #
+      # The "^|^" prefix changes the delimiter from a comma to a pipe.
+      # VR_ALLOWED_EMAILS is a comma-separated list, so with the default
+      # delimiter gcloud would split it mid-value and try to set an env var
+      # named after the second address. A pipe cannot appear in an email
+      # address, a Cloudflare team domain, an AUD tag or a GitHub token.
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE }} \
             --image ${{ env.IMAGE }}:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --allow-unauthenticated \
-            --set-env-vars="GITHUB_TOKEN=${{ secrets.GH_PAT }}" \
+            --set-env-vars="^|^GITHUB_TOKEN=${{ secrets.GH_PAT }}|VR_AUTH_MODE=cloudflare_access|CF_ACCESS_TEAM_DOMAIN=${{ vars.CF_ACCESS_TEAM_DOMAIN }}|CF_ACCESS_AUD=${{ vars.CF_ACCESS_AUD }}|VR_ALLOWED_EMAILS=${{ vars.VR_ALLOWED_EMAILS }}" \
             --port 8080 \
             --quiet
