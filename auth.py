@@ -20,6 +20,7 @@ request would carry.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -31,6 +32,8 @@ import jwt
 # jwt.decode() as the *only* permitted algorithm: PyJWT would otherwise take the
 # algorithm from the token's own header, which is the classic JWT forgery.
 _ALGORITHMS = ["RS256"]
+
+logger = logging.getLogger(__name__)
 
 # How long a fetched JWKS is reused. Cloudflare rotates these keys, and a token
 # signed by a key we have not seen triggers an immediate refresh regardless, so
@@ -163,17 +166,30 @@ class AccessVerifier:
             payload = resp.json()
 
         keys = {}
+        rejected: list[str] = []
         for entry in payload.get("keys", []):
             kid = entry.get("kid")
             if not kid:
                 continue
             try:
                 keys[kid] = jwt.PyJWK.from_dict(entry).key
-            except Exception:
-                # One unusable entry must not discard the rest of the set.
+            except Exception as exc:
+                # One unusable entry must not discard the rest of the set --
+                # but say why. Swallowing this silently is how a deployment
+                # missing the cryptography package presented as "Cloudflare
+                # published no usable signing keys", which blames Cloudflare
+                # for a dependency that was never installed.
+                rejected.append(f"{kid}: {type(exc).__name__}: {exc}")
                 continue
         if not keys:
-            raise AuthError("Cloudflare published no usable signing keys")
+            detail = "; ".join(rejected) if rejected else "the key set was empty"
+            logger.error(
+                "no usable signing key in %d entries from %s -- %s",
+                len(payload.get("keys", [])), self.config.certs_url, detail,
+            )
+            raise AuthError(
+                f"no usable signing key in Cloudflare's key set ({detail})"
+            )
         self._jwks = _JwksCache(keys=keys, fetched_at=time.time())
         return keys
 

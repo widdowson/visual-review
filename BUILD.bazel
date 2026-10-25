@@ -29,6 +29,15 @@ py_library(
     deps = [
         requirement("fastapi"),
         requirement("httpx"),
+        # PyJWT without this is a library that cannot verify an RS256 token:
+        # jwt.algorithms.has_crypto is False, the RSA algorithms are never
+        # registered, and PyJWK.from_dict raises MissingCryptographyError on
+        # every key Cloudflare publishes. The pyjwt spoke does not bring it
+        # (requirements.txt asks for pyjwt[crypto], but the lock lists
+        # cryptography as a pin of its own and the spokes carry no edges
+        # between them), so it has to be named here. //:test_runtime_crypto
+        # is what fails if it is removed.
+        requirement("cryptography"),
         requirement("pyjwt"),
         requirement("uvicorn"),
     ],
@@ -106,6 +115,27 @@ py_test(
         requirement("pyjwt"),
         requirement("pytest"),
         requirement("pytest-asyncio"),
+    ],
+)
+
+py_test(
+    name = "test_runtime_crypto",
+    srcs = [
+        "tests/__init__.py",
+        "tests/run_tests.py",
+        "tests/test_runtime_crypto.py",
+    ],
+    args = ["tests/test_runtime_crypto.py"],
+    # DELIBERATELY no requirement("cryptography") here, and no other runtime
+    # dep. This target's closure is :app_lib's closure, which is the image's,
+    # so what it proves is a property of what gets deployed. Naming
+    # cryptography here would make it pass whatever :app_lib declares and the
+    # guard would be inert -- which is exactly how //:test_auth, which does
+    # name it, stayed green while production could not verify a token.
+    main = "tests/run_tests.py",
+    deps = [
+        ":app_lib",
+        requirement("pytest"),
     ],
 )
 
