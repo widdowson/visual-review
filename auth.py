@@ -163,17 +163,23 @@ class AccessVerifier:
             payload = resp.json()
 
         keys = {}
+        last_failure = None
         for entry in payload.get("keys", []):
             kid = entry.get("kid")
             if not kid:
                 continue
             try:
                 keys[kid] = jwt.PyJWK.from_dict(entry).key
-            except Exception:
+            except Exception as exc:
                 # One unusable entry must not discard the rest of the set.
+                last_failure = exc
                 continue
         if not keys:
-            raise AuthError("Cloudflare published no usable signing keys")
+            # Say why when there was a why. Every key failing to parse is
+            # rarely Cloudflare's doing: a PyJWT without cryptography refuses
+            # every RSA key, and the bare message hid exactly that.
+            detail = f" ({last_failure})" if last_failure else ""
+            raise AuthError(f"Cloudflare published no usable signing keys{detail}")
         self._jwks = _JwksCache(keys=keys, fetched_at=time.time())
         return keys
 

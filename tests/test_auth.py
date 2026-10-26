@@ -76,6 +76,7 @@ class FakeJwksEndpoint:
     def __init__(self, *signers, fail: Exception | None = None):
         self.signers = list(signers)
         self.fail = fail
+        self.extra: list[dict] = []
         self.fetches = 0
 
     def factory(self, *args, **kwargs):
@@ -92,7 +93,8 @@ class FakeJwksEndpoint:
                 endpoint.fetches += 1
                 if endpoint.fail:
                     raise endpoint.fail
-                return _Response({"keys": [s.jwk() for s in endpoint.signers]})
+                return _Response({"keys": [s.jwk() for s in endpoint.signers]
+                                         + endpoint.extra})
 
         return _Client()
 
@@ -284,6 +286,26 @@ class TestJwks:
         impostor = Signer("kid-made-up")
         with pytest.raises(AuthError):
             await verifier(real).verify(impostor.token())
+
+    async def test_the_library_can_read_an_rsa_key(self):
+        """The image's dependency set can parse what Cloudflare publishes.
+
+        This target gets cryptography only through :app_lib, which is the same
+        route :server takes into the image, so this fails if that route is
+        lost. It is the regression test for a deploy whose every sign-in was
+        refused with "published no usable signing keys"."""
+        assert jwt.algorithms.has_crypto
+        jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(
+            Signer().key.public_key()))
+        assert jwt.PyJWK.from_dict({**jwk, "kid": "k", "alg": "RS256"}).key
+
+    async def test_a_key_set_nothing_can_parse_says_why(self):
+        endpoint = FakeJwksEndpoint()
+        endpoint.extra = [{"kid": "bad", "kty": "RSA", "alg": "RS256",
+                           "n": "!!", "e": "AQAB"}]
+        v = verifier(endpoint=endpoint)
+        with pytest.raises(AuthError, match=r"no usable signing keys \(.+\)"):
+            await v._fetch_jwks()
 
     async def test_an_empty_key_set_is_an_error_not_an_open_door(self):
         s = Signer()

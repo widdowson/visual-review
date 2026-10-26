@@ -27,6 +27,13 @@ py_library(
     ],
     data = ["image_extensions.json"],
     deps = [
+        # pyjwt's RSA support lives behind its [crypto] extra, and
+        # requirement("pyjwt") does not carry an extra: it is the bare wheel.
+        # Without this line PyJWT imports fine, PyJWK.from_dict refuses every
+        # RSA key, and auth.py reports that Cloudflare "published no usable
+        # signing keys" -- which is what the shipped image did, because this
+        # library is the only route by which cryptography reaches :server.
+        requirement("cryptography"),
         requirement("fastapi"),
         requirement("httpx"),
         requirement("pyjwt"),
@@ -99,9 +106,12 @@ py_test(
     # still has to import under a configuration that does not raise.
     env = {"VR_AUTH_MODE": "disabled"},
     main = "tests/run_tests.py",
+    # No requirement("cryptography") here, deliberately. These tests import it
+    # to make signing keys, so they can only build while :app_lib supplies it
+    # -- and :app_lib is what the image ships. Listing it here as well is what
+    # let the image go out without it while this target stayed green.
     deps = [
         ":app_lib",
-        requirement("cryptography"),
         requirement("httpx"),
         requirement("pyjwt"),
         requirement("pytest"),
