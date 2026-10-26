@@ -76,6 +76,7 @@ class FakeJwksEndpoint:
     def __init__(self, *signers, fail: Exception | None = None):
         self.signers = list(signers)
         self.fail = fail
+        self.extra: list[dict] = []
         self.fetches = 0
 
     def factory(self, *args, **kwargs):
@@ -92,7 +93,8 @@ class FakeJwksEndpoint:
                 endpoint.fetches += 1
                 if endpoint.fail:
                     raise endpoint.fail
-                return _Response({"keys": [s.jwk() for s in endpoint.signers]})
+                return _Response({"keys": [s.jwk() for s in endpoint.signers]
+                                         + endpoint.extra})
 
         return _Client()
 
@@ -284,6 +286,24 @@ class TestJwks:
         impostor = Signer("kid-made-up")
         with pytest.raises(AuthError):
             await verifier(real).verify(impostor.token())
+
+    async def test_the_library_can_read_an_rsa_key(self):
+        """PyJWT here can read an RSA JWK, i.e. it has its crypto backend.
+
+        This cannot fail alone: without cryptography the module's own import
+        fails first. What the image ships is //:test_image_contents's job."""
+        assert jwt.algorithms.has_crypto
+        jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(
+            Signer().key.public_key()))
+        assert jwt.PyJWK.from_dict({**jwk, "kid": "k", "alg": "RS256"}).key
+
+    async def test_a_key_set_nothing_can_parse_says_why(self):
+        endpoint = FakeJwksEndpoint()
+        endpoint.extra = [{"kid": "bad", "kty": "RSA", "alg": "RS256",
+                           "n": "!!", "e": "AQAB"}]
+        v = verifier(endpoint=endpoint)
+        with pytest.raises(AuthError, match=r"no usable signing keys \(.+\)"):
+            await v._fetch_jwks()
 
     async def test_an_empty_key_set_is_an_error_not_an_open_door(self):
         s = Signer()

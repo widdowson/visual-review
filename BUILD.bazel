@@ -27,6 +27,13 @@ py_library(
     ],
     data = ["image_extensions.json"],
     deps = [
+        # pyjwt's RSA support lives behind its [crypto] extra, and
+        # requirement("pyjwt") does not carry an extra: it is the bare wheel.
+        # Without this line PyJWT imports fine, PyJWK.from_dict refuses every
+        # RSA key, and auth.py reports that Cloudflare "published no usable
+        # signing keys" -- which is what the shipped image did, because this
+        # library is the only route by which cryptography reaches :server.
+        requirement("cryptography"),
         requirement("fastapi"),
         requirement("httpx"),
         requirement("pyjwt"),
@@ -99,9 +106,12 @@ py_test(
     # still has to import under a configuration that does not raise.
     env = {"VR_AUTH_MODE": "disabled"},
     main = "tests/run_tests.py",
+    # No requirement("cryptography") here, deliberately. These tests import it
+    # to make signing keys, so they can only build while :app_lib supplies it
+    # -- and :app_lib is what the image ships. Listing it here as well is what
+    # let the image go out without it while this target stayed green.
     deps = [
         ":app_lib",
-        requirement("cryptography"),
         requirement("httpx"),
         requirement("pyjwt"),
         requirement("pytest"),
@@ -158,6 +168,25 @@ py_test(
         requirement("playwright"),
         requirement("pytest"),
     ],
+)
+
+# Reads the layers //:push publishes rather than importing anything, because a
+# test's own interpreter is assembled from its own deps: //:test_auth once
+# listed cryptography itself and stayed green while the image went out without
+# it. Mutant: move cryptography from :app_lib to //:test_auth (main's shape
+# before the fix) and this fails while every other target passes.
+py_test(
+    name = "test_image_contents",
+    srcs = [
+        "tests/__init__.py",
+        "tests/run_tests.py",
+        "tests/test_image_contents.py",
+    ],
+    args = ["tests/test_image_contents.py"],
+    data = [":server_layers"],
+    env = {"SERVER_LAYERS": "$(rootpaths :server_layers)"},
+    main = "tests/run_tests.py",
+    deps = [requirement("pytest")],
 )
 
 # The deploy workflow is the only place the app's production environment is
