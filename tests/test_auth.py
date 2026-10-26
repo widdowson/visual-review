@@ -288,12 +288,10 @@ class TestJwks:
             await verifier(real).verify(impostor.token())
 
     async def test_the_library_can_read_an_rsa_key(self):
-        """The image's dependency set can parse what Cloudflare publishes.
+        """PyJWT here can read an RSA JWK, i.e. it has its crypto backend.
 
-        This target gets cryptography only through :app_lib, which is the same
-        route :server takes into the image, so this fails if that route is
-        lost. It is the regression test for a deploy whose every sign-in was
-        refused with "published no usable signing keys"."""
+        This cannot fail alone: without cryptography the module's own import
+        fails first. What the image ships is //:test_image_contents's job."""
         assert jwt.algorithms.has_crypto
         jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(
             Signer().key.public_key()))

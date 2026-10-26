@@ -170,6 +170,25 @@ py_test(
     ],
 )
 
+# Reads the layers //:push publishes rather than importing anything, because a
+# test's own interpreter is assembled from its own deps: //:test_auth once
+# listed cryptography itself and stayed green while the image went out without
+# it. Mutant: move cryptography from :app_lib to //:test_auth (main's shape
+# before the fix) and this fails while every other target passes.
+py_test(
+    name = "test_image_contents",
+    srcs = [
+        "tests/__init__.py",
+        "tests/run_tests.py",
+        "tests/test_image_contents.py",
+    ],
+    args = ["tests/test_image_contents.py"],
+    data = [":server_layers"],
+    env = {"SERVER_LAYERS": "$(rootpaths :server_layers)"},
+    main = "tests/run_tests.py",
+    deps = [requirement("pytest")],
+)
+
 # The deploy workflow is the only place the app's production environment is
 # written down, and `bazel test` does not otherwise read .github/. Both defects
 # it guards against surface only on a merge to main.
