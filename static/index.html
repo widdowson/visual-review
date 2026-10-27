@@ -2565,6 +2565,18 @@
         // from a comment posted while it was in flight. Keyed by path, so the
         // map is bounded by the files in this PR.
         var commentBadgeSequence = 0;
+
+        // Until when every comments load asks the server to skip its cached
+        // list: _PR_COMMENTS_TTL in app.py after this page last posted a
+        // comment. A POST drops the cache only on the Cloud Run instance it
+        // reached, so for one TTL another instance can still hold the list
+        // from before it, and any load in that window — not only the reload
+        // straight after the post — could answer without the comment just
+        // written, and take the badge back with it. Past the window every
+        // instance's copy postdates the post. Kept equal to the server's TTL
+        // by hand: test_comments_freshness.js reads both.
+        var COMMENTS_FRESH_WINDOW_MS = 30000;
+        var commentsFreshUntil = 0;
         var commentBadgeApplied = Object.create(null);
 
         function writeCommentBadge(path, count, sequence) {
@@ -2575,7 +2587,7 @@
 
         var commentsGeneration = 0;
 
-        function loadComments(path, opts) {
+        function loadComments(path) {
             // Only a load for the file on screen owns the pane. Bumping the
             // counter from a load that does not own it would strand the load
             // that does: its response would find a generation it no longer
@@ -2598,12 +2610,11 @@
                 });
             }
 
-            // `fresh` skips the server's cache of the comment list. It is for
-            // the reload after a post, which exists to show the comment just
-            // written: the POST dropped that cache on the instance it reached,
-            // and this request may reach another.
+            // `fresh` skips the server's cache of the comment list, for the
+            // window after a post that commentsFreshUntil describes.
+            var fresh = Date.now() < commentsFreshUntil;
             var url = apiBase + '/comments?path=' + encodeURIComponent(path) +
-                (opts && opts.fresh ? '&fresh=1' : '');
+                (fresh ? '&fresh=1' : '');
 
             fetch(url)
                 .then(function(r) { return r.json(); })
@@ -2669,7 +2680,8 @@
                 .then(function(data) {
                     if (data.ok) {
                         textarea.value = '';
-                        loadComments(path, { fresh: true });
+                        commentsFreshUntil = Date.now() + COMMENTS_FRESH_WINDOW_MS;
+                        loadComments(path);
                     } else {
                         alert('Error posting comment: ' + (data.error || 'Unknown error'));
                         submitBtn.disabled = false;

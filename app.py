@@ -876,9 +876,13 @@ async def pr_image(
 # a push. So the TTL is short, and it is a staleness window for comments
 # written somewhere else, on GitHub or by another reviewer. A comment written
 # *here* must not wait it out, because the SPA reloads the pane straight after
-# a POST to show the comment just written; ``post_pr_comment`` drops the entry,
-# and the reload asks for ``fresh`` besides, since a Cloud Run service can run
-# more than one instance and a drop on one leaves the others' copies alone.
+# a POST to show the comment just written; ``post_pr_comment`` drops the entry.
+# A Cloud Run service can run more than one instance and a drop on one leaves
+# the others' copies alone, so for one TTL after it posts the SPA asks for
+# ``fresh`` on every comments load (``COMMENTS_FRESH_WINDOW_MS`` in
+# static/index.html, which must equal this). A page opened elsewhere in that
+# window is not covered: it can show a list up to one TTL old, which is the
+# window this cache exists to accept.
 _PR_COMMENTS_TTL = 30
 
 # Bumped by every comment this process posts. A walk that was already in

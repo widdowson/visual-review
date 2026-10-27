@@ -299,6 +299,20 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(rivalsOf('a/x.png', files(['a/x.png', 'b/x.png']), basenameIndex([])), [],
   'and must not fall back to scanning the list when the index has no such name');
 
+// And the index must reach rivalsOf through the whole chain. The render test
+// below can only see what renderFileList hands to dirLabelFor, so a link that
+// drops it further down — dirLabelFor to dirContextFor, or dirContextFor to
+// rivalsOf — would keep every answer right and rebuild the index once per row.
+// An empty list beside a real index is what tells the two apart: only the
+// index knows about the collision.
+{
+  const index = basenameIndex(BASELINES);
+  assert.strictEqual(dirContextFor(BASELINES[0].path, [], index), 'home/tests/visual',
+    'dirContextFor must pass its index on to rivalsOf');
+  assert.strictEqual(dirLabelFor(BASELINES[0].path, [], index), '\u2026/home/tests/visual/',
+    'dirLabelFor must pass its index on to dirContextFor');
+}
+
 // A basename is arbitrary text, so the index must not inherit one. With a
 // plain {} as the index, `__proto__` looks up Object.prototype — not an array,
 // so the whole call throws — and `constructor` finds Object.
@@ -381,6 +395,8 @@ function render(images) {
 // The render builds the index once, and every row is labelled from it. Either
 // half alone leaves the render quadratic: an index built per row, or one built
 // once and not passed down, which every row then rebuilds inside rivalsOf.
+// What dirLabelFor does with it from there is pinned above, against an empty
+// list.
 {
   const r = render(BASELINES);
   assert.strictEqual(r.built.length, 1, 'renderFileList must build the basename index exactly once');

@@ -241,17 +241,50 @@ function harness(currentFile) {
     pending.push({ url, answer: data => resolve({ json: () => data }) });
   });
   const el = () => ({ style: {}, innerHTML: '' });
+  const clock = { now: 1000000 };
   const make = new Function(
     'state', 'commentsSection', 'commentsScroll', 'apiBase', 'fetch', 'renderComments',
-    'commentsResponseIsCurrent', 'commentBadgeWriteIsNewer', 'updateCommentBadge',
+    'commentsResponseIsCurrent', 'commentBadgeWriteIsNewer', 'updateCommentBadge', 'Date',
     [decl('commentBadgeSequence'), decl('commentBadgeApplied'), decl('commentsGeneration'),
+      decl('COMMENTS_FRESH_WINDOW_MS'), decl('commentsFreshUntil'),
       bodyOf('writeCommentBadge'), bodyOf('loadComments'), bodyOf('loadCommentCounts'),
-      'return { loadComments: loadComments, loadCommentCounts: loadCommentCounts };'].join('\n'));
+      // What the post handler does on success, taken from its own source
+      // below rather than restated here.
+      'function posted() { ' + postedStatement + ' }',
+      'return { loadComments: loadComments, loadCommentCounts: loadCommentCounts, ' +
+      'posted: posted, window: COMMENTS_FRESH_WINDOW_MS };'].join('\n'));
   const fns = make({ currentFile }, el(), el(), '/api', fetch, () => {},
     commentsResponseIsCurrent, commentBadgeWriteIsNewer,
-    (path, count) => { badges[path] = count; });
+    (path, count) => { badges[path] = count; }, { now: () => clock.now });
   const settle = () => new Promise(r => setImmediate(r));
-  return Object.assign(fns, { pending, badges, urls, settle });
+  return Object.assign(fns, { pending, badges, urls, settle, clock });
+}
+
+// The statement the post handler runs on success to open the fresh window,
+// lifted from renderComments, and required to come before its reload so that
+// the reload is inside the window.
+const postBody = bodyOf('renderComments');
+const postedMatch = /commentsFreshUntil\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*COMMENTS_FRESH_WINDOW_MS\s*;/.exec(postBody);
+assert.ok(postedMatch, 'a successful post must open the fresh window');
+const postedStatement = postedMatch[0];
+assert.ok(postBody.indexOf(postedStatement) < postBody.search(/loadComments\s*\(\s*path\s*\)/),
+  'the window must open before the reload after a post, or that reload is outside it');
+
+// The window has to cover the server's whole TTL: past it every instance's
+// cached list postdates the post, short of it one may not.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const runfiles = process.env.RUNFILES_DIR || '';
+  const appPy = fs.readFileSync(runfiles
+    ? path.join(runfiles, '_main', 'app.py')
+    : path.join(__dirname, '..', 'app.py'), 'utf8');
+  const ttl = /^_PR_COMMENTS_TTL\s*=\s*(\d+)\s*$/m.exec(appPy);
+  assert.ok(ttl, 'app.py must define _PR_COMMENTS_TTL as a whole number of seconds');
+  const windowMs = Number(/var\s+COMMENTS_FRESH_WINDOW_MS\s*=\s*(\d+)\s*;/
+    .exec(require('./spa_source').scriptSource())[1]);
+  assert.strictEqual(windowMs, Number(ttl[1]) * 1000,
+    'COMMENTS_FRESH_WINDOW_MS must equal _PR_COMMENTS_TTL');
 }
 
 const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) });
@@ -263,7 +296,7 @@ const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) 
   {
     const h = harness('a.png');
     h.loadComments('a.png');
-    h.loadComments('a.png', { fresh: true });
+    h.loadComments('a.png');
     h.pending[1].answer(page(5));
     await h.settle();
     assert.strictEqual(h.badges['a.png'], 5);
@@ -280,7 +313,7 @@ const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) 
     h.loadComments('a.png');
     h.pending[0].answer(page(4));
     await h.settle();
-    h.loadComments('a.png', { fresh: true });
+    h.loadComments('a.png');
     h.pending[1].answer(page(5));
     await h.settle();
     assert.strictEqual(h.badges['a.png'], 5, 'a newer answer must replace an older one');
@@ -305,7 +338,7 @@ const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) 
   {
     const h = harness('a.png');
     h.loadCommentCounts();
-    h.loadComments('a.png', { fresh: true });
+    h.loadComments('a.png');
     h.pending[1].answer(page(5));
     await h.settle();
     h.pending[0].answer({ counts: { 'a.png': 4, 'b.png': 7 } });
@@ -314,19 +347,44 @@ const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) 
       'the tally must not overwrite a newer per-file count, and must fill the rest');
   }
 
-  // Only the reload after a post asks the server to skip its cache. Every
-  // other load may be answered from it, which is the point of having one (#50).
+  // Loads ask the server to skip its cache for one TTL after a post, and only
+  // then. Not only the reload: clicking away and back inside the window can
+  // reach an instance holding the pre-post list, which would take the comment
+  // out of the pane and the badge back to the old count (round 1, Minor 1).
+  // Outside the window loads may be answered from the cache, which is the
+  // point of having one (#50).
   {
     const h = harness('a.png');
     h.loadComments('a.png');
-    h.loadComments('a.png', { fresh: true });
+    h.posted();
+    h.loadComments('a.png');
+    h.loadComments('b.png');
+    h.clock.now += h.window - 1;
+    h.loadComments('a.png');
+    h.clock.now += 1;
+    h.loadComments('a.png');
     assert.deepStrictEqual(h.urls, [
       '/api/comments?path=a.png',
       '/api/comments?path=a.png&fresh=1',
+      '/api/comments?path=b.png&fresh=1',
+      '/api/comments?path=a.png&fresh=1',
+      '/api/comments?path=a.png',
     ]);
-    const post = bodyOf('renderComments');
-    assert.ok(/loadComments\s*\(\s*path\s*,\s*\{\s*fresh\s*:\s*true\s*\}\s*\)/.test(post),
-      'the reload after a successful post must ask for a fresh list');
+  }
+
+  // The tally takes a sequence number of its own. Sharing the last load's
+  // would tie with it, and a tie is refused, so a tally started after that
+  // load and holding a newer count would leave the older one showing.
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.pending[0].answer(page(4));
+    await h.settle();
+    h.loadCommentCounts();
+    h.pending[1].answer({ counts: { 'a.png': 5 } });
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5,
+      'a tally started after a load must replace that load\'s count');
   }
 
   console.log('comments freshness: all assertions passed');
