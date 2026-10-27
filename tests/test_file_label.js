@@ -489,8 +489,14 @@ function render(images) {
   const dir = rule('file-dir');
   assert.ok(/font-size\s*:/.test(dir), '.file-dir must set its own font size');
   assert.ok(/color\s*:/.test(dir), '.file-dir must set its own colour');
+  // The only check holding the ellipsis on either line. //:test_spa_file_label
+  // reads the rest of these declarations off the layout, but no DOM API
+  // reports whether clipped text ends in an ellipsis, so a mutant removing it
+  // survives there (#55).
   assert.ok(/text-overflow\s*:\s*ellipsis/.test(dir),
     '.file-dir must ellipsize; these paths are longer than the column');
+  assert.ok(/text-overflow\s*:\s*ellipsis/.test(rule('filename')),
+    '.filename must ellipsize; a long basename is longer than the column');
   // text-overflow does nothing to text that is allowed to wrap, and nothing to
   // content that is not clipped, so it leans on both of these: without the
   // first the long directory takes a second row instead of an ellipsis, and

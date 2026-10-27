@@ -191,8 +191,8 @@ const css = stylesheet();
 // url-token is not a string, so `background: url(a}b)` is untouched by the
 // blanking and closes the @media exactly as `content: "}"` used to. Measured,
 // with the cap moved into the real mobile query and that rule ahead of it: this
-// file stays green while every desktop window is uncapped. Filed as #42 item 2,
-// which is the inventory of what a source-text check cannot see here.
+// file stays green while every desktop window is uncapped. That case is held by
+// //:test_spa_comments_pane, which reads the cap off the rendered pane (#42).
 function unconditionalRules(sheet, selector) {
   const out = [];
   let depth = 0;
@@ -250,8 +250,9 @@ assert.ok(Number(caps[0][1]) > 0 && Number(caps[0][1]) <= 40,
 // Both are positive matches, so neither can see a later rule of equal
 // specificity overriding it — `.comments-section { display: block }` appended to
 // the stylesheet leaves this green. That is general to every positive check in
-// this file and is inventoried in #42; the cap above is the one case with a
-// count check, which catches a second cap but not an override either.
+// this file, and //:test_spa_comments_pane is what catches an override (#42);
+// the cap above is the one case here with a count check, which catches a
+// second cap but not an override either.
 for (const [label, declaration] of [
   ['display: flex', /display:\s*flex/],
   ['flex-direction: column', /flex-direction:\s*column/],

@@ -194,6 +194,10 @@ def test_the_knobs_refuse_what_they_cannot_honour():
     # 200 is not a failure, and serving it with no body is not an image.
     with pytest.raises(ValueError, match="error status"):
         FixtureState(images={("a.png", "head"): 200})
+    # Anything else would be served as the generated PNG, silently.
+    for value in ("a.png", bytearray(b"x"), True):
+        with pytest.raises(ValueError, match="bytes or a status"):
+            FixtureState(images={("a.png", "head"): value})
 
 
 def _post_a_comment(page) -> None:

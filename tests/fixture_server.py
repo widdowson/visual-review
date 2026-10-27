@@ -58,7 +58,8 @@ HEAD_REF = "b" * 40
 
 
 def png_bytes(seed: int, size: int = 64, alpha: int | None = None,
-              height: int | None = None) -> bytes:
+              height: int | None = None,
+              rgb: tuple[int, int, int] | None = None) -> bytes:
     """A solid-colour PNG, its colour derived from `seed`.
 
     Written by hand rather than with Pillow: this repo has no image library in
@@ -69,9 +70,12 @@ def png_bytes(seed: int, size: int = 64, alpha: int | None = None,
     two images can be built that differ in alpha alone — which is what the
     diff gutter has to be shown not to compare. `height` makes it `size` wide
     and that tall, for a test that needs the image taller than the viewport.
+    `rgb` names the colour outright in place of the seed's, for a pair that has
+    to differ by an exact amount.
     """
     rows = size if height is None else height
-    r, g, b = (seed * 53) % 256, (seed * 97) % 256, (seed * 149) % 256
+    r, g, b = rgb if rgb is not None else (
+        (seed * 53) % 256, (seed * 97) % 256, (seed * 149) % 256)
     pixel = bytes([r, g, b]) if alpha is None else bytes([r, g, b, alpha])
     raw = b"".join(b"\x00" + pixel * size for _ in range(rows))
 
@@ -153,6 +157,9 @@ class FixtureState:
             if (not isinstance(key, tuple) or len(key) != 2
                     or key[1] not in ("base", "head")):
                 raise ValueError(f"images keys are (path, 'base'|'head'), not {key!r}")
+            if isinstance(value, bool) or not isinstance(value, (bytes, int)):
+                raise ValueError(f"an image override is bytes or a status, not "
+                                 f"{type(value).__name__}")
             if isinstance(value, int) and not 400 <= value < 600:
                 raise ValueError(f"an image override that is a status must be an "
                                  f"error status, not {value}")

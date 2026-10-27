@@ -125,8 +125,9 @@ def test_the_sidebar_lists_every_file(spa_backend, spa_page):
   badges are read from those threads. `images` overrides one side of one file,
   keyed `(path, "base" | "head")`: bytes are served in place of the generated
   PNG, and a 4xx or 5xx status makes that side fail. `png_bytes(seed, size,
-  alpha=None, height=None)` in `tests/fixture_server.py` makes the bytes,
-  with an alpha channel or a non-square shape when a test needs one.
+  alpha=None, height=None, rgb=None)` in `tests/fixture_server.py` makes the
+  bytes, with an alpha channel, a non-square shape or an exact colour when a
+  test needs one.
 - `POST /comments` is served: it appends the comment to that path's thread,
   so the reload the page makes afterwards reads it back.
 - `backend.state.hold(kind, path, ref=None)` keeps matching `image`,

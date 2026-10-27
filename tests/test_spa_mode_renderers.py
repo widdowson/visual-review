@@ -17,6 +17,13 @@ gone.
    differs in colour, so a gutter that never drew could not pass. The same
    holds for the fifth gutter-tolerance call, in `renderComparison`, whose map
    is not drawn but decides where `n` jumps — so it is asserted through `n`.
+3. **The gutter's tolerance is 10.** A pair one channel apart by 11 is
+   plotted and one by 10 is not, in each mode. `renderComparison`'s own
+   `threshold: 10` is still pinned by //:test_rename_display's stub harness.
+
+What the old census caught and nothing here does: a *new* gutter call passing
+`includeAlpha`. A behavioural test can only reach the calls that exist, so a
+new mode renderer needs its own row in MODES.
 """
 
 import os
@@ -37,6 +44,13 @@ MODES = ["side-by-side", "crossfade", "swipe", "diff"]
 # so the only difference the gutter could see is the alpha channel.
 ALPHA_ONLY = "alpha_only.png"
 COLOUR = "colour.png"
+
+# The gutter's tolerance from both sides: one channel apart by 11 is a change,
+# by 10 is not. The colour pair above differs by far more than any plausible
+# threshold, so on its own it would let the tolerance drift anywhere in 1-166.
+OVER_TOLERANCE = "over_tolerance.png"
+AT_TOLERANCE = "at_tolerance.png"
+GREY = (100, 100, 100)
 
 
 def base_panel_text(page) -> str:
@@ -109,10 +123,14 @@ def show(page, path: str, mode: str) -> int:
 @pytest.fixture
 def alpha_pair(spa_backend, spa_page):
     backend = spa_backend(
-        files=[{"path": COLOUR, "status": "modified"},
-               {"path": ALPHA_ONLY, "status": "modified"}],
+        files=[{"path": p, "status": "modified"}
+               for p in (COLOUR, ALPHA_ONLY, OVER_TOLERANCE, AT_TOLERANCE)],
         images={(ALPHA_ONLY, "base"): png_bytes(9, alpha=255),
-                (ALPHA_ONLY, "head"): png_bytes(9, alpha=170)})
+                (ALPHA_ONLY, "head"): png_bytes(9, alpha=170),
+                (OVER_TOLERANCE, "base"): png_bytes(0, rgb=GREY),
+                (OVER_TOLERANCE, "head"): png_bytes(0, rgb=(111, 100, 100)),
+                (AT_TOLERANCE, "base"): png_bytes(0, rgb=GREY),
+                (AT_TOLERANCE, "head"): png_bytes(0, rgb=(110, 100, 100))})
     page = spa_page()
     page.goto(backend.pr_url(), wait_until="load")
     wait_until(lambda: active_path(page) is not None, "a file to be selected")
@@ -133,6 +151,17 @@ def test_the_gutter_plots_colour_changes_in_every_mode(alpha_pair, mode):
 def test_the_gutter_ignores_an_alpha_only_change_in_every_mode(alpha_pair, mode):
     """A gutter call that passed `includeAlpha` would plot all 64 rows here."""
     assert show(alpha_pair, ALPHA_ONLY, mode) == 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_the_gutter_tolerance_is_ten_in_every_mode(alpha_pair, mode):
+    """A channel 11 apart is plotted and one 10 apart is not.
+
+    Kills any threshold other than 10 at one of the four mode-renderer calls:
+    a higher one misses the first pair, a lower one plots the second.
+    """
+    assert show(alpha_pair, OVER_TOLERANCE, mode) == 64
+    assert show(alpha_pair, AT_TOLERANCE, mode) == 0
 
 
 def test_the_alpha_only_pair_really_differs(alpha_pair):
