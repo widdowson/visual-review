@@ -115,13 +115,14 @@ for (let i = 1; i < renders.length; i++) {
 // The badge is keyed on the response's own path, so it is right for whatever
 // file the response is about and is deliberately updated before the guard.
 // Moving it below would silently lose the count for a comment the user posted
-// and then navigated away from.
-const badgeAt = loadComments.indexOf('updateCommentBadge');
+// and then navigated away from. It goes through writeCommentBadge, which
+// orders writes per row (#49); the run further down holds that to behaviour.
+const badgeAt = loadComments.indexOf('writeCommentBadge');
 const guardAt = loadComments.search(/if\s*\(\s*!\s*isCurrent\s*\(\s*\)\s*\)\s*return\s*;/);
 assert.ok(badgeAt > 0, 'loadComments must still update the sidebar badge');
 assert.ok(guardAt > 0, 'loadComments must guard on isCurrent()');
 assert.ok(badgeAt < guardAt,
-  'updateCommentBadge must run before the freshness guard: its row is chosen by the ' +
+  'writeCommentBadge must run before the freshness guard: its row is chosen by the ' +
   "response's own path, so it is correct for a file that is no longer on screen");
 
 // The spinner is written only by the load that owns the pane. Writing it from
@@ -198,4 +199,135 @@ assert.ok(/spinner/.test(guarded),
 assert.ok(/commentsSection\s*\.\s*style\s*\.\s*display\s*=/.test(guarded),
   'revealing the pane belongs inside the ownedPane block too');
 
-console.log('comments freshness: all assertions passed');
+// ── The badge, per file (#49) ───────────────────────────────────────────────
+//
+// The pane's guard orders loads of the pane; the badge is per file and needs
+// its own order. The predicate first, then the real loadComments,
+// loadCommentCounts and writeCommentBadge run against stubs, because the bug
+// is an interleaving of responses and only a run can produce one.
+
+const commentBadgeWriteIsNewer = extract('comment-badge', 'commentBadgeWriteIsNewer');
+
+assert.strictEqual(commentBadgeWriteIsNewer(1, undefined), true,
+  'the first write to a row must apply');
+assert.strictEqual(commentBadgeWriteIsNewer(5, 4), true, 'a later-started write must apply');
+assert.strictEqual(commentBadgeWriteIsNewer(4, 5), false,
+  'an earlier-started write landing late must not replace a later one');
+assert.strictEqual(commentBadgeWriteIsNewer(5, 5), false,
+  'nor may one write apply twice');
+for (const value of [undefined, null, '6', NaN]) {
+  assert.strictEqual(commentBadgeWriteIsNewer(value, 4), false,
+    'an unnumbered write must be refused, got ' + String(value));
+  assert.strictEqual(commentBadgeWriteIsNewer(value, undefined), false,
+    'even on a row nothing has written to, got ' + String(value));
+}
+
+// The harness. Every fetch is held until the case resolves it, so a case can
+// land responses in whatever order the bug needs. The declarations the three
+// functions close over are lifted from the SPA's own source rather than
+// re-declared here, so their starting values are the shipped ones too.
+function harness(currentFile) {
+  const script = require('./spa_source').scriptSource();
+  const decl = name => {
+    const m = new RegExp('var\\s+' + name + '\\s*=[^;]*;').exec(script);
+    assert.ok(m, 'static/index.html must declare ' + name);
+    return m[0];
+  };
+  const pending = [];
+  const badges = {};
+  const urls = [];
+  const fetch = url => new Promise(resolve => {
+    urls.push(url);
+    pending.push({ url, answer: data => resolve({ json: () => data }) });
+  });
+  const el = () => ({ style: {}, innerHTML: '' });
+  const make = new Function(
+    'state', 'commentsSection', 'commentsScroll', 'apiBase', 'fetch', 'renderComments',
+    'commentsResponseIsCurrent', 'commentBadgeWriteIsNewer', 'updateCommentBadge',
+    [decl('commentBadgeSequence'), decl('commentBadgeApplied'), decl('commentsGeneration'),
+      bodyOf('writeCommentBadge'), bodyOf('loadComments'), bodyOf('loadCommentCounts'),
+      'return { loadComments: loadComments, loadCommentCounts: loadCommentCounts };'].join('\n'));
+  const fns = make({ currentFile }, el(), el(), '/api', fetch, () => {},
+    commentsResponseIsCurrent, commentBadgeWriteIsNewer,
+    (path, count) => { badges[path] = count; });
+  const settle = () => new Promise(r => setImmediate(r));
+  return Object.assign(fns, { pending, badges, urls, settle });
+}
+
+const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) });
+
+(async () => {
+  // The issue's interleaving: the initial load is slow, a post reloads the
+  // file and answers 5, then the initial load lands with 4. The badge must
+  // stay at 5.
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.loadComments('a.png', { fresh: true });
+    h.pending[1].answer(page(5));
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5);
+    h.pending[0].answer(page(4));
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5,
+      'a slow older answer must not put the badge back to the count before the post');
+  }
+
+  // In order, the later answer still wins, so ordering is by start and not by
+  // a flag that only ever lets the first write through.
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.pending[0].answer(page(4));
+    await h.settle();
+    h.loadComments('a.png', { fresh: true });
+    h.pending[1].answer(page(5));
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5, 'a newer answer must replace an older one');
+  }
+
+  // The order is per row. A load for b.png started after a.png's must not
+  // block a.png's answer, which a single counter shared by every row would.
+  {
+    const h = harness('b.png');
+    h.loadComments('a.png');
+    h.loadComments('b.png');
+    h.pending[1].answer(page(2));
+    h.pending[0].answer(page(3));
+    await h.settle();
+    assert.deepStrictEqual(h.badges, { 'a.png': 3, 'b.png': 2 },
+      'each row must take its own newest answer');
+  }
+
+  // The page-load tally is a badge write too. A comment posted while it is in
+  // flight produces a newer count, and the tally landing after must not
+  // overwrite it — but must still fill every row the load did not reach.
+  {
+    const h = harness('a.png');
+    h.loadCommentCounts();
+    h.loadComments('a.png', { fresh: true });
+    h.pending[1].answer(page(5));
+    await h.settle();
+    h.pending[0].answer({ counts: { 'a.png': 4, 'b.png': 7 } });
+    await h.settle();
+    assert.deepStrictEqual(h.badges, { 'a.png': 5, 'b.png': 7 },
+      'the tally must not overwrite a newer per-file count, and must fill the rest');
+  }
+
+  // Only the reload after a post asks the server to skip its cache. Every
+  // other load may be answered from it, which is the point of having one (#50).
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.loadComments('a.png', { fresh: true });
+    assert.deepStrictEqual(h.urls, [
+      '/api/comments?path=a.png',
+      '/api/comments?path=a.png&fresh=1',
+    ]);
+    const post = bodyOf('renderComments');
+    assert.ok(/loadComments\s*\(\s*path\s*,\s*\{\s*fresh\s*:\s*true\s*\}\s*\)/.test(post),
+      'the reload after a successful post must ask for a fresh list');
+  }
+
+  console.log('comments freshness: all assertions passed');
+})().catch(err => { console.error(err); process.exit(1); });

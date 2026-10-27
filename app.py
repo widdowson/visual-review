@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -56,19 +57,45 @@ app.add_middleware(
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 # -- In-memory cache ----------------------------------------------------------
-_cache: dict[str, tuple[float, Any]] = {}
+#
+# Bounded, least recently used first (#44). Three of the key spaces are keyed
+# on a head SHA, so every push to a watched PR mints a new key and the old one
+# is never asked for again; a TTL checked only on read therefore governed how
+# long a value was served and not how long it was held, and the dict grew for
+# the life of the process. Two things now remove an entry: a read that finds
+# it expired, and a write that takes the dict past the cap, which drops the
+# least recently used. Every key space reads with one fixed TTL, so an entry
+# found expired by one reader is expired for every reader of that key.
+#
+# The cap is a count rather than a byte size. The largest values are file
+# lists, at most 3000 entries each, so the bound is coarse; it is here to stop
+# growth, not to tune memory, and a Cloud Run instance that scales to zero
+# starts empty anyway.
+_CACHE_MAX_ENTRIES = 512
+_cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
 
 def _cache_get(key: str, ttl: float) -> Any | None:
-    if key in _cache:
-        ts, val = _cache[key]
-        if time.time() - ts < ttl:
-            return val
-    return None
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    ts, val = entry
+    if time.time() - ts >= ttl:
+        del _cache[key]
+        return None
+    _cache.move_to_end(key)
+    return val
 
 
 def _cache_set(key: str, val: Any) -> None:
     _cache[key] = (time.time(), val)
+    _cache.move_to_end(key)
+    while len(_cache) > _CACHE_MAX_ENTRIES:
+        _cache.popitem(last=False)
+
+
+def _cache_drop(key: str) -> None:
+    _cache.pop(key, None)
 
 
 _ext_file = os.path.join(os.path.dirname(__file__), "image_extensions.json")
@@ -837,18 +864,76 @@ async def pr_image(
         return Response(content=str(e).encode(), status_code=500)
 
 
+# -- Review comments -----------------------------------------------------------
+#
+# ``/comments`` and ``/comment-counts`` read the same list — every review
+# comment on the PR — and the SPA asks for it once per file click, so the walk
+# is shared and cached (#50). Walking it is ``ceil(N/100)`` requests since #22,
+# which made the uncached version cost three requests a click on a PR with 250
+# comments.
+#
+# Unlike the file list there is no head SHA to key on: comments change without
+# a push. So the TTL is short, and it is a staleness window for comments
+# written somewhere else, on GitHub or by another reviewer. A comment written
+# *here* must not wait it out, because the SPA reloads the pane straight after
+# a POST to show the comment just written; ``post_pr_comment`` drops the entry,
+# and the reload asks for ``fresh`` besides, since a Cloud Run service can run
+# more than one instance and a drop on one leaves the others' copies alone.
+_PR_COMMENTS_TTL = 30
+
+# Bumped by every comment this process posts. A walk that was already in
+# flight when a comment was posted read the list from before it, and caching
+# that answer after the post dropped the entry would put the pre-post list back
+# for a whole TTL. So a walk is cached only if nothing was posted while it ran.
+# One counter for every PR rather than one per PR: a post elsewhere costs one
+# walk its cache write, which is cheaper than a dict that grows per PR.
+_comment_posts = 0
+
+
+def _pr_comments_key(github_repo: str, number: int) -> str:
+    return f"pr_comments:{github_repo}:{number}"
+
+
+async def _pr_review_comments(
+    client: httpx.AsyncClient,
+    github_repo: str,
+    number: int,
+    fresh: bool = False,
+) -> tuple[list[Any], bool]:
+    """Every review comment on the PR, as ``(comments, truncated)``.
+
+    Served from the cache unless ``fresh``, which skips the read but still
+    writes what it fetched. Raises :class:`_GitHubError` when a page fails;
+    nothing is cached then, so the next request walks again.
+    """
+    key = _pr_comments_key(github_repo, number)
+    if not fresh:
+        cached = _cache_get(key, _PR_COMMENTS_TTL)
+        if cached is not None:
+            return cached
+
+    posts_before = _comment_posts
+    result = await _gh_paginate(
+        client,
+        f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
+        _gh_headers(),
+    )
+    if _comment_posts == posts_before:
+        _cache_set(key, result)
+    return result
+
+
 @app.get("/api/{owner}/{repo}/pr/{number}/comments")
 async def pr_comments(
     owner: str, repo: str, number: int,
     path: str = Query(...),
+    fresh: bool = Query(False),
 ):
     """Fetch per-file review comments for a specific file path in a PR."""
     github_repo = f"{owner}/{repo}"
 
     if not GITHUB_TOKEN:
         return {"error": "No GITHUB_TOKEN configured", "comments": [], "truncated": True}
-
-    headers = _gh_headers()
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -861,10 +946,8 @@ async def pr_comments(
             # the handler below answers with the same dict a dedicated catch
             # would have returned — so a dedicated catch is surface no test
             # could tell from its absence.
-            all_comments, truncated = await _gh_paginate(
-                client,
-                f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
-                headers,
+            all_comments, truncated = await _pr_review_comments(
+                client, github_repo, number, fresh=fresh,
             )
 
             file_comments = []
@@ -895,18 +978,15 @@ async def pr_comment_counts(owner: str, repo: str, number: int):
     if not GITHUB_TOKEN:
         return {"counts": {}, "truncated": True}
 
-    headers = _gh_headers()
-
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            # Same walk as ``pr_comments`` and for the same reason: reading
-            # one page undercounted the per-file badges on any pull request
-            # with more than 100 review comments (#22). As there, a failing
-            # page is left to the handler below rather than caught twice.
-            all_comments, truncated = await _gh_paginate(
-                client,
-                f"https://api.github.com/repos/{github_repo}/pulls/{number}/comments",
-                headers,
+            # The same walk as ``pr_comments``, and the same cache entry: the
+            # page load asks for this and for the first file's comments moments
+            # apart. Walked for the reason given there (#22), and as there a
+            # failing page is left to the handler below rather than caught
+            # twice.
+            all_comments, truncated = await _pr_review_comments(
+                client, github_repo, number,
             )
 
             counts: dict[str, int] = {}
@@ -927,6 +1007,7 @@ async def pr_comment_counts(owner: str, repo: str, number: int):
 @app.post("/api/{owner}/{repo}/pr/{number}/comments")
 async def post_pr_comment(owner: str, repo: str, number: int, request: Request):
     """Post a new per-file review comment on a PR."""
+    global _comment_posts
     github_repo = f"{owner}/{repo}"
 
     if not GITHUB_TOKEN:
@@ -969,6 +1050,10 @@ async def post_pr_comment(owner: str, repo: str, number: int, request: Request):
             )
 
             if comment_resp.status_code in (200, 201):
+                # Before anything else can fail: the comment exists on GitHub
+                # now, whatever this handler goes on to do.
+                _comment_posts += 1
+                _cache_drop(_pr_comments_key(github_repo, number))
                 c = comment_resp.json()
                 return {
                     "ok": True,
@@ -1102,11 +1187,10 @@ _OPEN_PULLS_TTL = 60
 # branch gains it. That is a count off by one on a listing page, corrected
 # within the quarter hour.
 #
-# It is not a memory bound either, which is worth saying because the key space
-# is unbounded — one entry per (repo, PR, head SHA), so every push to a watched
-# PR leaves its predecessor behind. Nothing in this module ever deletes a cache
-# key; the TTL governs how long a value is *served*, not how long it is held.
-# Eviction is #44, and is the whole cache's problem rather than this key's.
+# It is not a memory bound either: the key space is one entry per (repo, PR,
+# head SHA), so every push to a watched PR mints a new key. What bounds the
+# memory is the cache's own cap, ``_CACHE_MAX_ENTRIES``, which is the whole
+# cache's business rather than this key's (#44).
 _PR_IMAGE_SUMMARY_TTL = 900
 
 # 1000 open pull requests. Unlike the file list, this is not GitHub's own

@@ -22,6 +22,8 @@ const { extract, bodyOf, stylesheet } = require('./spa_source');
 const dirContextFor = extract('hash-target', 'dirContextFor');
 const dirLabelFor = extract('hash-target', 'dirLabelFor');
 const basenameOf = extract('hash-target', 'basenameOf');
+const basenameIndex = extract('hash-target', 'basenameIndex');
+const rivalsOf = extract('hash-target', 'rivalsOf');
 
 const files = paths => paths.map(p => ({path: p, status: 'modified'}));
 
@@ -266,6 +268,48 @@ assert.strictEqual(
 assert.strictEqual(dirLabelFor('name.png', ROOT_COLLIDING), './');
 assert.strictEqual(dirLabelFor(BASELINES[1].path, BASELINES), null);
 
+// ── The index the sidebar builds once (#52) ─────────────────────────────────
+//
+// renderFileList asks about every row, and rescanning the list for each one
+// made the render quadratic: 1.2s for a 3000-file PR, measured. So it builds
+// basenameIndex once and hands it down. Three properties, each its own check,
+// because each has a mutant the others would let through.
+
+// Handing the index down changes no answer. Run over every fixture in this
+// file, against the answer computed with no index at all.
+for (const list of [BASELINES, SHALLOW, ROOT_COLLIDING, files([
+  'x/a/n.png', 'y/a/n.png', 'a/n.png', 'n.png', 'q/r/s/t.png', 'z/r/s/t.png',
+])]) {
+  const index = basenameIndex(list);
+  for (const img of list) {
+    assert.strictEqual(dirLabelFor(img.path, list, index), dirLabelFor(img.path, list),
+      'the index must not change the label for ' + img.path);
+    assert.strictEqual(dirContextFor(img.path, list, index), dirContextFor(img.path, list),
+      'the index must not change the context for ' + img.path);
+  }
+}
+
+// The index is what is consulted when one is given — not a hint to be
+// ignored while the list is rescanned anyway, which would keep every answer
+// right and the render quadratic. An index that disagrees with the list
+// tells the two apart.
+assert.deepStrictEqual(
+  rivalsOf('a/x.png', [], basenameIndex(files(['a/x.png', 'b/c/x.png']))), [['b', 'c']],
+  'rivalsOf must answer from the index it is given');
+assert.deepStrictEqual(rivalsOf('a/x.png', files(['a/x.png', 'b/x.png']), basenameIndex([])), [],
+  'and must not fall back to scanning the list when the index has no such name');
+
+// A basename is arbitrary text, so the index must not inherit one. With a
+// plain {} as the index, `__proto__` looks up Object.prototype — not an array,
+// so the whole call throws — and `constructor` finds Object.
+{
+  const odd = files(['a/__proto__', 'b/__proto__', 'c/constructor', 'd/toString']);
+  assert.strictEqual(dirContextFor('a/__proto__', odd, basenameIndex(odd)), 'a');
+  assert.strictEqual(dirContextFor('c/constructor', odd, basenameIndex(odd)), null,
+    'a basename nothing else carries must not collide with an inherited key');
+  assert.strictEqual(dirContextFor('d/toString', odd), null);
+}
+
 // ── The rendering ───────────────────────────────────────────────────────────
 //
 // renderFileList is DOM-bound, so it is run rather than read: every name it
@@ -306,10 +350,18 @@ function render(images) {
   fileList.innerHTML = '<li>stale</li>';
   fileList.children.push(element('li'));
 
+  // Both are wrapped, so that the render can be held to building the index
+  // once and handing that same object to every row (#52).
+  const built = [];
+  const handed = [];
+  const countingIndex = list => { const i = basenameIndex(list); built.push(i); return i; };
+  const recordingLabel = (p, list, index) => { handed.push(index); return dirLabelFor(p, list, index); };
+
   new Function(
-    'state', 'fileList', 'document', 'selectFile', 'basenameOf', 'dirLabelFor',
+    'state', 'fileList', 'document', 'selectFile', 'basenameOf', 'dirLabelFor', 'basenameIndex',
     bodyOf('renderFileList') + '\nreturn renderFileList;')(
-      state, fileList, document, p => selected.push(p), basenameOf, dirLabelFor)();
+      state, fileList, document, p => selected.push(p), basenameOf, recordingLabel,
+      countingIndex)();
 
   const rows = fileList.children.map(function(li) {
     const label = li.children.find(c => c.className === 'file-label');
@@ -323,7 +375,18 @@ function render(images) {
       title: label.title,
     };
   });
-  return {rows: rows, selected: selected, fileList: fileList};
+  return {rows: rows, selected: selected, fileList: fileList, built: built, handed: handed};
+}
+
+// The render builds the index once, and every row is labelled from it. Either
+// half alone leaves the render quadratic: an index built per row, or one built
+// once and not passed down, which every row then rebuilds inside rivalsOf.
+{
+  const r = render(BASELINES);
+  assert.strictEqual(r.built.length, 1, 'renderFileList must build the basename index exactly once');
+  assert.strictEqual(r.handed.length, BASELINES.length, 'and label every row');
+  assert.ok(r.handed.every(i => i === r.built[0]),
+    'and hand that one index to every row it labels');
 }
 
 // The issue, as the sidebar shows it: the two colliding rows now read
