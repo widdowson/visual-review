@@ -125,9 +125,15 @@ def test_the_sidebar_lists_every_file(spa_backend, spa_page):
 - `backend.state.hold(kind, path, ref=None)` keeps matching `image` or
   `comments` responses open until `release()`. Use it to order two responses
   rather than a sleep. If the page cancels a held request, the request log
-  records it as aborted without the hold being released.
+  records it as aborted without the hold being released. A hold left
+  unreleased for 60 seconds closes as aborted and fails the test.
 - `spa_page(*init_scripts)` opens a page in a fresh browser context, and fails
   the test if the page throws.
+
+Two things the fixture does not fake yet: every image request answers 200
+with a PNG (there is no way to make one fail, which a rename whose base is
+missing needs), and `POST /comments` is not served. Each is a small addition
+to `tests/fixture_server.py` when a test first needs it.
 
 `tests/test_spa_harness.py` is the smallest worked example, and
 `tests/spa_harness.py` has the instruments the prefetch tests use: the request

@@ -103,8 +103,9 @@ def test_a_held_image_the_page_abandons_is_recorded_as_aborted(spa_backend, spa_
     aborted = wait_until(
         lambda: [r for r in backend.probe.images("file_03") if r["aborted"]],
         "the held file-3 requests to be closed as aborted")
+    # Nothing in this test releases the hold, so these records were closed by
+    # the browser walking away, not by a release racing it.
     assert all(r["held"] for r in aborted), aborted
-    assert not hold.released, "the abort must be seen without releasing the hold"
 
 
 def test_the_knobs_refuse_what_they_cannot_honour():
@@ -113,3 +114,29 @@ def test_the_knobs_refuse_what_they_cannot_honour():
         FixtureState(files=[{"path": "a.png", "status": "modified"}], renamed_index=0)
     with pytest.raises(ValueError, match="hold"):
         FixtureState().hold("checks", "a.png")
+    with pytest.raises(ValueError, match="ref"):
+        FixtureState().hold("comments", "a.png", ref="b" * 40)
+
+
+def test_an_expired_hold_closes_as_aborted_and_is_recorded(spa_backend, spa_page,
+                                                         monkeypatch):
+    """A forgotten hold is a failure of the test, not a delivered transfer.
+
+    The record closes as aborted, so a predicate like `end is not None and not
+    aborted` cannot mistake it for an image that arrived, and the expiry is
+    recorded where spa_backend's teardown fails the test on it. The list is
+    emptied here, after checking it, because expiring is this test's point.
+    """
+    import fixture_server
+    monkeypatch.setattr(fixture_server, "HOLD_TIMEOUT", 0.5)
+    backend = spa_backend(file_count=1)
+    backend.state.hold("image", "shots/file_00.png", ref="b" * 40)
+    page = spa_page()
+    page.goto(backend.pr_url(), wait_until="commit")
+
+    expired = wait_until(
+        lambda: [r for r in backend.probe.images("file_00") if r["timed_out"]],
+        "the held head to expire")
+    assert all(r["aborted"] and r["end"] is not None for r in expired), expired
+    assert backend.state.expired_holds, "the expiry should be recorded for teardown"
+    backend.state.expired_holds.clear()

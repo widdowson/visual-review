@@ -497,5 +497,6 @@ def test_moving_away_mid_warm_keeps_the_half_that_arrived(page, backend):
         f"file 1 should have cost three Image objects -- the warm's pair, then "
         f"one for the head it lost -- but it cost {len(built)}: "
         f"{[[s.split('?', 1)[-1] for s in srcs] for srcs in built]}")
-    bases = [r for r in backend.probe.images(path_of(1)) if r["ref"] == BASE_REF]
-    assert len(bases) == 1, f"file 1's base should have been fetched once: {bases}"
+    # Not also checked through the request log: under the `immutable` header a
+    # rebuilt base is a cache hit that never reaches the fixture, so a count of
+    # base requests reads 1 whether or not the page kept the decoded image.

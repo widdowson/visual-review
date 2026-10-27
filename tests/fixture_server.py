@@ -72,7 +72,10 @@ def png_bytes(seed: int, size: int = 64) -> bytes:
 
 # How long a hold waits for a release before giving up on the test. Long enough
 # that no honest test reaches it, short enough that a test which forgot to
-# release does not leave handler threads parked for the rest of the run.
+# release does not leave handler threads parked for the rest of the run. An
+# expiry closes the record as aborted, never as delivered, and is recorded in
+# FixtureState.expired_holds, which spa_backend's teardown fails the test on:
+# raising in the handler thread would reach only stderr.
 HOLD_TIMEOUT = 60.0
 
 
@@ -125,6 +128,7 @@ class FixtureState:
         self.signed_in_email = signed_in_email
         self.comments = {k: list(v) for k, v in (comments or {}).items()}
         self.holds: list[Hold] = []
+        self.expired_holds: list[str] = []
         self.image_delay = 0.30       # seconds spread across the response body
         # Asked of app.py rather than copied from it. The SPA never displays
         # the Image objects it decodes — every comparison mode builds fresh
@@ -154,7 +158,8 @@ class FixtureState:
 
     def open_record(self, kind: str, **fields) -> dict:
         rec = {"kind": kind, "start": time.monotonic() - self.t0,
-               "end": None, "aborted": False, "held": False, **fields}
+               "end": None, "aborted": False, "held": False,
+               "timed_out": False, **fields}
         with self.lock:
             self.log.append(rec)
         return rec
@@ -172,6 +177,9 @@ class FixtureState:
         """
         if kind not in ("image", "comments"):
             raise ValueError(f"nothing honours a hold on {kind!r}")
+        if kind == "comments" and ref is not None:
+            # The comments endpoint has no ref, so this hold could never match.
+            raise ValueError("a comments hold cannot name a ref")
         h = Hold(kind, path, ref)
         with self.lock:
             self.holds.append(h)
@@ -251,8 +259,11 @@ class Handler(BaseHTTPRequestHandler):
                 if self._client_gone():
                     return False
                 if time.monotonic() > deadline:
-                    raise AssertionError(
-                        f"a {kind} hold on {path} was never released")
+                    with self.state.lock:
+                        rec["timed_out"] = True
+                        self.state.expired_holds.append(
+                            f"a hold on {kind} {path} was never released")
+                    return False
         return True
 
     # ── routes ──────────────────────────────────────────────────────────────

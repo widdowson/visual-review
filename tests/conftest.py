@@ -63,7 +63,9 @@ def spa_backend():
 
     Keyword arguments are FixtureState's. Every hold is released at teardown
     before the server stops, so a test that fails mid-hold does not leave a
-    handler thread parked on it for the rest of the session.
+    handler thread parked on it for the rest of the session. A hold that
+    expired before then fails the test here, since the handler thread that
+    noticed has no way to.
     """
     started = []
 
@@ -77,10 +79,13 @@ def spa_backend():
 
     yield _start
 
+    expired = []
     for httpd, state in started:
         state.release_all()
         httpd.shutdown()
         httpd.server_close()
+        expired.extend(state.expired_holds)
+    assert not expired, f"the test left holds unreleased until they expired: {expired}"
 
 
 # spa_backend is requested only for its teardown order: pytest tears fixtures
