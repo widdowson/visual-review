@@ -985,8 +985,9 @@ async def pr_comment_counts(owner: str, repo: str, number: int):
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             # The same walk as ``pr_comments``, and the same cache entry, so
-            # every file click after the page load is served from this
-            # walk's answer. The page load itself still walks twice: it
+            # a file click within ``_PR_COMMENTS_TTL`` of this walk is served
+            # from its answer, unless it falls in the window after a post,
+            # whose ``fresh=1`` skips the read. The page load itself still walks twice: it
             # sends this and the first file's comments in the same tick, so
             # on a cold entry both miss before either has written. Sharing
             # an in-flight walk would close that, for one walk per page
