@@ -115,13 +115,14 @@ for (let i = 1; i < renders.length; i++) {
 // The badge is keyed on the response's own path, so it is right for whatever
 // file the response is about and is deliberately updated before the guard.
 // Moving it below would silently lose the count for a comment the user posted
-// and then navigated away from.
-const badgeAt = loadComments.indexOf('updateCommentBadge');
+// and then navigated away from. It goes through writeCommentBadge, which
+// orders writes per row (#49); the run further down holds that to behaviour.
+const badgeAt = loadComments.indexOf('writeCommentBadge');
 const guardAt = loadComments.search(/if\s*\(\s*!\s*isCurrent\s*\(\s*\)\s*\)\s*return\s*;/);
 assert.ok(badgeAt > 0, 'loadComments must still update the sidebar badge');
 assert.ok(guardAt > 0, 'loadComments must guard on isCurrent()');
 assert.ok(badgeAt < guardAt,
-  'updateCommentBadge must run before the freshness guard: its row is chosen by the ' +
+  'writeCommentBadge must run before the freshness guard: its row is chosen by the ' +
   "response's own path, so it is correct for a file that is no longer on screen");
 
 // The spinner is written only by the load that owns the pane. Writing it from
@@ -198,4 +199,195 @@ assert.ok(/spinner/.test(guarded),
 assert.ok(/commentsSection\s*\.\s*style\s*\.\s*display\s*=/.test(guarded),
   'revealing the pane belongs inside the ownedPane block too');
 
-console.log('comments freshness: all assertions passed');
+// ── The badge, per file (#49) ───────────────────────────────────────────────
+//
+// The pane's guard orders loads of the pane; the badge is per file and needs
+// its own order. The predicate first, then the real loadComments,
+// loadCommentCounts and writeCommentBadge run against stubs, because the bug
+// is an interleaving of responses and only a run can produce one.
+
+const commentBadgeWriteIsNewer = extract('comment-badge', 'commentBadgeWriteIsNewer');
+
+assert.strictEqual(commentBadgeWriteIsNewer(1, undefined), true,
+  'the first write to a row must apply');
+assert.strictEqual(commentBadgeWriteIsNewer(5, 4), true, 'a later-started write must apply');
+assert.strictEqual(commentBadgeWriteIsNewer(4, 5), false,
+  'an earlier-started write landing late must not replace a later one');
+assert.strictEqual(commentBadgeWriteIsNewer(5, 5), false,
+  'nor may one write apply twice');
+for (const value of [undefined, null, '6', NaN]) {
+  assert.strictEqual(commentBadgeWriteIsNewer(value, 4), false,
+    'an unnumbered write must be refused, got ' + String(value));
+  assert.strictEqual(commentBadgeWriteIsNewer(value, undefined), false,
+    'even on a row nothing has written to, got ' + String(value));
+}
+
+// The harness. Every fetch is held until the case resolves it, so a case can
+// land responses in whatever order the bug needs. The declarations the three
+// functions close over are lifted from the SPA's own source rather than
+// re-declared here, so their starting values are the shipped ones too.
+function harness(currentFile) {
+  const script = require('./spa_source').scriptSource();
+  const decl = name => {
+    const m = new RegExp('var\\s+' + name + '\\s*=[^;]*;').exec(script);
+    assert.ok(m, 'static/index.html must declare ' + name);
+    return m[0];
+  };
+  const pending = [];
+  const badges = {};
+  const urls = [];
+  const fetch = url => new Promise(resolve => {
+    urls.push(url);
+    pending.push({ url, answer: data => resolve({ json: () => data }) });
+  });
+  const el = () => ({ style: {}, innerHTML: '' });
+  const clock = { now: 1000000 };
+  const make = new Function(
+    'state', 'commentsSection', 'commentsScroll', 'apiBase', 'fetch', 'renderComments',
+    'commentsResponseIsCurrent', 'commentBadgeWriteIsNewer', 'updateCommentBadge', 'Date',
+    [decl('commentBadgeSequence'), decl('commentBadgeApplied'), decl('commentsGeneration'),
+      decl('COMMENTS_FRESH_WINDOW_MS'), decl('commentsFreshUntil'),
+      bodyOf('writeCommentBadge'), bodyOf('loadComments'), bodyOf('loadCommentCounts'),
+      // What the post handler does on success, taken from its own source
+      // below rather than restated here.
+      'function posted() { ' + postedStatement + ' }',
+      'return { loadComments: loadComments, loadCommentCounts: loadCommentCounts, ' +
+      'posted: posted, window: COMMENTS_FRESH_WINDOW_MS };'].join('\n'));
+  const fns = make({ currentFile }, el(), el(), '/api', fetch, () => {},
+    commentsResponseIsCurrent, commentBadgeWriteIsNewer,
+    (path, count) => { badges[path] = count; }, { now: () => clock.now });
+  const settle = () => new Promise(r => setImmediate(r));
+  return Object.assign(fns, { pending, badges, urls, settle, clock });
+}
+
+// The statement the post handler runs on success to open the fresh window,
+// lifted from renderComments, and required to come before its reload so that
+// the reload is inside the window.
+const postBody = bodyOf('renderComments');
+const postedMatch = /commentsFreshUntil\s*=\s*Date\s*\.\s*now\s*\(\s*\)\s*\+\s*COMMENTS_FRESH_WINDOW_MS\s*;/.exec(postBody);
+assert.ok(postedMatch, 'a successful post must open the fresh window');
+const postedStatement = postedMatch[0];
+assert.ok(postBody.indexOf(postedStatement) < postBody.search(/loadComments\s*\(\s*path\s*\)/),
+  'the window must open before the reload after a post, or that reload is outside it');
+
+// The window has to cover the server's whole TTL: short of it, another
+// instance's list from before the post can still be served once the window has
+// closed. Covering the TTL is not quite a guarantee either — see the comment on
+// COMMENTS_FRESH_WINDOW_MS for the one walk's duration it leaves.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const runfiles = process.env.RUNFILES_DIR || '';
+  const appPy = fs.readFileSync(runfiles
+    ? path.join(runfiles, '_main', 'app.py')
+    : path.join(__dirname, '..', 'app.py'), 'utf8');
+  const ttl = /^_PR_COMMENTS_TTL\s*=\s*(\d+)\s*$/m.exec(appPy);
+  assert.ok(ttl, 'app.py must define _PR_COMMENTS_TTL as a whole number of seconds');
+  const windowMs = Number(/var\s+COMMENTS_FRESH_WINDOW_MS\s*=\s*(\d+)\s*;/
+    .exec(require('./spa_source').scriptSource())[1]);
+  assert.strictEqual(windowMs, Number(ttl[1]) * 1000,
+    'COMMENTS_FRESH_WINDOW_MS must equal _PR_COMMENTS_TTL');
+}
+
+const page = n => ({ comments: Array.from({ length: n }, (_, i) => ({ id: i })) });
+
+(async () => {
+  // The issue's interleaving: the initial load is slow, a post reloads the
+  // file and answers 5, then the initial load lands with 4. The badge must
+  // stay at 5.
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.loadComments('a.png');
+    h.pending[1].answer(page(5));
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5);
+    h.pending[0].answer(page(4));
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5,
+      'a slow older answer must not put the badge back to the count before the post');
+  }
+
+  // In order, the later answer still wins, so ordering is by start and not by
+  // a flag that only ever lets the first write through.
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.pending[0].answer(page(4));
+    await h.settle();
+    h.loadComments('a.png');
+    h.pending[1].answer(page(5));
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5, 'a newer answer must replace an older one');
+  }
+
+  // The order is per row. A load for b.png started after a.png's must not
+  // block a.png's answer, which a single counter shared by every row would.
+  {
+    const h = harness('b.png');
+    h.loadComments('a.png');
+    h.loadComments('b.png');
+    h.pending[1].answer(page(2));
+    h.pending[0].answer(page(3));
+    await h.settle();
+    assert.deepStrictEqual(h.badges, { 'a.png': 3, 'b.png': 2 },
+      'each row must take its own newest answer');
+  }
+
+  // The page-load tally is a badge write too. A comment posted while it is in
+  // flight produces a newer count, and the tally landing after must not
+  // overwrite it — but must still fill every row the load did not reach.
+  {
+    const h = harness('a.png');
+    h.loadCommentCounts();
+    h.loadComments('a.png');
+    h.pending[1].answer(page(5));
+    await h.settle();
+    h.pending[0].answer({ counts: { 'a.png': 4, 'b.png': 7 } });
+    await h.settle();
+    assert.deepStrictEqual(h.badges, { 'a.png': 5, 'b.png': 7 },
+      'the tally must not overwrite a newer per-file count, and must fill the rest');
+  }
+
+  // Loads ask the server to skip its cache for one TTL after a post, and only
+  // then. Not only the reload: clicking away and back inside the window can
+  // reach an instance holding the pre-post list, which would take the comment
+  // out of the pane and the badge back to the old count (round 1, Minor 1).
+  // Outside the window loads may be answered from the cache, which is the
+  // point of having one (#50).
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.posted();
+    h.loadComments('a.png');
+    h.loadComments('b.png');
+    h.clock.now += h.window - 1;
+    h.loadComments('a.png');
+    h.clock.now += 1;
+    h.loadComments('a.png');
+    assert.deepStrictEqual(h.urls, [
+      '/api/comments?path=a.png',
+      '/api/comments?path=a.png&fresh=1',
+      '/api/comments?path=b.png&fresh=1',
+      '/api/comments?path=a.png&fresh=1',
+      '/api/comments?path=a.png',
+    ]);
+  }
+
+  // The tally takes a sequence number of its own. Sharing the last load's
+  // would tie with it, and a tie is refused, so a tally started after that
+  // load and holding a newer count would leave the older one showing.
+  {
+    const h = harness('a.png');
+    h.loadComments('a.png');
+    h.pending[0].answer(page(4));
+    await h.settle();
+    h.loadCommentCounts();
+    h.pending[1].answer({ counts: { 'a.png': 5 } });
+    await h.settle();
+    assert.strictEqual(h.badges['a.png'], 5,
+      'a tally started after a load must replace that load\'s count');
+  }
+
+  console.log('comments freshness: all assertions passed');
+})().catch(err => { console.error(err); process.exit(1); });

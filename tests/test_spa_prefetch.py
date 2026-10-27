@@ -28,8 +28,13 @@ passes there and fails here. Where a test was checked against a named mutant,
 that mutant is recorded in its own docstring rather than tallied here; a count
 in this docstring would go stale the next time one is added, and did.
 
-Two things on #21's list remain: `cancelPrefetches` keeping the half of a pair
-that already arrived, and the `pendingLoad` clear in `checkReady`.
+Every item on #21's list is covered here but one, the `pendingLoad` clear in
+`checkReady`, which is unobservable rather than untested: removing it changes
+nothing the page can do, for the reason given beside it in static/index.html.
+That was checked rather than reasoned about. A probe in its place that threw if
+any image in `pendingLoad` was incomplete, or belonged to another path, stayed
+silent across this file and the chip tests three times over, while a control
+that threw whenever `pendingLoad` was set there fired 18 times in one run.
 """
 
 import json
@@ -40,12 +45,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fixture_server import BASE_REF, HEAD_REF, serve  # noqa: E402
+from fixture_server import BASE_REF, HEAD_REF  # noqa: E402
 from spa_harness import (  # noqa: E402
-    IMAGE_COUNTER, LOAD_COUNTER, SLOW_IMAGE, Probe, active_path,
-    constructed_images, find_chromium, index_html_path, issued_requests,
-    load_starts, prefetch_tuning, rendered_image_count, repo_root,
-    wait_until,
+    IMAGE_COUNTER, LOAD_COUNTER, SLOW_IMAGE, active_path,
+    constructed_images, issued_requests, load_starts, prefetch_tuning,
+    rendered_image_count, repo_root, wait_until,
 )
 
 TUNING = prefetch_tuning()
@@ -112,53 +116,29 @@ def test_the_browser_build_matches_the_playwright_pin():
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="module")
-def base_url():
-    httpd, state = serve(FILE_COUNT, index_html_path(), renamed_index=RENAMED_INDEX)
-    state.image_delay = SLOW_IMAGE
-    yield f"http://127.0.0.1:{httpd.server_address[1]}"
-    httpd.shutdown()
+# The shared fixtures (browser, spa_backend, spa_page) are in conftest.py.
+# These three adapt them to the shape every test below was written against.
 
-
-@pytest.fixture(scope="module")
-def browser():
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as pw:
-        kwargs = {"headless": True}
-        chromium = find_chromium()
-        if chromium:
-            kwargs["executable_path"] = chromium
-        b = pw.chromium.launch(**kwargs)
-        yield b
-        b.close()
+@pytest.fixture
+def backend(spa_backend):
+    b = spa_backend(file_count=FILE_COUNT, renamed_index=RENAMED_INDEX)
+    b.state.image_delay = SLOW_IMAGE
+    return b
 
 
 @pytest.fixture
-def page(browser):
-    # A fresh context per test: the point of several of these is what the page
-    # kept in memory, and a shared context would carry it between them.
-    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
-    p = ctx.new_page()
-    p.add_init_script(LOAD_COUNTER)
-    p.add_init_script(IMAGE_COUNTER)
-    # The order the renderer issued requests in. The fixture cannot answer
-    # that: its `start` is stamped inside a ThreadingHTTPServer handler
-    # thread, so four near-simultaneous requests are ordered by the OS
-    # scheduler and a sub-millisecond margin means nothing.
-    p.vr_requests = []
-    p.on("request", lambda r: p.vr_requests.append(r.url))
-    errors = []
-    p.on("pageerror", lambda e: errors.append(str(e)))
-    yield p
-    ctx.close()
-    assert not errors, f"the page threw: {errors}"
+def base_url(backend):
+    return backend.url
 
 
 @pytest.fixture
-def probe(base_url):
-    pr = Probe(base_url)
-    pr.reset()
-    return pr
+def page(spa_page):
+    return spa_page(LOAD_COUNTER, IMAGE_COUNTER)
+
+
+@pytest.fixture
+def probe(backend):
+    return backend.probe
 
 
 def open_pr(page, base_url: str, hash_suffix: str = "") -> None:
@@ -461,3 +441,62 @@ def test_an_in_flight_prefetch_is_adopted_rather_than_restarted(page, probe, bas
         f"the page should have built one pair of Image objects for file 1, the "
         f"pair the prefetch started, but it built {len(built)}: "
         f"{[[s.split('?', 1)[-1] for s in srcs] for srcs in built]}")
+
+
+def test_moving_away_mid_warm_keeps_the_half_that_arrived(page, backend):
+    """An abandoned warm aborts the side still in flight and keeps the other.
+
+    `cancelPrefetches` runs on every selection. For a warm that had half
+    landed, it drops only the side that was still loading, so coming back to
+    that file reuses the decoded half and fetches the other. Built objects are
+    the instrument, as for adoption above: 3 for file 1 when the arrived half
+    is kept (the warm's pair, then one fresh image for the side that was
+    aborted), 4 when the whole entry is thrown away.
+
+    The interleaving is driven by holds rather than timing. File 1's head is
+    held so that its base can land while the head is provably still open, and
+    file 3 is held whole so that it never renders: a render would run the
+    prefetch plan, whose eviction could drop file 1 for a reason that has
+    nothing to do with `cancelPrefetches`. File 3 rather than file 2 because
+    file 2 is next to file 1 and would be warmed on arrival back there.
+
+    Mutant: `if (entry) delete state.imageCache[path]` in place of the
+    both-sides-gone check, which is the "drop the whole pair" shape — RED at 4.
+    """
+    state = backend.state
+    held_head = state.hold("image", path_of(1), ref=HEAD_REF)
+    state.hold("image", path_of(3))
+
+    open_pr(page, backend.url)
+    assert active_path(page) == path_of(0)
+
+    def base_landed():
+        return [r for r in backend.probe.images(path_of(1))
+                if r["ref"] == BASE_REF and r["end"] is not None and not r["aborted"]]
+
+    wait_until(base_landed, "file 1's base to be warmed and delivered")
+    wait_until(held_head.reached.is_set, "file 1's head to be requested and held")
+
+    page.click(f'.file-item[data-path="{path_of(3)}"]')
+    wait_until(lambda: active_path(page) == path_of(3), "file 3 to be selected")
+
+    # The abort is the half being let go of, and seeing it is what makes this
+    # a test of the in-flight branch: if the head had somehow landed first,
+    # both halves would be kept for the honest reason and 3 would read as 2.
+    wait_until(lambda: any(r["ref"] == HEAD_REF and r["aborted"]
+                           for r in backend.probe.images(path_of(1))),
+               "the move away to abort file 1's held head")
+
+    held_head.release()
+    page.click(f'.file-item[data-path="{path_of(1)}"]')
+    wait_until(lambda: active_path(page) == path_of(1), "file 1 to be selected")
+    wait_until(lambda: rendered_image_count(page) == 2, "file 1 to render")
+
+    built = constructed_images(page, "file_01.png")
+    assert len(built) == 3, (
+        f"file 1 should have cost three Image objects -- the warm's pair, then "
+        f"one for the head it lost -- but it cost {len(built)}: "
+        f"{[[s.split('?', 1)[-1] for s in srcs] for srcs in built]}")
+    # Not also checked through the request log: under the `immutable` header a
+    # rebuilt base is a cache hit that never reaches the fixture, so a count of
+    # base requests reads 1 whether or not the page kept the decoded image.

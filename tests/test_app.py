@@ -16,6 +16,7 @@ from httpx import ASGITransport, AsyncClient
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import app, _cache, _resolve_repo, _base36_decode, _base36_encode, _mime_for_path, _image_cache_control, _is_safe_image_path, _EXT_MIME, IMAGE_EXTENSIONS, _is_image_path, _gh_paginate, _GitHubError, _GH_PAGE_SIZE, _GH_MAX_PAGES, _PR_PROBE_CONCURRENCY, _OPEN_PULLS_MAX_PAGES, _pr_image_summary
+import app as app_module
 
 
 @pytest.fixture(autouse=True)
@@ -3549,3 +3550,305 @@ class TestStaticMount:
         mounts = [r for r in app.routes if isinstance(getattr(r, "app", None), StaticFiles)]
         assert len(mounts) == 1
         assert mounts[0].app.follow_symlink is True
+
+
+class TestCacheIsBounded:
+    """#44: nothing ever deleted a key, so every push leaked an entry."""
+
+    def test_writes_past_the_cap_evict_the_least_recently_used(self):
+        """The shape that leaked: a stream of keys nobody asks for again."""
+        with patch("app._CACHE_MAX_ENTRIES", 3):
+            for sha in "abcde":
+                app_module._cache_set(f"pr_images:o/r:1:{sha}", sha)
+            assert list(_cache) == ["pr_images:o/r:1:c", "pr_images:o/r:1:d", "pr_images:o/r:1:e"]
+
+    def test_a_read_counts_as_use(self):
+        """Least recently *used*, not least recently written.
+
+        Without the refresh on read, a key served on every request would be
+        evicted as soon as enough others had been written after it — which is
+        the busiest entry going first.
+        """
+        with patch("app._CACHE_MAX_ENTRIES", 2):
+            app_module._cache_set("hot", 1)
+            app_module._cache_set("cold", 2)
+            assert app_module._cache_get("hot", 60) == 1
+            app_module._cache_set("new", 3)
+            assert set(_cache) == {"hot", "new"}
+
+    def test_an_expired_read_deletes_the_entry(self):
+        """A TTL that only gates serving held the value for ever."""
+        app_module._cache_set("k", "v")
+        with patch("app.time.time", return_value=app_module.time.time() + 61):
+            assert app_module._cache_get("k", 60) is None
+        assert "k" not in _cache
+
+    def test_a_fresh_read_keeps_the_entry(self):
+        app_module._cache_set("k", "v")
+        assert app_module._cache_get("k", 60) == "v"
+        assert "k" in _cache
+
+    def test_rewriting_a_key_does_not_grow_the_cache(self):
+        with patch("app._CACHE_MAX_ENTRIES", 2):
+            for _ in range(5):
+                app_module._cache_set("same", 1)
+            assert len(_cache) == 1
+
+    def test_rewriting_a_key_counts_as_use(self):
+        """A rewrite moves the key to the newest end, as a read does.
+
+        A ``fresh`` walk overwrites a list that is still cached; without the
+        move it would keep its old place and the newest value of a key would
+        be the first evicted.
+        """
+        with patch("app._CACHE_MAX_ENTRIES", 2):
+            app_module._cache_set("old", 1)
+            app_module._cache_set("other", 2)
+            app_module._cache_set("old", 3)
+            app_module._cache_set("new", 4)
+            assert set(_cache) == {"old", "new"}
+            assert _cache["old"][1] == 3
+
+    def test_the_shipped_cap_is_finite(self):
+        """Asserted because every case above patches it."""
+        assert 0 < app_module._CACHE_MAX_ENTRIES < 10_000
+
+
+def _review_client(comments, post_status=201, posted=None):
+    """A GitHub stand-in whose comment list a successful POST appends to.
+
+    ``walks`` counts walks of pulls/{n}/comments, by counting requests for
+    page 1, so a cached answer shows up as a walk that did not happen.
+    """
+    state = {"comments": list(comments), "walks": 0}
+
+    async def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/comments"):
+            page = kwargs.get("params", {}).get("page")
+            if page == 1:
+                state["walks"] += 1
+            resp.status_code = 200
+            start = (page - 1) * _GH_PAGE_SIZE
+            resp.json.return_value = state["comments"][start:start + _GH_PAGE_SIZE]
+            return resp
+        resp.status_code = 200
+        resp.json.return_value = {"head": {"sha": "abc123"}}
+        return resp
+
+    async def mock_post(url, json=None, **kwargs):
+        resp = MagicMock()
+        resp.status_code = post_status
+        if post_status in (200, 201):
+            c = {
+                "id": 1000 + len(state["comments"]),
+                "body": json["body"],
+                "user": {"login": "me"},
+                "created_at": "2026-01-02T00:00:00Z",
+                "path": json["path"],
+                "html_url": "http://gh/comment/new",
+            }
+            state["comments"].append(c)
+            resp.json.return_value = c
+        else:
+            resp.text = "nope"
+        return resp
+
+    instance = AsyncMock()
+    instance.get = mock_get
+    instance.post = mock_post
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=False)
+    instance.state = state
+    return instance
+
+
+class TestReviewCommentsCache:
+    """#50: the comments walk ran in full on every file click."""
+
+    async def _run(self, instance, *calls):
+        out = []
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                for method, url, *body in calls:
+                    if method == "GET":
+                        out.append((await ac.get(url)).json())
+                    else:
+                        out.append((await ac.post(url, json=body[0])).json())
+        return out
+
+    @pytest.mark.asyncio
+    async def test_clicking_through_files_walks_once(self):
+        instance = _review_client(
+            _comment_pages(150, path="a.png")[0] + _comment_pages(100, path="b.png", start=150)[0]
+        )
+        a, b, a_again = await self._run(
+            instance,
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+            ("GET", "/api/o/r/pr/1/comments?path=b.png"),
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+        )
+        assert instance.state["walks"] == 1
+        assert len(a["comments"]) == 100 and len(b["comments"]) == 100
+        assert a_again == a
+
+    @pytest.mark.asyncio
+    async def test_comment_counts_shares_the_walk(self):
+        """The page load asks for both moments apart, for the same list."""
+        instance = _review_client(_comment_pages(3, path="a.png")[0])
+        counts, comments = await self._run(
+            instance,
+            ("GET", "/api/o/r/pr/1/comment-counts"),
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+        )
+        assert instance.state["walks"] == 1
+        assert counts["counts"] == {"a.png": 3}
+        assert len(comments["comments"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_post_makes_the_next_read_see_the_new_comment(self):
+        """The regression a cache here invites: post, and watch it not appear."""
+        instance = _review_client(_comment_pages(4, path="a.png")[0])
+        before, posted, after, counts = await self._run(
+            instance,
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+            ("POST", "/api/o/r/pr/1/comments", {"path": "a.png", "body": "fifth"}),
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+            ("GET", "/api/o/r/pr/1/comment-counts"),
+        )
+        assert posted["ok"] is True
+        assert len(before["comments"]) == 4
+        assert [c["body"] for c in after["comments"]][-1] == "fifth"
+        assert counts["counts"] == {"a.png": 5}
+        assert instance.state["walks"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_post_drops_only_its_own_pr(self):
+        instance = _review_client(_comment_pages(1, path="a.png")[0])
+        await self._run(
+            instance,
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+            ("GET", "/api/o/r/pr/2/comments?path=a.png"),
+            ("POST", "/api/o/r/pr/1/comments", {"path": "a.png", "body": "x"}),
+        )
+        assert "pr_comments:o/r:1" not in _cache
+        assert "pr_comments:o/r:2" in _cache
+
+    @pytest.mark.asyncio
+    async def test_a_refused_post_leaves_the_cache_alone(self):
+        instance = _review_client(_comment_pages(1, path="a.png")[0], post_status=422)
+        _, posted = await self._run(
+            instance,
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+            ("POST", "/api/o/r/pr/1/comments", {"path": "a.png", "body": "x"}),
+        )
+        assert "error" in posted
+        assert "pr_comments:o/r:1" in _cache
+
+    @pytest.mark.asyncio
+    async def test_fresh_skips_the_cached_list(self):
+        """The reload after a post may reach an instance the POST did not.
+
+        A drop is local to one process, so the SPA asks for ``fresh`` there.
+        Seeded here as another instance's stale copy would be: a cached list
+        that does not have the comment GitHub now does.
+        """
+        instance = _review_client(_comment_pages(2, path="a.png")[0])
+        stale = (_comment_pages(1, path="a.png")[0], False)
+        app_module._cache_set("pr_comments:o/r:1", stale)
+        cached, fresh, after = await self._run(
+            instance,
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+            ("GET", "/api/o/r/pr/1/comments?path=a.png&fresh=1"),
+            ("GET", "/api/o/r/pr/1/comments?path=a.png"),
+        )
+        assert len(cached["comments"]) == 1
+        assert len(fresh["comments"]) == 2
+        assert len(after["comments"]) == 2, "a fresh walk must still refill the cache"
+        assert instance.state["walks"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_cache_expires(self):
+        instance = _review_client(_comment_pages(1, path="a.png")[0])
+        await self._run(instance, ("GET", "/api/o/r/pr/1/comments?path=a.png"))
+        later = app_module.time.time() + app_module._PR_COMMENTS_TTL + 1
+        with patch("app.time.time", return_value=later):
+            await self._run(instance, ("GET", "/api/o/r/pr/1/comments?path=a.png"))
+        assert instance.state["walks"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_failed_walk_is_not_cached(self):
+        instance = _comment_client(_comment_pages(250), status_by_page={2: 502})
+        first, = await self._run(instance, ("GET", "/api/o/r/pr/1/comments?path=test.png"))
+        assert "error" in first
+        assert "pr_comments:o/r:1" not in _cache
+
+    @pytest.mark.asyncio
+    async def test_a_walk_overtaken_by_a_post_is_not_cached(self):
+        """A walk that read the list before a post must not outlive the post.
+
+        The post drops the entry; if a walk that began before it then cached
+        what it read, the pre-post list would be served for a whole TTL.
+        """
+        real = app_module._gh_paginate
+
+        async def overtaken(*args, **kwargs):
+            result = await real(*args, **kwargs)
+            app_module._comment_posts += 1  # a POST lands while this walk runs
+            return result
+
+        instance = _review_client(_comment_pages(1, path="a.png")[0])
+        with patch("app._gh_paginate", overtaken):
+            await self._run(instance, ("GET", "/api/o/r/pr/1/comments?path=a.png"))
+        assert "pr_comments:o/r:1" not in _cache
+
+        await self._run(instance, ("GET", "/api/o/r/pr/1/comments?path=a.png"))
+        assert "pr_comments:o/r:1" in _cache, "an undisturbed walk must still be cached"
+
+    @pytest.mark.asyncio
+    async def test_a_post_during_a_walk_keeps_that_walk_out_of_the_cache(self):
+        """The same race through the endpoints, so the counter's writer is pinned.
+
+        The case above bumps the counter itself, so it holds the check and not
+        the increment in ``post_pr_comment``. Here a GET's walk is held open on
+        its first page while a POST goes through, then let finish.
+        """
+        instance = _review_client(_comment_pages(1, path="a.png")[0])
+        plain_get = instance.get
+        gate = asyncio.Event()
+        held = asyncio.Event()
+
+        async def held_get(url, **kwargs):
+            if url.endswith("/comments") and not held.is_set():
+                held.set()
+                resp = await plain_get(url, **kwargs)
+                await gate.wait()
+                return resp
+            return await plain_get(url, **kwargs)
+
+        instance.get = held_get
+        with (
+            patch("app.GITHUB_TOKEN", "fake-token"),
+            patch("httpx.AsyncClient") as MockClient,
+        ):
+            MockClient.return_value = instance
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                async def post_then_release():
+                    await held.wait()
+                    resp = await ac.post("/api/o/r/pr/1/comments", json={"path": "a.png", "body": "x"})
+                    gate.set()
+                    return resp
+
+                stale, posted = await asyncio.gather(
+                    ac.get("/api/o/r/pr/1/comments?path=a.png"), post_then_release(),
+                )
+                assert posted.json()["ok"] is True
+                assert len(stale.json()["comments"]) == 1, "the walk read the list from before the post"
+                after = (await ac.get("/api/o/r/pr/1/comments?path=a.png")).json()
+        assert len(after["comments"]) == 2, "the pre-post list must not have been cached"

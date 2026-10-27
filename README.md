@@ -105,6 +105,53 @@ To poke at the fixture by hand, serve it and open the URL it prints:
 python3 tests/fixture_server.py
 ```
 
+#### Writing a browser test
+
+A new one is a test file and three lines of `BUILD.bazel`:
+
+```starlark
+spa_browser_test(
+    name = "test_spa_sidebar",
+    srcs = ["tests/test_spa_sidebar.py"],
+)
+```
+
+`spa_browser_test` (in `browser_test.bzl`) adds the shared harness, the
+hermetic browser and `static/index.html` as an input, so an edit to the page
+re-runs the test rather than taking a cache hit. The test itself uses three
+fixtures from `tests/conftest.py`:
+
+```python
+def test_the_sidebar_lists_every_file(spa_backend, spa_page):
+    backend = spa_backend(files=[{"path": "docs/a.png", "status": "added"}],
+                          comments={"docs/a.png": [...]})
+    hold = backend.state.hold("comments", "docs/a.png")   # held until released
+    page = spa_page()                                      # fresh context
+    page.goto(backend.pr_url(), wait_until="load")
+    ...
+    hold.release()
+```
+
+- `spa_backend(**kwargs)` starts the fake backend. `files` replaces the
+  generated file list and `comments` gives each path its own thread; with
+  neither it serves three generated files and no comments.
+- `backend.state.hold(kind, path, ref=None)` keeps matching `image` or
+  `comments` responses open until `release()`. Use it to order two responses
+  rather than a sleep. If the page cancels a held request, the request log
+  records it as aborted without the hold being released. A hold left
+  unreleased for 60 seconds closes as aborted and fails the test.
+- `spa_page(*init_scripts)` opens a page in a fresh browser context, and fails
+  the test if the page throws.
+
+Two things the fixture does not fake yet: every image request answers 200
+with a PNG (there is no way to make one fail, which a rename whose base is
+missing needs), and `POST /comments` is not served. Each is a small addition
+to `tests/fixture_server.py` when a test first needs it.
+
+`tests/test_spa_harness.py` is the smallest worked example, and
+`tests/spa_harness.py` has the instruments the prefetch tests use: the request
+log (`backend.probe`), and counters for load starts and `Image` constructions.
+
 ### Google Cloud Run
 
 The app is stateless and scales to zero, making Cloud Run an ideal deployment target — you only pay when someone is actively reviewing a PR.
@@ -167,7 +214,7 @@ deployment holding one.
 |--------|------|-------------|
 | GET | `/api/{owner}/{repo}/pr/{number}/images` | List changed PNG files in the PR |
 | GET | `/api/{owner}/{repo}/pr/{number}/image?path=...&ref=...` | Proxy image content from a git ref |
-| GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file |
+| GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file. The PR's comment list is cached for 30s and dropped by a POST; `&fresh=1` skips the cached copy, which the SPA sends for 30s after it posts |
 | POST | `/api/{owner}/{repo}/pr/{number}/comments` | Post a review comment on a file |
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
 | GET | `/api/{owner}/{repo}/pr/{number}/checks` | Combined CI status for the PR's head commit |

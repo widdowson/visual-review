@@ -787,6 +787,9 @@
         // -- Render sidebar file list --
         function renderFileList() {
             fileList.innerHTML = '';
+            // Built once for the whole list rather than rescanned per row,
+            // which made this render quadratic in the file count (#52).
+            var byBasename = basenameIndex(state.images);
             state.images.forEach(function(img) {
                 var li = document.createElement('li');
                 li.className = 'file-item';
@@ -812,7 +815,7 @@
                 fname.textContent = basenameOf(img.path);
                 label.appendChild(fname);
 
-                var dirLabel = dirLabelFor(img.path, state.images);
+                var dirLabel = dirLabelFor(img.path, state.images, byBasename);
                 if (dirLabel !== null) {
                     var dir = document.createElement('span');
                     dir.className = 'file-dir';
@@ -895,19 +898,39 @@
         }
 
         // The other files in `images` that carry `path`'s basename, as their
-        // directory segments. One scan serves both halves: the hash asks
+        // directory segments. One predicate serves both halves: the hash asks
         // whether there are any, the sidebar asks what tells them apart, and
-        // writing that predicate twice is how the two could come to disagree
-        // about which files collide.
-        function rivalsOf(path, images) {
-            var name = basenameOf(path);
+        // writing it twice is how the two could come to disagree about which
+        // files collide.
+        //
+        // `index` is basenameIndex(images), for a caller asking about every
+        // file in the list: the sidebar does, and building it per row made
+        // its render quadratic (#52). Leaving it out builds it here, which is
+        // the same answer from the same scan, so there is still only one
+        // place that decides what a collision is.
+        function rivalsOf(path, images, index) {
+            var group = (index || basenameIndex(images))[basenameOf(path)] || [];
             var rivals = [];
-            for (var i = 0; i < images.length; i++) {
-                if (images[i].path !== path && basenameOf(images[i].path) === name) {
-                    rivals.push(dirSegmentsOf(images[i].path));
-                }
+            for (var i = 0; i < group.length; i++) {
+                if (group[i].path !== path) rivals.push(group[i].segments);
             }
             return rivals;
+        }
+
+        // Every file in `images`, grouped by basename, with its directory
+        // segments split once. A prototype-less object, because a basename is
+        // arbitrary text and `constructor` or `__proto__` must not find an
+        // inherited value.
+        function basenameIndex(images) {
+            var index = Object.create(null);
+            for (var i = 0; i < images.length; i++) {
+                var name = basenameOf(images[i].path);
+                (index[name] || (index[name] = [])).push({
+                    path: images[i].path,
+                    segments: dirSegmentsOf(images[i].path),
+                });
+            }
+            return index;
         }
 
         // The index `target` names, or -1. A whole path is matched before any
@@ -974,9 +997,9 @@
         // `a/b/c/name.png`, where every run the shallower one can try is
         // shared. Its whole directory is the answer there, which still reads
         // differently from the deeper file's.
-        function dirContextFor(path, images) {
+        function dirContextFor(path, images, index) {
             var own = dirSegmentsOf(path);
-            var rivals = rivalsOf(path, images);
+            var rivals = rivalsOf(path, images, index);
             if (!rivals.length) return null;
 
             for (var take = 1; take <= own.length; take++) {
@@ -1010,8 +1033,8 @@
         // the reader to read every other row that way. So a whole directory
         // prints as itself, a tail of one is marked with a leading ellipsis,
         // and the repository root is './'.
-        function dirLabelFor(path, images) {
-            var context = dirContextFor(path, images);
+        function dirLabelFor(path, images, index) {
+            var context = dirContextFor(path, images, index);
             if (context === null) return null;
             if (context === '') return './';
             var own = dirSegmentsOf(path).join('/');
@@ -1465,6 +1488,13 @@
                 if (baseReady && headReady) {
                     // Nothing is in flight any more, so the name means what it
                     // says and a later cancel cannot reach these images.
+                    //
+                    // No test can see this line, and none should try: every
+                    // image in pendingLoad is complete by now, and abortImage
+                    // returns early on a complete image, so a stale pendingLoad
+                    // would be cancelled to no effect. It is kept because it is
+                    // what makes that true by construction rather than by
+                    // abortImage's guard alone (#21).
                     if (pendingLoad && pendingLoad.path === path) pendingLoad = null;
                     viewport.classList.remove('loading');
                     renderComparison();
@@ -2515,6 +2545,62 @@
         }
         // ── comments-freshness:end ──────────────────────────────────────────
 
+        // ── comment-badge:begin ─────────────────────────────────────────────
+        // Pure: may a badge write that was started at `sequence` replace the
+        // one already applied to that row, started at `applied`? Extracted
+        // and run by tests/test_comments_freshness.js.
+        //
+        // The pane's guard above cannot answer this. It orders loads of the
+        // *pane*, and the badge is per file: posting a comment reloads that
+        // file's comments while the initial load may still be open, and with
+        // one counter the badge took whichever answer landed last, so a slow
+        // older answer could put the count back to what it was before the post
+        // (#49). So each row remembers the sequence number of the write it
+        // shows, and only a write started later replaces it. Started, not
+        // landed: a request that went out later read a list at least as new.
+        //
+        // `applied` is absent for a row no write has reached yet, and any
+        // write may take it. A `sequence` that is not an integer never may, so a
+        // caller that forgets to number a write is refused rather than let
+        // through — NaN included, which compares false both ways and so would
+        // otherwise pass on an unwritten row.
+        function commentBadgeWriteIsNewer(sequence, applied) {
+            if (!Number.isInteger(sequence)) return false;
+            return applied === undefined || sequence > applied;
+        }
+        // ── comment-badge:end ───────────────────────────────────────────────
+
+        // One sequence for every request that writes badges — loadComments and
+        // loadCommentCounts both — so the two are ordered against each other as
+        // well: the page-load tally for a file must not overwrite a newer count
+        // from a comment posted while it was in flight. Keyed by path, so the
+        // map is bounded by the files in this PR.
+        var commentBadgeSequence = 0;
+
+        // Until when every comments load asks the server to skip its cached
+        // list: _PR_COMMENTS_TTL in app.py after this page last posted a
+        // comment. A POST drops the cache only on the Cloud Run instance it
+        // reached, so for one TTL another instance can still hold the list
+        // from before it, and any load in that window — not only the reload
+        // straight after the post — could answer without the comment just
+        // written, and take the badge back with it. Past the window that is
+        // nearly always over, but not quite always: a walk another instance
+        // began before the post and finished after it is cached there with
+        // the pre-post list, for a TTL from when it finished. So the residue
+        // is up to one walk's duration past the window, and needs a
+        // concurrent multi-page walk on another instance to arise at all.
+        // Kept equal to the server's TTL by hand: test_comments_freshness.js
+        // reads both.
+        var COMMENTS_FRESH_WINDOW_MS = 30000;
+        var commentsFreshUntil = 0;
+        var commentBadgeApplied = Object.create(null);
+
+        function writeCommentBadge(path, count, sequence) {
+            if (!commentBadgeWriteIsNewer(sequence, commentBadgeApplied[path])) return;
+            commentBadgeApplied[path] = sequence;
+            updateCommentBadge(path, count);
+        }
+
         var commentsGeneration = 0;
 
         function loadComments(path) {
@@ -2530,6 +2616,8 @@
                 commentsScroll.innerHTML = '<div class="comments-section-inner"><h4>Comments on this file</h4><div class="spinner"></div></div>';
             }
 
+            var badgeSequence = ++commentBadgeSequence;
+
             function isCurrent() {
                 return commentsResponseIsCurrent({
                     ownedPane: ownedPane,
@@ -2538,25 +2626,24 @@
                 });
             }
 
-            fetch(apiBase + '/comments?path=' + encodeURIComponent(path))
+            // `fresh` skips the server's cache of the comment list, for the
+            // window after a post that commentsFreshUntil describes.
+            var fresh = Date.now() < commentsFreshUntil;
+            var url = apiBase + '/comments?path=' + encodeURIComponent(path) +
+                (fresh ? '&fresh=1' : '');
+
+            fetch(url)
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     var comments = data.comments || [];
-                    // Deliberately outside the guard. The *row* is right by
-                    // construction: it is chosen by this response's own path,
-                    // so it is the right row whether or not that file is on
-                    // screen, and dropping the call would lose the count for a
-                    // comment the user just posted and navigated away from.
-                    //
-                    // The *count* is whichever answer lands last, which two
-                    // answers for the same path can still get wrong — post a
-                    // comment while the initial load is slow and the badge can
-                    // settle on the older number until that file is reloaded.
-                    // Strictly better than rendering the stale pane as well,
-                    // which is what this guard fixes, but not the same as
-                    // correct: a per-path guard needs a generation per path
-                    // rather than one counter, and is issue #49.
-                    updateCommentBadge(path, comments.length);
+                    // Deliberately outside the pane's guard. The *row* is right
+                    // by construction: it is chosen by this response's own
+                    // path, so it is the right row whether or not that file is
+                    // on screen, and dropping the call would lose the count
+                    // for a comment the user just posted and navigated away
+                    // from. The *count* is ordered per row instead, by the
+                    // sequence this load took when it started (#49).
+                    writeCommentBadge(path, comments.length, badgeSequence);
                     if (!isCurrent()) return;
                     renderComments(comments, path);
                 })
@@ -2609,6 +2696,7 @@
                 .then(function(data) {
                     if (data.ok) {
                         textarea.value = '';
+                        commentsFreshUntil = Date.now() + COMMENTS_FRESH_WINDOW_MS;
                         loadComments(path);
                     } else {
                         alert('Error posting comment: ' + (data.error || 'Unknown error'));
@@ -2665,13 +2753,14 @@
         }
 
         function loadCommentCounts() {
+            var badgeSequence = ++commentBadgeSequence;
             fetch(apiBase + '/comment-counts')
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     var counts = data.counts || {};
                     for (var path in counts) {
                         if (counts.hasOwnProperty(path)) {
-                            updateCommentBadge(path, counts[path]);
+                            writeCommentBadge(path, counts[path], badgeSequence);
                         }
                     }
                 })
