@@ -66,7 +66,9 @@ bazel test //:test_app --test_filter='TestRepoPulls and empty'
 
 `Class::test` selects nothing, and a filter that selects nothing makes pytest
 exit 5, which Bazel reports as a failed target rather than as a bad filter.
-The filter does nothing for the `js_test` targets.
+The filter does nothing for the `js_test` targets, and it applies to every
+`py_test` the command runs, so `bazel test //... --test_filter=X` turns each
+`py_test` with no test matching `X` red with exit 5. Name the target.
 
 `pytest tests/ -v` still works for the Python tests alone, but it misses every
 `js_test`, so it is not enough before pushing.

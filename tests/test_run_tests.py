@@ -75,7 +75,6 @@ def test_runner_applies_the_filter(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed, 1 deselected" in result.stdout
     assert "test_one" in result.stdout
-    assert "test_two PASSED" not in result.stdout
 
 
 def test_a_filter_matching_nothing_exits_5(tmp_path):

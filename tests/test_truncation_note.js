@@ -160,7 +160,7 @@ for (const [label, selector] of [[':root', /:root\s*\{/], ['dark', /\[data-theme
   assert.ok(start >= 0, 'the stylesheet must have a ' + label + ' theme block');
   const block = css.slice(start, css.indexOf('}', start));
   for (const name of ['--vr-warn-bg', '--vr-warn-fg']) {
-    assert.ok(new RegExp(name + '\\s*:\\s*[^;]+;').test(block),
+    assert.ok(new RegExp(name + '\\s*:\\s*[^;\\s][^;]*;').test(block),
       name + ' must be defined in the ' + label + ' theme block');
   }
 }
