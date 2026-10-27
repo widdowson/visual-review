@@ -3594,6 +3594,21 @@ class TestCacheIsBounded:
                 app_module._cache_set("same", 1)
             assert len(_cache) == 1
 
+    def test_rewriting_a_key_counts_as_use(self):
+        """A rewrite moves the key to the newest end, as a read does.
+
+        A ``fresh`` walk overwrites a list that is still cached; without the
+        move it would keep its old place and the newest value of a key would
+        be the first evicted.
+        """
+        with patch("app._CACHE_MAX_ENTRIES", 2):
+            app_module._cache_set("old", 1)
+            app_module._cache_set("other", 2)
+            app_module._cache_set("old", 3)
+            app_module._cache_set("new", 4)
+            assert set(_cache) == {"old", "new"}
+            assert _cache["old"][1] == 3
+
     def test_the_shipped_cap_is_finite(self):
         """Asserted because every case above patches it."""
         assert 0 < app_module._CACHE_MAX_ENTRIES < 10_000

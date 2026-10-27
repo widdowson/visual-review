@@ -270,8 +270,10 @@ const postedStatement = postedMatch[0];
 assert.ok(postBody.indexOf(postedStatement) < postBody.search(/loadComments\s*\(\s*path\s*\)/),
   'the window must open before the reload after a post, or that reload is outside it');
 
-// The window has to cover the server's whole TTL: past it every instance's
-// cached list postdates the post, short of it one may not.
+// The window has to cover the server's whole TTL: short of it, another
+// instance's list from before the post can still be served once the window has
+// closed. Covering the TTL is not quite a guarantee either — see the comment on
+// COMMENTS_FRESH_WINDOW_MS for the one walk's duration it leaves.
 {
   const fs = require('fs');
   const path = require('path');

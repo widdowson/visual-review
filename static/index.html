@@ -2572,9 +2572,14 @@
         // reached, so for one TTL another instance can still hold the list
         // from before it, and any load in that window — not only the reload
         // straight after the post — could answer without the comment just
-        // written, and take the badge back with it. Past the window every
-        // instance's copy postdates the post. Kept equal to the server's TTL
-        // by hand: test_comments_freshness.js reads both.
+        // written, and take the badge back with it. Past the window that is
+        // nearly always over, but not quite always: a walk another instance
+        // began before the post and finished after it is cached there with
+        // the pre-post list, for a TTL from when it finished. So the residue
+        // is up to one walk's duration past the window, and needs a
+        // concurrent multi-page walk on another instance to arise at all.
+        // Kept equal to the server's TTL by hand: test_comments_freshness.js
+        // reads both.
         var COMMENTS_FRESH_WINDOW_MS = 30000;
         var commentsFreshUntil = 0;
         var commentBadgeApplied = Object.create(null);
