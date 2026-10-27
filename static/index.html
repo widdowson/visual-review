@@ -1461,6 +1461,13 @@
                 if (baseReady && headReady) {
                     // Nothing is in flight any more, so the name means what it
                     // says and a later cancel cannot reach these images.
+                    //
+                    // No test can see this line, and none should try: every
+                    // image in pendingLoad is complete by now, and abortImage
+                    // returns early on a complete image, so a stale pendingLoad
+                    // would be cancelled to no effect. It is kept because it is
+                    // what makes that true by construction rather than by
+                    // abortImage's guard alone (#21).
                     if (pendingLoad && pendingLoad.path === path) pendingLoad = null;
                     viewport.classList.remove('loading');
                     renderComparison();

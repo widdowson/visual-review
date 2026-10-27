@@ -4,6 +4,7 @@ load("@pip//:requirements.bzl", "requirement")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_push")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
+load("//:browser_test.bzl", "spa_browser_test")
 
 exports_files([
     "browsers.1.57.0.json",
@@ -139,52 +140,20 @@ py_test(
 # Browser-driven tests for the SPA (#21). Everything the page does with state —
 # adopting an in-flight prefetch, aborting an abandoned load, the hashchange
 # re-entry guard — needs a DOM, so it cannot be reached by the extraction tests
-# below. This target drives the real page in hermetic Chromium against a fake
-# backend whose request log is what the assertions read.
-#
-# static/index.html is the code under test, so it is in data for the same
-# reason it is below: without it an index.html-only edit changes no input and
-# the target takes a cache hit instead of running.
-py_test(
+# below. These targets drive the real page in hermetic Chromium against a fake
+# backend whose request log is what the assertions read. spa_browser_test in
+# browser_test.bzl carries everything they share, static/index.html in data
+# among it; a new one is a name and a test file.
+spa_browser_test(
     name = "test_spa_prefetch",
-    # "medium" despite an ~9s happy path, which earns Bazel's "size is too big"
-    # advisory: a total-prefetch-failure mutant spends ~83s in wait_until
-    # timeouts before reporting, against medium's 300s cap, and a browser is
-    # not a small-size workload. That number moves with every wait added — it
-    # was 66s until this file's own adoption test added a 15s gate — so read
-    # the headroom rather than the figure.
-    size = "medium",
-    srcs = [
-        "tests/__init__.py",
-        "tests/fixture_server.py",
-        "tests/run_tests.py",
-        "tests/spa_harness.py",
-        "tests/test_spa_prefetch.py",
-    ],
-    args = ["tests/test_spa_prefetch.py"],
-    data = [
-        "browsers.1.57.0.json",
-        "static/index.html",
-        "@playwright//:chromium-headless-shell",
-    ],
-    env = {
-        "BAZEL_PLAYWRIGHT_CHROMIUM": "$(rlocationpath @playwright//:chromium-headless-shell)",
-        # The fixture server imports app.py, whose Access config is read at
-        # import. Without this the module raises and the whole file fails to
-        # collect.
-        "VR_AUTH_MODE": "disabled",
-    },
-    main = "tests/run_tests.py",
-    tags = ["browser"],
-    deps = [
-        # The fixture asks app.py for the image Cache-Control rather than
-        # copying the literal, so that "the immutable header is load-bearing"
-        # cannot go on being asserted about a header production stopped
-        # sending.
-        ":app_lib",
-        requirement("playwright"),
-        requirement("pytest"),
-    ],
+    # The happy path is ~10s, which earns Bazel's "size is too big" advisory
+    # against the macro's "medium": a total-prefetch-failure mutant spends
+    # ~83s in wait_until timeouts before reporting, against medium's 300s cap.
+    # That number moves with every wait added, so read the headroom rather
+    # than the figure.
+    srcs = ["tests/test_spa_prefetch.py"],
+    # The pin test compares this manifest with the wheel's own browsers.json.
+    data = ["browsers.1.57.0.json"],
 )
 
 # Reads the layers //:push publishes rather than importing anything, because a
@@ -232,35 +201,17 @@ py_test(
     ],
 )
 
-py_test(
+# The fixture's own knobs (files, comments, holds), each driven through the
+# page, so a fixture that ignored one fails here by name rather than as a
+# confusing red in whichever test first relied on it.
+spa_browser_test(
+    name = "test_spa_harness",
+    srcs = ["tests/test_spa_harness.py"],
+)
+
+spa_browser_test(
     name = "test_spa_signed_in_chip",
-    size = "medium",
-    srcs = [
-        "tests/__init__.py",
-        "tests/fixture_server.py",
-        "tests/run_tests.py",
-        "tests/spa_harness.py",
-        "tests/test_spa_signed_in_chip.py",
-    ],
-    args = ["tests/test_spa_signed_in_chip.py"],
-    data = [
-        "browsers.1.57.0.json",
-        "static/index.html",
-        "@playwright//:chromium-headless-shell",
-    ],
-    env = {
-        "BAZEL_PLAYWRIGHT_CHROMIUM": "$(rlocationpath @playwright//:chromium-headless-shell)",
-        # The fixture server imports app.py, whose Access config is read at
-        # import time.
-        "VR_AUTH_MODE": "disabled",
-    },
-    main = "tests/run_tests.py",
-    tags = ["browser"],
-    deps = [
-        ":app_lib",
-        requirement("playwright"),
-        requirement("pytest"),
-    ],
+    srcs = ["tests/test_spa_signed_in_chip.py"],
 )
 
 # The SPA's logic lives inline in static/index.html; these tests extract the

@@ -11,15 +11,7 @@ deployment is auth.py, exercised in //:test_auth; if any of this is wrong the
 worst case is a reviewer who cannot see which account they are signed in as.
 """
 
-import os
-import sys
-
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from fixture_server import serve  # noqa: E402
-from spa_harness import find_chromium, index_html_path  # noqa: E402
 
 EMAIL = "andrew.widdowson@apw.photos"
 
@@ -54,46 +46,16 @@ window.__vrMe = 'pending';
 """
 
 
-@pytest.fixture(scope="module")
-def browser():
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as pw:
-        kwargs = {"headless": True}
-        chromium = find_chromium()
-        if chromium:
-            kwargs["executable_path"] = chromium
-        b = pw.chromium.launch(**kwargs)
-        yield b
-        b.close()
-
-
-def _server(signed_in_email):
-    httpd, _ = serve(3, index_html_path(), signed_in_email=signed_in_email)
-    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
-
-
 @pytest.fixture
-def open_page(browser):
+def open_page(spa_backend, spa_page):
     """Opens the SPA against a fixture that reports a given signed-in state."""
-    made = []
-
     def _open(signed_in_email, path="/owner/repo/pr/1"):
-        httpd, base = _server(signed_in_email)
-        ctx = browser.new_context(viewport={"width": 1280, "height": 900})
-        page = ctx.new_page()
-        page.add_init_script(DECISION_MARKER)
-        errors = []
-        page.on("pageerror", lambda e: errors.append(str(e)))
-        page.goto(base + path, wait_until="load")
-        made.append((httpd, ctx, errors))
+        backend = spa_backend(signed_in_email=signed_in_email)
+        page = spa_page(DECISION_MARKER)
+        page.goto(backend.url + path, wait_until="load")
         return page
 
-    yield _open
-
-    for httpd, ctx, errors in made:
-        ctx.close()
-        httpd.shutdown()
-        assert not errors, f"the page threw: {errors}"
+    return _open
 
 
 class TestSignedIn:
