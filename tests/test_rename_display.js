@@ -9,21 +9,15 @@
 // and deletions either way. So the status alone cannot answer the question and
 // the pixels have to.
 //
-// The file is in four parts. The decision is a pure region, extracted and run.
+// The file is in three parts. The decision is a pure region, extracted and run.
 // computeRowDiffMap and the render functions touch a DOM, so they are run
 // against stubs — not checked by pattern, because a regex that matches the text
-// of a call passes whether or not the call does anything. The last part is the
-// exception: two checks on source text, for calls whose behaviour is only
-// reachable through machinery this file deliberately does not build.
+// of a call passes whether or not the call does anything. What the four mode
+// renderers do is left to //:test_spa_mode_renderers, which drives them in a
+// real browser (#40).
 
 const assert = require('assert');
-const { extract, bodyOf, scriptSource } = require('./spa_source');
-
-// The SPA's inline script with comments stripped and the <style> block removed,
-// for the two source-text checks below. Shared from spa_source.js rather than
-// re-derived: a check reading differently-stripped source than bodyOf() does
-// would be wrong in a way nothing would report.
-const spaScript = scriptSource();
+const { extract, bodyOf } = require('./spa_source');
 
 const renameDisplay = extract('rename-display', 'renameDisplay');
 
@@ -431,78 +425,13 @@ const escaped = labelFor(
 assert.ok(!escaped.innerHTML.includes('<img'), 'the previous path goes through escHtml');
 assert.ok(!escaped.innerHTML.includes('<svg'), 'and so does the current path');
 
-// ── Two checks on source text ───────────────────────────────────────────────
+// ── What the mode renderers do ──────────────────────────────────────────────
 //
-// Everything above runs. These two do not, because what they protect is only
-// reachable through machinery this file deliberately does not build — the four
-// mode renderers, which pull in loupes, the diff gutter and
-// requestAnimationFrame. Standing them up is tracked in #40; a pattern is
-// what is affordable here, so each is written to fail on the inversion of what
-// it asserts rather than on the absence of a spelling.
-
-// 1. What an unfetchable base side says. Keeping the modes on a rename we
-// cannot prove identical means side-by-side now renders an empty base panel for
-// a file that is not an added one. The panel used to say "(new file)"
-// unconditionally, which for a rename is a claim about the diff rather than
-// about the fetch that failed. Asserting the *pairing*, not the absence of the
-// old string: swapping the two arms so an added file reads "not available" and
-// a rename reads "(new file)" is a perfect inversion of this fix, and an
-// assertion anchored on the old spelling passes straight over it.
-
-const sideBySide = bodyOf('renderSideBySide');
-assert.ok(
-  /getFileStatus\(state\.currentFile\)\s*===\s*'added'\s*\?\s*'No base image \(new file\)'\s*:\s*'Base image not available'/
-    .test(sideBySide),
-  'the empty base panel must name a new file when, and only when, the file is added');
-
-// 2. The diff gutter must not start comparing alpha. `includeAlpha` is a
-// parameter precisely so the rename fix changes nothing about what the gutter
-// plots for every other file in the PR, and the harness above cannot hold it to
-// that: it stubs the mode renderers out, so their own computeRowDiffMap calls
-// are never made. Count the arguments at every call site instead. Exactly one
-// call passes a fourth, and it is the rename decision's.
-//
-// A census is only as good as its completeness, and an earlier version of this
-// check leaked twice — both confirmed by mutation, both with the suite green
-// while a gutter call compared alpha. It filtered the declaration out by its
-// first parameter's *name*, so a call site that hoisted its arguments into
-// locals called `baseImg`/`headImg` was discarded as the declaration; and it
-// guarded completeness with a floor set one too low, so a call carrying nested
-// parentheses could drop out of the match set unnoticed. Hence the three checks
-// below, in place of the floor: the name still appears, every occurrence of it
-// parsed, and exactly one of those is the declaration.
-
-const occurrences = (spaScript.match(/computeRowDiffMap\s*\(/g) || []).length;
-assert.ok(occurrences >= 7,
-  'expected the declaration, the rename call and five gutter calls; found ' +
-  occurrences + '. Fewer means a call site went away — check it was meant to, ' +
-  'and lower this floor deliberately. This check also reads static/index.html ' +
-  'by name, so renaming computeRowDiffMap makes it vacuous — rename it here too.');
-
-const uses = [...spaScript.matchAll(
-  /(function\s+)?computeRowDiffMap\s*\(([^()]*)\)/g)];
-assert.strictEqual(uses.length, occurrences,
-  (occurrences - uses.length) + ' computeRowDiffMap occurrence(s) did not parse as a ' +
-  'flat argument list. A call carrying nested parentheses drops out of this census ' +
-  'silently, taking its arguments with it — rewrite this check, do not relax it.');
-
-// The declaration is told apart by its `function` keyword, not by what its
-// parameters happen to be called.
-assert.strictEqual(uses.filter(u => u[1]).length, 1, 'exactly one declaration');
-const callSites = uses.filter(u => !u[1]).map(u => u[2].split(',').map(a => a.trim()));
-
-assert.ok(callSites.every(args => args.length === 3 || args.length === 4),
-  'every call site must pass 3 or 4 arguments; a call whose textual argument list '
-  + 'is neither is inspected by neither census below: '
-  + JSON.stringify(callSites.filter(a => a.length !== 3 && a.length !== 4)));
-
-const withAlpha = callSites.filter(args => args.length === 4);
-assert.strictEqual(withAlpha.length, 1,
-  'exactly one caller may ask computeRowDiffMap to compare alpha; found ' +
-  withAlpha.length + ': ' + JSON.stringify(withAlpha));
-assert.deepStrictEqual(withAlpha[0], ['state.baseImg', 'state.headImg', '0', 'true'],
-  'and it is the rename decision, at the exact threshold');
-assert.ok(callSites.filter(args => args.length === 3).every(args => args[2] === '10'),
-  'every other caller is the gutter, at the gutter tolerance');
+// The four mode renderers are stubbed above, because standing them up here
+// means stubbing the loupes, the diff gutter and requestAnimationFrame. The two
+// properties #28 rests on inside them — what an empty base panel says, and a
+// gutter that does not compare alpha — are asserted on the real page by
+// //:test_spa_mode_renderers, which replaced the source-text checks that used
+// to stand here (#40).
 
 console.log('test_rename_display: all checks passed');

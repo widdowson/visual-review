@@ -11,13 +11,30 @@ const { extract, bodyOf, stylesheet, scriptSource } = require('./spa_source');
 // Rule 3 below: every key matched with the expression it must carry. Bare
 // tokens are not enough — `minPaneHeight: COMMENTS_PANE_TUNING.minViewportHeight`
 // keeps both names present, and `scrollTop: 0` keeps the key present.
+// A value is matched literally, with optional whitespace around the
+// punctuation of a member access or a call, and must end where an identifier
+// would: `pointerY: pointerYOffset` does not pass `pointerY` (#42 item 5).
+function literalPattern(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, (c) =>
+    '.()[]'.includes(c) ? '\\s*\\' + c + '\\s*' : '\\' + c);
+}
+
 function assertPasses(fn, body, pairs) {
   for (const [key, value] of pairs) {
-    const expr = value.replace(/[.()[\]]/g, (c) => '\\s*\\' + c + '\\s*');
-    assert.ok(new RegExp(key + '\\s*:\\s*' + expr).test(body),
-      fn + ' must pass ' + value + ' as ' + key);
+    const pattern = new RegExp('(?<![\\w$])' + literalPattern(key) + '\\s*:\\s*'
+      + literalPattern(value) + '(?![\\w$])');
+    assert.ok(pattern.test(body), fn + ' must pass ' + value + ' as ' + key);
   }
 }
+
+// The helper's own contract, since every assertion below rests on it.
+assert.ok(!new RegExp(literalPattern('b+c')).test('a: bbc'), 'a + in a value is literal');
+assert.ok(new RegExp(literalPattern('a*b')).test('x: a*b'), 'a * in a value matches itself');
+assert.throws(() => assertPasses('f', 'pointerY: pointerYOffset', [['pointerY', 'pointerY']]),
+  'a value must not match a longer identifier');
+assert.throws(() => assertPasses('f', 'xpointerY: pointerY', [['pointerY', 'pointerY']]),
+  'a key must not match the tail of a longer identifier');
+assertPasses('f', 'a . b ( ) : c . d ( )', [['a.b()', 'c.d()']]);
 
 const computeCommentsPaneHeight = extract('comments-pane', 'computeCommentsPaneHeight');
 const computeCommentsScrollTop = extract('comments-pane', 'computeCommentsScrollTop');

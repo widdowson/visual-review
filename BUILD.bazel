@@ -214,6 +214,41 @@ spa_browser_test(
     srcs = ["tests/test_spa_signed_in_chip.py"],
 )
 
+# The deep-link call sites around the hash: loadPrImages on a cold load, and
+# the hashchange listener (#35).
+spa_browser_test(
+    name = "test_spa_deep_link",
+    srcs = ["tests/test_spa_deep_link.py"],
+)
+
+# The sidebar's two-line label as the browser lays it out (#55), where
+# //:test_file_label can only grep the stylesheet.
+spa_browser_test(
+    name = "test_spa_file_label",
+    srcs = ["tests/test_spa_file_label.py"],
+)
+
+# The comments pane's layout and drag handle (#42), which
+# //:test_comments_pane checks by matching source text.
+spa_browser_test(
+    name = "test_spa_comments_pane",
+    srcs = ["tests/test_spa_comments_pane.py"],
+)
+
+# The pane's stale-response guard under held responses (#53), whatever
+# function the write that would break it lives in.
+spa_browser_test(
+    name = "test_spa_comments_freshness",
+    srcs = ["tests/test_spa_comments_freshness.py"],
+)
+
+# The four comparison-mode renderers, which //:test_rename_display stubs out
+# (#40): the empty base panel's wording, and a gutter that ignores alpha.
+spa_browser_test(
+    name = "test_spa_mode_renderers",
+    srcs = ["tests/test_spa_mode_renderers.py"],
+)
+
 # The SPA's logic lives inline in static/index.html; these tests extract the
 # marked regions from that file rather than keeping a copy, so they cannot
 # pass against logic that has since changed. static/index.html is therefore a
