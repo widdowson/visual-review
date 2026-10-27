@@ -488,11 +488,9 @@ function render(images) {
 
   const dir = rule('file-dir');
   // These two and both ellipsis checks below are held here alone.
-  // //:test_spa_file_label
-  // reads the clipping, the no-wrap and the flex layout off the page (#55),
-  // but
-  // asserts nothing about the directory line's size or colour, and no DOM API
-  // reports whether clipped text ends in an ellipsis.
+  // //:test_spa_file_label reads the clipping, the no-wrap and the flex layout
+  // off the page (#55), but asserts nothing about the directory line's size or
+  // colour, and no DOM API reports whether clipped text ends in an ellipsis.
   assert.ok(/font-size\s*:/.test(dir), '.file-dir must set its own font size');
   assert.ok(/color\s*:/.test(dir), '.file-dir must set its own colour');
   assert.ok(/text-overflow\s*:\s*ellipsis/.test(dir),
