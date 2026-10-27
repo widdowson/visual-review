@@ -21,6 +21,14 @@ REQUIRED_PACKAGES = [
     "jwt",
     # pyjwt's [crypto] extra. Without it PyJWT refuses every RS256 key.
     "cryptography",
+    # uvicorn's [standard] extra (colorama is Windows-only). Losing these
+    # costs speed, not correctness, which is why nothing else would notice.
+    "dotenv",
+    "httptools",
+    "uvloop",
+    "watchfiles",
+    "websockets",
+    "yaml",
 ]
 
 

@@ -38,6 +38,18 @@ py_library(
         requirement("httpx"),
         requirement("pyjwt"),
         requirement("uvicorn"),
+        # uvicorn[standard], for the same reason: requirements.txt asks for the
+        # extra, the Dockerfile path gets it, and requirement("uvicorn") alone
+        # drops it. Nothing breaks without these -- uvicorn falls back to
+        # asyncio and h11 -- so they would go missing silently. uvloop and
+        # httptools are the event loop and HTTP parser uvicorn picks when they
+        # are importable; the rest keep the image's set equal to the extra's.
+        requirement("httptools"),
+        requirement("python-dotenv"),
+        requirement("pyyaml"),
+        requirement("uvloop"),
+        requirement("watchfiles"),
+        requirement("websockets"),
     ],
 )
 
