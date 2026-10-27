@@ -136,6 +136,20 @@ py_test(
     ],
 )
 
+# The runner every py_test here shares. Bazel passes --test_filter as
+# TESTBRIDGE_TEST_ONLY, which the runner turns into pytest's -k (#48).
+py_test(
+    name = "test_run_tests",
+    srcs = [
+        "tests/__init__.py",
+        "tests/run_tests.py",
+        "tests/test_run_tests.py",
+    ],
+    args = ["tests/test_run_tests.py"],
+    main = "tests/run_tests.py",
+    deps = [requirement("pytest")],
+)
+
 # Browser-driven tests for the SPA (#21). Everything the page does with state —
 # adopting an in-flight prefetch, aborting an abandoned load, the hashchange
 # re-entry guard — needs a DOM, so it cannot be reached by the extraction tests
