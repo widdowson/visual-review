@@ -985,15 +985,15 @@ async def pr_comment_counts(owner: str, repo: str, number: int):
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             # The same walk as ``pr_comments``, and the same cache entry, so
-            # a file click within ``_PR_COMMENTS_TTL`` of this walk is served
-            # from its answer, unless it falls in the window after a post,
-            # whose ``fresh=1`` skips the read. The page load itself still walks twice: it
-            # sends this and the first file's comments in the same tick, so
-            # on a cold entry both miss before either has written. Sharing
-            # an in-flight walk would close that, for one walk per page
-            # load. Walked for the reason given there (#22), and as there a
-            # failing page is left to the handler below rather than caught
-            # twice.
+            # a file click within ``_PR_COMMENTS_TTL`` of this walk is
+            # served from its answer, unless it falls in the window after a
+            # post, whose ``fresh=1`` skips the read. The page load itself
+            # still walks twice: it sends this and the first file's comments
+            # in the same tick, so on a cold entry both miss before either
+            # has written. Sharing an in-flight walk would close that, for
+            # one walk per page load. Walked for the reason given there
+            # (#22), and as there a failing page is left to the handler
+            # below rather than caught twice.
             all_comments, truncated = await _pr_review_comments(
                 client, github_repo, number,
             )
