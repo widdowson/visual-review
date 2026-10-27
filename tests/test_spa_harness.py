@@ -118,25 +118,29 @@ def test_the_knobs_refuse_what_they_cannot_honour():
         FixtureState().hold("comments", "a.png", ref="b" * 40)
 
 
+# Both kinds, because each reaches the hold exit through its own handler, and
+# a refactor of one (#53 adds POST /comments beside the GET) could drop the
+# close there while the other stayed covered.
+@pytest.mark.parametrize("kind,ref", [("image", "b" * 40), ("comments", None)])
 def test_an_expired_hold_closes_as_aborted_and_is_recorded(spa_backend, spa_page,
-                                                         monkeypatch):
+                                                         monkeypatch, kind, ref):
     """A forgotten hold is a failure of the test, not a delivered transfer.
 
     The record closes as aborted, so a predicate like `end is not None and not
-    aborted` cannot mistake it for an image that arrived, and the expiry is
+    aborted` cannot mistake it for a response that arrived, and the expiry is
     recorded where spa_backend's teardown fails the test on it. The list is
     emptied here, after checking it, because expiring is this test's point.
     """
     import fixture_server
     monkeypatch.setattr(fixture_server, "HOLD_TIMEOUT", 0.5)
     backend = spa_backend(file_count=1)
-    backend.state.hold("image", "shots/file_00.png", ref="b" * 40)
+    backend.state.hold(kind, "shots/file_00.png", ref=ref)
     page = spa_page()
     page.goto(backend.pr_url(), wait_until="commit")
 
     expired = wait_until(
-        lambda: [r for r in backend.probe.images("file_00") if r["timed_out"]],
-        "the held head to expire")
+        lambda: [r for r in backend.probe.log() if r["kind"] == kind and r["timed_out"]],
+        f"the held {kind} request to expire")
     assert all(r["aborted"] and r["end"] is not None for r in expired), expired
     assert backend.state.expired_holds, "the expiry should be recorded for teardown"
     backend.state.expired_holds.clear()
