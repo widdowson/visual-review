@@ -353,6 +353,8 @@ js_test(
     name = "test_comments_freshness",
     entry_point = "tests/test_comments_freshness.js",
     data = [
+        # Read for _PR_COMMENTS_TTL, which the SPA's fresh window must equal.
+        "app.py",
         "static/index.html",
         "tests/spa_source.js",
     ],

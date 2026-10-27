@@ -154,7 +154,7 @@ deployment holding one.
 |--------|------|-------------|
 | GET | `/api/{owner}/{repo}/pr/{number}/images` | List changed PNG files in the PR |
 | GET | `/api/{owner}/{repo}/pr/{number}/image?path=...&ref=...` | Proxy image content from a git ref |
-| GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file |
+| GET | `/api/{owner}/{repo}/pr/{number}/comments?path=...` | Get review comments for a file. The PR's comment list is cached for 30s and dropped by a POST; `&fresh=1` skips the cached copy, which the SPA sends for 30s after it posts |
 | POST | `/api/{owner}/{repo}/pr/{number}/comments` | Post a review comment on a file |
 | GET | `/api/{owner}/{repo}/pr/{number}/comment-counts` | Get comment counts by file |
 | GET | `/api/{owner}/{repo}/pr/{number}/checks` | Combined CI status for the PR's head commit |
