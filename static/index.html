@@ -29,6 +29,9 @@
             --vr-badge-added-bg: #dcfce7; --vr-badge-added-fg: #166534;
             --vr-badge-removed-bg: #fee2e2; --vr-badge-removed-fg: #991b1b;
             --vr-badge-modified-bg: #fef9c3; --vr-badge-modified-fg: #854d0e;
+            /* Warnings own their pair rather than borrowing the M badge's (#51),
+               so re-theming one does not silently re-theme the other. */
+            --vr-warn-bg: #fef9c3; --vr-warn-fg: #854d0e;
             --vr-comment-badge-bg: rgba(37, 99, 235, 0.1); --vr-comment-badge-fg: #2563eb;
             --vr-checker-a: #ddd; --vr-checker-b: #eee;
             --vr-loupe-bg: #f5f5f5;
@@ -59,6 +62,7 @@
             --vr-badge-added-bg: #1a3a1a; --vr-badge-added-fg: #4ade80;
             --vr-badge-removed-bg: #3a1a1a; --vr-badge-removed-fg: #f87171;
             --vr-badge-modified-bg: #3a3a1a; --vr-badge-modified-fg: #facc15;
+            --vr-warn-bg: #3a3a1a; --vr-warn-fg: #facc15;
             --vr-comment-badge-bg: rgba(142, 181, 240, 0.15); --vr-comment-badge-fg: #8eb5f0;
             --vr-checker-a: #333; --vr-checker-b: #444;
             --vr-loupe-bg: #111;
@@ -162,7 +166,7 @@
         .truncation-note {
             padding: 8px 16px; border-bottom: 1px solid var(--vr-border);
             font-size: 0.75rem; line-height: 1.4;
-            background: var(--vr-badge-modified-bg); color: var(--vr-badge-modified-fg);
+            background: var(--vr-warn-bg); color: var(--vr-warn-fg);
         }
         .truncation-note[hidden] { display: none; }
         .file-list { list-style: none; padding: 0; margin: 0; flex: 1; overflow-y: auto; }
