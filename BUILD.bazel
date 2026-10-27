@@ -45,9 +45,10 @@ py_library(
         # httptools are the event loop and HTTP parser uvicorn picks when
         # importable. websockets also turns on uvicorn's WebSocket handling,
         # so an upgrade request is refused (no websocket route) rather than
-        # served as plain HTTP. watchfiles, python-dotenv and pyyaml are only
-        # read by --reload, --env-file and --log-config; they keep the image's
-        # set equal to the extra's, as the Dockerfile path installs it.
+        # served as plain HTTP. watchfiles is imported at start-up but used
+        # only by --reload; python-dotenv and pyyaml are imported only for
+        # --env-file and --log-config. They keep the image's set equal to the
+        # extra's, as the Dockerfile path installs it.
         requirement("httptools"),
         requirement("python-dotenv"),
         requirement("pyyaml"),
