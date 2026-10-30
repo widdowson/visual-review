@@ -40,6 +40,20 @@ assert.strictEqual(
     '#diff-bfe9874d239014961b1ae4e89875a6155667db834a410aaaa2ebe3cf89820556',
   'the anchor must be diff- + sha256 hex of the file path, on the /files tab');
 
+// A renamed file is anchored under its *new* path (#34). Observed by hand on
+// 2026-10-30: in apwphotos-appv2#974's diff, the container for the baseline
+// renamed from shoot_detail_hidden_moodboard_post_shoot.bmp carries this id,
+// which is sha256 of the new path, not of the previous one. Same limit as the
+// pair above: it freezes our output against an observation, and cannot see
+// GitHub change. The SPA passes state.currentFile, the compare API's
+// `filename`, which for a rename is the new path.
+assert.strictEqual(
+  anchorOf(await ghDiffUrl('widdowson', 'apwphotos-appv2', 974,
+    'django/apps/shoots/tests/visual/baselines/' +
+    'shoot_detail_moodboard_shown_for_past_shoot_participant.bmp')),
+  'diff-be8855a6026e5a841cf0f7444c6718f21afa9d59c120d52fd4eb2d3c640bc68f',
+  'a renamed file must be anchored under its new path');
+
 // ── The digest ──────────────────────────────────────────────────────────────
 
 // Checked against node's own sha256 over the path's exact bytes. That pins
