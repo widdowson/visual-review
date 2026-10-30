@@ -45,8 +45,9 @@ assert.strictEqual(
 // renamed from shoot_detail_hidden_moodboard_post_shoot.bmp carries this id,
 // which is sha256 of the new path, not of the previous one. Same limit as the
 // pair above: it freezes our output against an observation, and cannot see
-// GitHub change. The SPA passes state.currentFile, the compare API's
-// `filename`, which for a rename is the new path.
+// GitHub change. The SPA passes state.currentFile, which is the PR files API's
+// `filename` (the server passes it on as `path`); for a rename that is the new
+// path.
 assert.strictEqual(
   anchorOf(await ghDiffUrl('widdowson', 'apwphotos-appv2', 974,
     'django/apps/shoots/tests/visual/baselines/' +
