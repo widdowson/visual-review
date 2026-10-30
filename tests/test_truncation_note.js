@@ -143,6 +143,28 @@ assert.ok(/var\(--vr-[a-z-]+\)/.test(rule[0]),
 assert.ok(/background\s*:\s*var\(/.test(rule[0]) && /color\s*:\s*var\(/.test(rule[0]),
   '.truncation-note must set both a themed background and a themed foreground');
 
+// And from the warning pair, not from a badge's (#51). Borrowing the `M`
+// badge's colours rendered correctly, but re-theming that badge then re-themed
+// this strip with nothing in either place saying so.
+assert.ok(/background\s*:\s*var\(\s*--vr-warn-bg\s*\)/.test(rule[0]) &&
+  /(?:^|[;{\s])color\s*:\s*var\(\s*--vr-warn-fg\s*\)/.test(rule[0]),
+  '.truncation-note must use --vr-warn-bg / --vr-warn-fg: ' + rule[0]);
+
+// The pair has to be defined in both theme blocks. A variable missing from one
+// does not fail to parse: the declaration falls back to the property's initial
+// value, so the strip goes transparent (or black text) in that theme only.
+// stylesheet() blanks string literals, so the dark selector reads as
+// `[data-theme=""]` here; it is the only data-theme block in the file.
+for (const [label, selector] of [[':root', /:root\s*\{/], ['dark', /\[data-theme=""\]\s*\{/]]) {
+  const start = css.search(selector);
+  assert.ok(start >= 0, 'the stylesheet must have a ' + label + ' theme block');
+  const block = css.slice(start, css.indexOf('}', start));
+  for (const name of ['--vr-warn-bg', '--vr-warn-fg']) {
+    assert.ok(new RegExp(name + '\\s*:\\s*[^;\\s][^;]*;').test(block),
+      name + ' must be defined in the ' + label + ' theme block');
+  }
+}
+
 // The [hidden] rule is not redundant with the UA stylesheet. It is insurance
 // against a later `display:` on the class itself: an author-level display wins
 // over the UA's [hidden] rule, and the strip would then show on every PR with

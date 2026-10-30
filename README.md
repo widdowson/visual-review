@@ -57,6 +57,19 @@ node tests/test_image_urls.js
 node tests/test_hash_target.js
 ```
 
+To run part of one Python target, `--test_filter` is passed to pytest as `-k`
+(`tests/run_tests.py` does it), so it takes a `-k` expression, not a node id:
+
+```bash
+bazel test //:test_app --test_filter='TestRepoPulls and empty'
+```
+
+`Class::test` selects nothing, and a filter that selects nothing makes pytest
+exit 5, which Bazel reports as a failed target rather than as a bad filter.
+The filter does nothing for the `js_test` targets, and it applies to every
+`py_test` the command runs, so `bazel test //... --test_filter=X` turns each
+`py_test` with no test matching `X` red with exit 5. Name the target.
+
 `pytest tests/ -v` still works for the Python tests alone, but it misses every
 `js_test`, so it is not enough before pushing.
 
