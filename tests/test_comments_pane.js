@@ -11,13 +11,30 @@ const { extract, bodyOf, stylesheet, scriptSource } = require('./spa_source');
 // Rule 3 below: every key matched with the expression it must carry. Bare
 // tokens are not enough — `minPaneHeight: COMMENTS_PANE_TUNING.minViewportHeight`
 // keeps both names present, and `scrollTop: 0` keeps the key present.
+// A value is matched literally, with optional whitespace around the
+// punctuation of a member access or a call, and must end where an identifier
+// would: `pointerY: pointerYOffset` does not pass `pointerY` (#42 item 5).
+function literalPattern(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, (c) =>
+    '.()[]'.includes(c) ? '\\s*\\' + c + '\\s*' : '\\' + c);
+}
+
 function assertPasses(fn, body, pairs) {
   for (const [key, value] of pairs) {
-    const expr = value.replace(/[.()[\]]/g, (c) => '\\s*\\' + c + '\\s*');
-    assert.ok(new RegExp(key + '\\s*:\\s*' + expr).test(body),
-      fn + ' must pass ' + value + ' as ' + key);
+    const pattern = new RegExp('(?<![\\w$])' + literalPattern(key) + '\\s*:\\s*'
+      + literalPattern(value) + '(?![\\w$])');
+    assert.ok(pattern.test(body), fn + ' must pass ' + value + ' as ' + key);
   }
 }
+
+// The helper's own contract, since every assertion below rests on it.
+assert.ok(!new RegExp(literalPattern('b+c')).test('a: bbc'), 'a + in a value is literal');
+assert.ok(new RegExp(literalPattern('a*b')).test('x: a*b'), 'a * in a value matches itself');
+assert.throws(() => assertPasses('f', 'pointerY: pointerYOffset', [['pointerY', 'pointerY']]),
+  'a value must not match a longer identifier');
+assert.throws(() => assertPasses('f', 'xpointerY: pointerY', [['pointerY', 'pointerY']]),
+  'a key must not match the tail of a longer identifier');
+assertPasses('f', 'a . b ( ) : c . d ( )', [['a.b()', 'c.d()']]);
 
 const computeCommentsPaneHeight = extract('comments-pane', 'computeCommentsPaneHeight');
 const computeCommentsScrollTop = extract('comments-pane', 'computeCommentsScrollTop');
@@ -174,8 +191,8 @@ const css = stylesheet();
 // url-token is not a string, so `background: url(a}b)` is untouched by the
 // blanking and closes the @media exactly as `content: "}"` used to. Measured,
 // with the cap moved into the real mobile query and that rule ahead of it: this
-// file stays green while every desktop window is uncapped. Filed as #42 item 2,
-// which is the inventory of what a source-text check cannot see here.
+// file stays green while every desktop window is uncapped. That case is held by
+// //:test_spa_comments_pane, which reads the cap off the rendered pane (#42).
 function unconditionalRules(sheet, selector) {
   const out = [];
   let depth = 0;
@@ -233,8 +250,9 @@ assert.ok(Number(caps[0][1]) > 0 && Number(caps[0][1]) <= 40,
 // Both are positive matches, so neither can see a later rule of equal
 // specificity overriding it — `.comments-section { display: block }` appended to
 // the stylesheet leaves this green. That is general to every positive check in
-// this file and is inventoried in #42; the cap above is the one case with a
-// count check, which catches a second cap but not an override either.
+// this file, and //:test_spa_comments_pane is what catches an override (#42);
+// the cap above is the one case here with a count check, which catches a
+// second cap but not an override either.
 for (const [label, declaration] of [
   ['display: flex', /display:\s*flex/],
   ['flex-direction: column', /flex-direction:\s*column/],

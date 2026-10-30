@@ -25,9 +25,16 @@ goes away is closed as aborted while it is still held, so "the page cancelled
 this" is observable without first releasing it.
 
 What the page is shown is the test's to choose: `files` replaces the generated
-file list, and `comments` gives each path its own comment thread. Both default
-to what the prefetch tests were written against, so a test that does not care
-gets a payload that works.
+file list, `comments` gives each path its own comment thread, and `images`
+replaces what one side of one file serves — other bytes, or an HTTP error
+status in place of the PNG. All three default to what the prefetch tests were
+written against, so a test that does not care gets a payload that works.
+
+`POST .../comments` is served as well. It appends the posted comment to that
+path's thread, so the reload the page makes after posting reads it back, and it
+can be held like the two GET routes (`hold("comment_post", path)`). Nothing is
+appended until the hold is released, so a GET that overtakes a held POST sees
+the thread as it was.
 """
 
 import json
@@ -50,22 +57,35 @@ BASE_REF = "a" * 40
 HEAD_REF = "b" * 40
 
 
-def png_bytes(seed: int, size: int = 64) -> bytes:
+def png_bytes(seed: int, size: int = 64, alpha: int | None = None,
+              height: int | None = None,
+              rgb: tuple[int, int, int] | None = None) -> bytes:
     """A solid-colour PNG, its colour derived from `seed`.
 
     Written by hand rather than with Pillow: this repo has no image library in
     its test deps and does not need one for a coloured square. Distinct colours
     matter because a test asserting "file 3 is on screen" reads a pixel.
+
+    `alpha` makes it an RGBA PNG at that opacity, with the colour unchanged, so
+    two images can be built that differ in alpha alone — which is what the
+    diff gutter has to be shown not to compare. `height` makes it `size` wide
+    and that tall, for a test that needs the image taller than the viewport.
+    `rgb` names the colour outright in place of the seed's, for a pair that has
+    to differ by an exact amount.
     """
-    r, g, b = (seed * 53) % 256, (seed * 97) % 256, (seed * 149) % 256
-    raw = b"".join(b"\x00" + bytes([r, g, b]) * size for _ in range(size))
+    rows = size if height is None else height
+    r, g, b = rgb if rgb is not None else (
+        (seed * 53) % 256, (seed * 97) % 256, (seed * 149) % 256)
+    pixel = bytes([r, g, b]) if alpha is None else bytes([r, g, b, alpha])
+    raw = b"".join(b"\x00" + pixel * size for _ in range(rows))
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + tag + data
                 + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
 
     return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", size, rows, 8,
+                                         2 if alpha is None else 6, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw, 6))
             + chunk(b"IEND", b""))
 
@@ -114,7 +134,8 @@ class FixtureState:
     def __init__(self, file_count: int = 3, renamed_index: int | None = None,
                  signed_in_email: str | None = None,
                  files: list[dict] | None = None,
-                 comments: dict[str, list[dict]] | None = None):
+                 comments: dict[str, list[dict]] | None = None,
+                 images: dict[tuple[str, str], bytes | int] | None = None):
         # `files` replaces the generated list outright, rather than being
         # merged with it, so that what a test passes is exactly what the page
         # is shown. The generated list is kept for the tests written against
@@ -127,6 +148,21 @@ class FixtureState:
         self.renamed_index = renamed_index
         self.signed_in_email = signed_in_email
         self.comments = {k: list(v) for k, v in (comments or {}).items()}
+        # Keyed by (path, side), side being "base" or "head" rather than a ref,
+        # so a test need not know the refs. Bytes are served in place of the
+        # generated PNG; an int is the HTTP status to fail with instead, which
+        # is how a missing side is modelled (#40).
+        self.images = dict(images or {})
+        for key, value in self.images.items():
+            if (not isinstance(key, tuple) or len(key) != 2
+                    or key[1] not in ("base", "head")):
+                raise ValueError(f"images keys are (path, 'base'|'head'), not {key!r}")
+            if isinstance(value, bool) or not isinstance(value, (bytes, int)):
+                raise ValueError(f"an image override is bytes or a status, not "
+                                 f"{type(value).__name__}")
+            if isinstance(value, int) and not 400 <= value < 600:
+                raise ValueError(f"an image override that is a status must be an "
+                                 f"error status, not {value}")
         self.holds: list[Hold] = []
         self.expired_holds: list[str] = []
         self.image_delay = 0.30       # seconds spread across the response body
@@ -172,14 +208,15 @@ class FixtureState:
     def hold(self, kind: str, path: str, ref: str | None = None) -> Hold:
         """Keep matching responses open until the returned hold is released.
 
-        `kind` is the route: "image" or "comments". Takes effect for requests
-        that arrive after the call, so set it up before driving the page.
+        `kind` is the route: "image", "comments" (the GET) or "comment_post".
+        Takes effect for requests that arrive after the call, so set it up
+        before driving the page.
         """
-        if kind not in ("image", "comments"):
+        if kind not in ("image", "comments", "comment_post"):
             raise ValueError(f"nothing honours a hold on {kind!r}")
-        if kind == "comments" and ref is not None:
-            # The comments endpoint has no ref, so this hold could never match.
-            raise ValueError("a comments hold cannot name a ref")
+        if kind != "image" and ref is not None:
+            # The comments endpoints have no ref, so this hold could never match.
+            raise ValueError(f"a {kind} hold cannot name a ref")
         h = Hold(kind, path, ref)
         with self.lock:
             self.holds.append(h)
@@ -269,11 +306,36 @@ class Handler(BaseHTTPRequestHandler):
     # ── routes ──────────────────────────────────────────────────────────────
 
     def do_POST(self):
-        if urlparse(self.path).path == "/__probe/reset":
+        path = urlparse(self.path).path
+        if path == "/__probe/reset":
             with self.state.lock:
                 self.state.log.clear()
             return self._json({"ok": True})
+        if path.endswith("/comments"):
+            return self._post_comment()
         self.send_error(404)
+
+    def _post_comment(self) -> None:
+        # Read in full before anything else, so the socket has nothing left to
+        # say and _client_gone can read end-of-file as the page walking away.
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        file_path, body = payload.get("path", ""), payload.get("body", "")
+        rec = self.state.open_record("comment_post", path=file_path, body=body)
+        if not self._await_holds(rec, "comment_post", file_path):
+            return self.state.close_record(rec, aborted=True)
+        # Appended only once released, so a GET answered while this was held
+        # reads the thread as it stood before the post.
+        with self.state.lock:
+            self.state.comments.setdefault(file_path, []).append({
+                "user": "you", "body": body,
+                "created_at": "2026-10-01T12:00:00Z",
+                "html_url": "https://example.invalid/posted"})
+        try:
+            self._json({"ok": True})
+        except OSError:
+            return self.state.close_record(rec, aborted=True)
+        self.state.close_record(rec)
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -303,7 +365,11 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/comments"):
             return self._comments(query)
         if path.endswith("/comment-counts"):
-            return self._json({"counts": {}})
+            # Derived from the threads rather than configured beside them, so
+            # the sidebar's badges and the pane cannot disagree about a file.
+            with self.state.lock:
+                counts = {p: len(t) for p, t in self.state.comments.items() if t}
+            return self._json({"counts": counts})
         if path.endswith("/checks"):
             return self._json({"checks": [], "state": "success"})
         if "/pr/" in path:
@@ -315,9 +381,10 @@ class Handler(BaseHTTPRequestHandler):
         rec = self.state.open_record("comments", path=file_path)
         if not self._await_holds(rec, "comments", file_path):
             return self.state.close_record(rec, aborted=True)
+        with self.state.lock:
+            thread = list(self.state.comments.get(file_path, []))
         try:
-            self._json({"comments": self.state.comments.get(file_path, []),
-                        "truncated": False})
+            self._json({"comments": thread, "truncated": False})
         except OSError:
             return self.state.close_record(rec, aborted=True)
         self.state.close_record(rec)
@@ -333,7 +400,9 @@ class Handler(BaseHTTPRequestHandler):
         # would give a different colour on every run and a test that reads
         # a pixel could not state what it expects.
         seed = (zlib.crc32(img_path.encode()) % 200) + (7 if ref == HEAD_REF else 0)
-        body = png_bytes(seed)
+        side = "head" if ref == HEAD_REF else "base"
+        override = self.state.images.get((img_path, side))
+        body = override if isinstance(override, bytes) else png_bytes(seed)
 
         aborted = False
         try:
@@ -342,6 +411,17 @@ class Handler(BaseHTTPRequestHandler):
             # mid-body, and a forgotten hold still closes its record.
             if not self._await_holds(rec, "image", img_path, ref):
                 aborted = True
+                return
+            if isinstance(override, int):
+                with self.state.lock:
+                    rec["status"] = override
+                self.send_response(override)
+                # no-store, because a 404 is heuristically cacheable and a
+                # test that later serves the same side successfully should
+                # not be answered from a cached failure.
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
