@@ -134,19 +134,24 @@ def test_the_sidebar_lists_every_file(spa_backend, spa_page):
 
 - `spa_backend(**kwargs)` starts the fake backend. `files` replaces the
   generated file list and `comments` gives each path its own thread; with
-  neither it serves three generated files and no comments.
-- `backend.state.hold(kind, path, ref=None)` keeps matching `image` or
-  `comments` responses open until `release()`. Use it to order two responses
-  rather than a sleep. If the page cancels a held request, the request log
-  records it as aborted without the hold being released. A hold left
-  unreleased for 60 seconds closes as aborted and fails the test.
+  neither it serves three generated files and no comments. The comment-count
+  badges are read from those threads. `images` overrides one side of one file,
+  keyed `(path, "base" | "head")`: bytes are served in place of the generated
+  PNG, and a 4xx or 5xx status makes that side fail. `png_bytes(seed, size,
+  alpha=None, height=None, rgb=None)` in `tests/fixture_server.py` makes the
+  bytes, with an alpha channel, a non-square shape or an exact colour when a
+  test needs one.
+- `POST /comments` is served: it appends the comment to that path's thread,
+  so the reload the page makes afterwards reads it back.
+- `backend.state.hold(kind, path, ref=None)` keeps matching `image`,
+  `comments` or `comment_post` responses open until `release()`; only an image
+  hold takes a `ref`. A held POST appends nothing until it is released. Use a
+  hold to order two responses rather than a sleep. If the page cancels a held
+  request, the request log records it as aborted without the hold being
+  released. A hold left unreleased for 60 seconds closes as aborted and fails
+  the test.
 - `spa_page(*init_scripts)` opens a page in a fresh browser context, and fails
   the test if the page throws.
-
-Two things the fixture does not fake yet: every image request answers 200
-with a PNG (there is no way to make one fail, which a rename whose base is
-missing needs), and `POST /comments` is not served. Each is a small addition
-to `tests/fixture_server.py` when a test first needs it.
 
 `tests/test_spa_harness.py` is the smallest worked example, and
 `tests/spa_harness.py` has the instruments the prefetch tests use: the request
