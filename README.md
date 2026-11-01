@@ -306,6 +306,7 @@ with one-time-PIN login there is no name to have. No avatar either way.
 | `3` | Swipe mode |
 | `4` | Diff overlay mode |
 | `Shift` | Hold to magnify (pixel loupe) |
+| `⌘ Enter` / `Ctrl Enter` | Post the comment being typed in the comment box |
 | `?` | Toggle shortcut help |
 
 ## License

@@ -256,6 +256,12 @@ spa_browser_test(
     srcs = ["tests/test_spa_comments_freshness.py"],
 )
 
+# Cmd-Enter / Ctrl-Enter in the comment box posts the comment (#65).
+spa_browser_test(
+    name = "test_spa_comment_shortcut",
+    srcs = ["tests/test_spa_comment_shortcut.py"],
+)
+
 # The four comparison-mode renderers, which //:test_rename_display stubs out
 # (#40): the empty base panel's wording, and a gutter that ignores alpha.
 spa_browser_test(

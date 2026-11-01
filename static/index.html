@@ -2677,7 +2677,7 @@
 
             html += '<div class="comment-form">';
             html += '<textarea id="comment-text" placeholder="Add a review comment on this file..."></textarea>';
-            html += '<button id="comment-submit">Post Comment</button>';
+            html += '<button id="comment-submit" title="Post Comment (\u2318/Ctrl+Enter)">Post Comment</button>';
             html += '</div>';
             html += '</div>'; // close .comments-section-inner
 
@@ -2686,6 +2686,16 @@
 
             var textarea = document.getElementById('comment-text');
             var submitBtn = document.getElementById('comment-submit');
+            // Cmd-Enter on a Mac, Ctrl-Enter elsewhere, posts as the button
+            // does (#65). It goes through the button's click so that an empty
+            // body and a post already in flight (the button is disabled while
+            // posting) are refused in one place. A keystroke an IME is still
+            // composing is the IME's, not ours.
+            textarea.addEventListener('keydown', function(e) {
+                if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.isComposing) return;
+                e.preventDefault();
+                submitBtn.click();
+            });
             submitBtn.addEventListener('click', function() {
                 var body = textarea.value.trim();
                 if (!body) return;
@@ -2857,6 +2867,7 @@
                 '<tr><td><kbd>4</kbd></td><td>Diff overlay</td></tr>' +
                 '<tr class="section-label"><td colspan="2">Tools</td></tr>' +
                 '<tr><td><kbd>' + shiftKey + '</kbd></td><td>Hold to magnify (pixel loupe)</td></tr>' +
+                '<tr><td><kbd>' + (isMac ? '\u2318' : 'Ctrl') + '</kbd> <kbd>Enter</kbd></td><td>Post the comment you are typing</td></tr>' +
                 '<tr><td><kbd>?</kbd></td><td>Toggle this help</td></tr>' +
                 '<tr><td><kbd>Esc</kbd></td><td>Close this help</td></tr>' +
                 '</table>' +
