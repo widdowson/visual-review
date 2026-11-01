@@ -87,17 +87,22 @@ def test_a_second_press_while_posting_does_not_post_twice(spa_backend, spa_page)
 
 
 # Playwright's keyboard cannot mark a key as part of an IME composition, so this
-# dispatches the event itself; the second dispatch, identical bar isComposing,
-# is what shows a synthetic event reaches the handler at all.
-DISPATCH = """composing => document.getElementById('comment-text').dispatchEvent(
-    new KeyboardEvent('keydown', {key: 'Enter', metaKey: true, isComposing: composing,
-                                  bubbles: true, cancelable: true}))"""
+# dispatches the event itself and reads the verdict in the same evaluate: the
+# click handler disables the button synchronously, so a post shows there before
+# the pane can re-render. The second dispatch, identical bar isComposing, is the
+# control showing a synthetic event reaches the handler at all.
+DISPATCH = """composing => {
+    document.getElementById('comment-text').dispatchEvent(
+        new KeyboardEvent('keydown', {key: 'Enter', metaKey: true, isComposing: composing,
+                                      bubbles: true, cancelable: true}));
+    return document.getElementById('comment-submit').disabled;
+}"""
 
 
 def test_a_keystroke_an_ime_is_composing_does_not_post(spa_backend, spa_page):
     backend, page, _ = open_pane(spa_backend, spa_page)
-    page.fill("#comment-text", "かな")
-    page.evaluate(DISPATCH, True)
-    page.evaluate(DISPATCH, False)
-    wait_until(lambda: "かな" in pane_text(page), "the second dispatch to post")
-    assert posts(backend) == [(PATH, "かな")]
+    page.fill("#comment-text", "\u304b\u306a")
+    assert page.evaluate(DISPATCH, True) is False, "a composing keystroke started a post"
+    assert page.evaluate(DISPATCH, False) is True, "the control dispatch did not post"
+    wait_until(lambda: "\u304b\u306a" in pane_text(page), "the control post to be read back")
+    assert posts(backend) == [(PATH, "\u304b\u306a")]
