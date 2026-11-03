@@ -406,3 +406,10 @@ oci_push(
     image = ":image",
     repository = "us-central1-docker.pkg.dev/vr-apw-photos/visual-review/app",
 )
+
+# The PR page's top bar at phone and desktop widths: two rows on a phone with
+# nothing past the right edge, one row on a desktop.
+spa_browser_test(
+    name = "test_spa_topbar",
+    srcs = ["tests/test_spa_topbar.py"],
+)
