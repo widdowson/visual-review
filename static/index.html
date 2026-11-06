@@ -88,6 +88,9 @@
         .topbar a:hover { color: #b8d4ff; }
         .topbar .pr-title { color: #fff; font-weight: 600; font-size: 1.1rem; }
         .topbar .pr-number { color: #8eb5f0; }
+        .topbar-actions {
+            margin-left: auto; display: flex; align-items: center; gap: 8px;
+        }
         .short-url-btn {
             background: none; border: 1px solid #3a3f52; color: #8eb5f0;
             border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 0.75rem;
@@ -470,9 +473,39 @@
             /* Show hamburger */
             #sidebar-toggle { display: block; }
 
-            /* Topbar: tighten up for small screens */
-            .topbar { padding: 8px 12px; gap: 8px; }
-            .topbar .pr-title { font-size: 0.95rem; }
+            /* Topbar: two rows on a phone. The controls share the first row
+               with the hamburger and the title takes the whole second row,
+               where it used to be squeezed into whatever width the controls
+               left it and wrap a word a line, pushing the controls off the
+               right edge. The links under the title wrap as one group. */
+            .topbar { padding: 8px 12px; gap: 6px 8px; flex-wrap: wrap; }
+            .topbar .pr-title {
+                font-size: 0.95rem; order: 3; flex: 1 1 100%; min-width: 0;
+            }
+            .topbar .pr-title-text {
+                display: -webkit-box; -webkit-box-orient: vertical;
+                -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+                overflow-wrap: anywhere;
+            }
+            .topbar .pr-meta {
+                display: flex; flex-wrap: wrap; align-items: center;
+                gap: 6px 8px; margin-top: 4px; font-weight: 400;
+            }
+            .topbar .pr-meta .short-url-btn,
+            .topbar .pr-meta .ci-badge { margin-left: 0; }
+            /* The controls give way before they overflow: the address in the
+               signed-in chip is what shrinks, to an ellipsis. */
+            .topbar-actions {
+                min-width: 0; flex: 1 1 0; justify-content: flex-end;
+            }
+            .vr-user { min-width: 0; }
+            .vr-user .vr-user-email { min-width: 0; }
+
+            /* The topbar's height now depends on the title, so the layout
+               fills what is left rather than assuming a 52px bar. */
+            body { display: flex; flex-direction: column; height: 100dvh; }
+            .topbar { flex: 0 0 auto; }
+            .layout { flex: 1 1 auto; min-height: 0; height: auto; }
 
             /* Layout needs a positioning context for the absolute sidebar */
             .layout { position: relative; overflow: hidden; }
@@ -535,7 +568,7 @@
     <div class="topbar">
         <button id="sidebar-toggle" aria-label="Toggle file panel" aria-expanded="false">&#9776;</button>
         <span class="pr-title" id="pr-title">Loading...</span>
-        <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+        <div class="topbar-actions">
             <span class="vr-user" id="vr-user" hidden>
                 <span class="vr-user-initials" id="vr-user-initials" aria-hidden="true"></span>
                 <span class="vr-user-email" id="vr-user-email"></span>
@@ -740,10 +773,14 @@
                         var base36Id = data.repo_id.toString(36);
                         shortUrlHtml = ' <button class="short-url-btn" id="copy-short-url" title="Copy short URL" data-short-path="/' + escAttr(base36Id) + '/pr/' + prNumber + '">Short URL</button>';
                     }
-                    prTitle.innerHTML = '<span class="pr-number">PR #' + prNumber + '</span> ' +
-                        escHtml(data.pr_title || '') +
-                        ' <a href="' + escAttr(data.pr_url || '') + '" target="_blank" style="font-size:0.8rem;color:#8eb5f0;">View on GitHub</a>' +
-                        shortUrlHtml;
+                    // Title and links are two groups so that a phone can put
+                    // the links on a line of their own under the title.
+                    prTitle.innerHTML = '<span class="pr-title-text" title="' + escAttr(data.pr_title || '') + '">' +
+                        '<span class="pr-number">PR #' + prNumber + '</span> ' +
+                        escHtml(data.pr_title || '') + '</span>' +
+                        ' <span class="pr-meta" id="pr-meta">' +
+                        '<a href="' + escAttr(data.pr_url || '') + '" target="_blank" style="font-size:0.8rem;color:#8eb5f0;">View on GitHub</a>' +
+                        shortUrlHtml + '</span>';
                     document.title = 'Visual Review - ' + owner + '/' + repo + ' PR #' + prNumber;
 
                     // Wire up short URL copy button
@@ -2799,8 +2836,9 @@
                     var prUrl = (document.querySelector('.pr-title a[target="_blank"]') || {}).href || '';
                     if (prUrl) badge.href = prUrl + '/checks';
                     badge.target = '_blank';
-                    // Insert after the PR title content
-                    var titleEl = document.getElementById('pr-title');
+                    // Insert after the PR's links, as one of them
+                    var titleEl = document.getElementById('pr-meta') ||
+                        document.getElementById('pr-title');
                     if (titleEl) titleEl.appendChild(badge);
                 })
                 .catch(function() {});

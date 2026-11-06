@@ -135,7 +135,8 @@ class FixtureState:
                  signed_in_email: str | None = None,
                  files: list[dict] | None = None,
                  comments: dict[str, list[dict]] | None = None,
-                 images: dict[tuple[str, str], bytes | int] | None = None):
+                 images: dict[tuple[str, str], bytes | int] | None = None,
+                 pr_title: str = "Fixture PR"):
         # `files` replaces the generated list outright, rather than being
         # merged with it, so that what a test passes is exactly what the page
         # is shown. The generated list is kept for the tests written against
@@ -147,6 +148,7 @@ class FixtureState:
         self.explicit_files = [dict(f) for f in files] if files is not None else None
         self.renamed_index = renamed_index
         self.signed_in_email = signed_in_email
+        self.pr_title = pr_title
         self.comments = {k: list(v) for k, v in (comments or {}).items()}
         # Keyed by (path, side), side being "base" or "head" rather than a ref,
         # so a test need not know the refs. Bytes are served in place of the
@@ -358,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({
                 "images": self.state.files(),
                 "base_ref": BASE_REF, "head_ref": HEAD_REF,
-                "pr_title": "Fixture PR", "pr_url": "https://example.invalid/pr/1",
+                "pr_title": self.state.pr_title, "pr_url": "https://example.invalid/pr/1",
             })
         if path.endswith("/image"):
             return self._image(query)
