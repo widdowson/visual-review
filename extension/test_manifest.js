@@ -42,4 +42,12 @@ for (const [size, iconPath] of Object.entries(manifest.icons)) {
   assert.ok(fs.existsSync(fullPath), 'icon file missing: ' + iconPath + ' (size ' + size + ')');
 }
 
+// The LGTM button's requests go from the service worker to Visual Review, so
+// the extension needs a host permission there and nowhere else, and no web
+// page may message the worker.
+assert.deepStrictEqual(manifest.host_permissions, ['https://vr.apw.photos/*'],
+  'host_permissions must be exactly Visual Review');
+assert.ok(!('externally_connectable' in manifest),
+  'no web page may message the service worker');
+
 console.log('test_manifest: all checks passed');

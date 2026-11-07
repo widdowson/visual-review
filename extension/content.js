@@ -350,17 +350,142 @@
     }
     if (!isOpen) return;
 
-    const hasImages = await prHasImageFiles(ctx.owner, ctx.repo, ctx.prNumber);
-    if (!hasImages) return;
-
     const actionsArea = document.querySelector('[class*="PageHeader-Actions"]');
     if (!actionsArea) return;
+
+    // Not gated on images: approving a PR has nothing to do with whether it
+    // changed a screenshot.
+    injectLgtmButton(ctx, actionsArea);
+
+    const hasImages = await prHasImageFiles(ctx.owner, ctx.repo, ctx.prNumber);
+    if (!hasImages) return;
 
     actionsArea.insertBefore(
       createVRLink(ctx.owner, ctx.repo, ctx.prNumber, 'button'),
       actionsArea.firstChild
     );
   }
+
+  /* ─── LGTM button (PR detail page) ─── */
+  //
+  // Asks Visual Review, through the background worker, whether the person in
+  // this browser may apply the `lgtm` label, and draws the button only if so.
+  // Who may is decided on the server from the Cloudflare Access sign-in; the
+  // worker is what carries that sign-in (see background.js). A click arms the
+  // button and a second click applies, because the label is a merge order.
+  //
+  // vr:lgtm-button:begin
+  var LGTM_ARM_MS = 4000;
+  var _lgtmAskedFor = '';
+
+  function lgtmAsk(type, ctx) {
+    return new Promise(function(resolve) {
+      try {
+        chrome.runtime.sendMessage(
+          { type: type, owner: ctx.owner, repo: ctx.repo, prNumber: ctx.prNumber },
+          function(result) {
+            if (chrome.runtime.lastError || !result) resolve({ error: 'no answer from the extension' });
+            else resolve(result);
+          });
+      } catch (e) {
+        resolve({ error: String(e) });
+      }
+    });
+  }
+
+  function lgtmStyle(el, colour) {
+    el.style.cssText = [
+      'display:inline-flex', 'align-items:center', 'gap:6px',
+      'padding:5px 12px', 'border-radius:6px', 'margin-right:8px',
+      'font-size:14px', 'font-weight:500', 'line-height:20px',
+      'white-space:nowrap', 'cursor:pointer', 'text-decoration:none',
+      'border:1px solid ' + colour, 'background:' + colour, 'color:#fff'
+    ].join(';');
+  }
+
+  function lgtmShowApplied(btn) {
+    btn.textContent = 'LGTM ✓';
+    btn.disabled = true;
+    btn.title = 'The lgtm label is on this PR; the merge queue has it.';
+    lgtmStyle(btn, '#1a7f37');
+    btn.style.background = 'none';
+    btn.style.color = '#1a7f37';
+    btn.style.cursor = 'default';
+  }
+
+  function lgtmShowReady(btn) {
+    btn.textContent = 'LGTM';
+    btn.disabled = false;
+    btn.removeAttribute('data-vr-lgtm-armed');
+    btn.title = 'Add the lgtm label: the merge queue merges this PR once CI is green.';
+    lgtmStyle(btn, '#1a7f37');
+  }
+
+  function lgtmShowFailed(btn, message) {
+    lgtmShowReady(btn);
+    btn.textContent = 'LGTM failed';
+    btn.title = message;
+    lgtmStyle(btn, '#cf222e');
+  }
+
+  function createLgtmButton(ctx, status) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('data-vr-lgtm', 'true');
+    if (status.applied) { lgtmShowApplied(btn); return btn; }
+    lgtmShowReady(btn);
+
+    var armTimer = null;
+    btn.addEventListener('click', function() {
+      if (btn.disabled) return;
+      if (!btn.hasAttribute('data-vr-lgtm-armed')) {
+        btn.setAttribute('data-vr-lgtm-armed', 'true');
+        btn.textContent = 'Confirm LGTM';
+        lgtmStyle(btn, '#9a6700');
+        armTimer = setTimeout(function() { lgtmShowReady(btn); }, LGTM_ARM_MS);
+        return;
+      }
+      clearTimeout(armTimer);
+      btn.disabled = true;
+      btn.textContent = 'Applying…';
+      lgtmAsk('lgtm-apply', ctx).then(function(result) {
+        if (result.ok && result.body && result.body.ok) { lgtmShowApplied(btn); return; }
+        if (result.signIn) { lgtmShowFailed(btn, 'Sign in to Visual Review first.'); return; }
+        lgtmShowFailed(btn, (result.body && result.body.error) || result.error || 'LGTM failed');
+      });
+    });
+    return btn;
+  }
+
+  // Shown when VR answered with its sign-in redirect: the person may well be
+  // allowed, and opening VR once is what signs them in.
+  function createLgtmSignInLink(page) {
+    var a = document.createElement('a');
+    a.href = page;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.setAttribute('data-vr-lgtm', 'true');
+    a.textContent = 'LGTM: sign in to VR';
+    a.title = 'Open Visual Review to sign in, then reload this page for the LGTM button.';
+    lgtmStyle(a, '#57606a');
+    return a;
+  }
+
+  async function injectLgtmButton(ctx, actionsArea) {
+    var key = ctx.owner + '/' + ctx.repo + '#' + ctx.prNumber;
+    if (_lgtmAskedFor === key) return;
+    if (document.querySelector('[data-vr-lgtm]')) return;
+    _lgtmAskedFor = key;
+
+    var result = await lgtmAsk('lgtm-status', ctx);
+    if (document.querySelector('[data-vr-lgtm]')) return;
+    var el = null;
+    if (result.signIn && result.page) el = createLgtmSignInLink(result.page);
+    else if (result.ok && result.body && result.body.can_apply) el = createLgtmButton(ctx, result.body);
+    if (!el) return;
+    actionsArea.insertBefore(el, actionsArea.firstChild);
+  }
+  // vr:lgtm-button:end
 
   /* ─── PR hovercard handler (site-wide) ─── */
   //
@@ -422,6 +547,9 @@
     try {
       const ctx = getPageContext();
       if (!ctx) return;
+      // A new page may ask about LGTM again, even for the same PR: Turbo
+      // navigation away and back removes the button without reloading this.
+      if (window.location.pathname !== _lastPath) _lgtmAskedFor = '';
       if (ctx.type === 'list') await handlePRListPage(ctx);
       else if (ctx.type === 'detail') await handlePRDetailPage(ctx);
       _lastPath = window.location.pathname;

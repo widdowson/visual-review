@@ -62,7 +62,7 @@ class TestEnvironmentIsComplete:
         is a test failure rather than a surprise in production."""
         spelled = set_env_vars()
         for name in ("VR_AUTH_MODE", "CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD",
-                     "VR_ALLOWED_EMAILS", "GITHUB_TOKEN"):
+                     "VR_ALLOWED_EMAILS", "VR_LGTM_EMAILS", "GITHUB_TOKEN"):
             assert f"{name}=" in spelled, f"{name} is missing from --set-env-vars"
 
     def test_the_mode_deployed_is_the_one_that_enforces(self):
@@ -80,6 +80,22 @@ class TestEnvironmentIsComplete:
         undeployed = sorted(n for n in read_by_app if f"{n}=" not in spelled)
         assert not undeployed, (
             f"auth.py reads {undeployed} but deploy.yml does not set them")
+
+
+class TestLgtmList:
+    def test_app_py_reads_the_list_this_deploy_sets(self):
+        """app.py reads VR_LGTM_EMAILS through os.environ, which the auth.py
+        scan above does not see, so it is named here."""
+        source = open(repo_file("app.py"), encoding="utf-8").read()
+        assert 'os.environ.get("VR_LGTM_EMAILS"' in source
+
+    def test_the_default_list_is_andrews_two_addresses(self):
+        """Without a repository variable the LGTM button is still offered to
+        Andrew, and to nobody else."""
+        spelled = set_env_vars()
+        m = re.search(r"VR_LGTM_EMAILS=\$\{\{ vars\.VR_LGTM_EMAILS \|\| '([^']*)' \}\}", spelled)
+        assert m, "VR_LGTM_EMAILS must default when the variable is unset"
+        assert sorted(m.group(1).split(",")) == ["apw@apw.photos", "widdowson@gmail.com"]
 
 
 class TestDelimiter:

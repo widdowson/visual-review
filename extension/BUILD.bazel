@@ -100,3 +100,10 @@ js_test(
         "content_source.js",
     ],
 )
+
+# background.js is the input under test: the test extracts its vr:lgtm region.
+js_test(
+    name = "test_background_lgtm",
+    entry_point = "test_background_lgtm.js",
+    data = ["background.js"],
+)

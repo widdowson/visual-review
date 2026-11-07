@@ -1082,6 +1082,192 @@ async def post_pr_comment(owner: str, repo: str, number: int, request: Request):
         return {"error": str(e)}
 
 
+# -- LGTM ----------------------------------------------------------------------
+#
+# The `lgtm` label is a merge order: Mergify queues and merges any PR carrying
+# it. It is meant to be Andrew's sign-off and nobody else's, so applying it
+# takes more than getting past the Access gate:
+#
+# * The Access token must carry an email on VR_LGTM_EMAILS, a list separate
+#   from VR_ALLOWED_EMAILS. Getting into VR to *look* at a PR and being allowed
+#   to merge it are different permissions. An unset list turns the button off.
+# * An agent reaches Access-protected apps with a service token, and a service
+#   token's JWT carries a `common_name` and no `email` at all, so it is refused
+#   here by construction rather than by remembering to deny it.
+# * With the gate off (local development) there is no identity at all, and the
+#   answer is no rather than "anyone".
+# * The POST must carry an ``X-VR-Intent: lgtm`` header. A page on another site
+#   can make the browser POST here with the CF_Authorization cookie attached,
+#   but it cannot add a custom header without a CORS preflight, and the CORS
+#   layer above allows GET only. The extension's background worker is not bound
+#   by CORS, which is what lets it send the header.
+# * Only a repository that already has an `lgtm` label is touched. GitHub's
+#   add-labels call creates a label that does not exist, and a stray `lgtm` in a
+#   repository with no merge queue would mean nothing and look like it did.
+
+LGTM_LABEL = "lgtm"
+LGTM_EMAILS = auth._parse_emails(os.environ.get("VR_LGTM_EMAILS", ""))
+LGTM_INTENT_HEADER = "x-vr-intent"
+_LGTM_LABEL_TTL = 600
+
+
+def _lgtm_refusal(request: Request) -> str | None:
+    """Why this request may not apply the label, or None when it may."""
+    if not LGTM_EMAILS:
+        return "LGTM from Visual Review is not enabled on this deployment."
+    claims = getattr(request.state, "access_claims", None)
+    if not claims:
+        return "LGTM needs a Cloudflare Access sign-in."
+    email = (claims.get("email") or "").strip().lower()
+    if not email:
+        # A service token: an agent, or anything else that is not a person.
+        return "LGTM needs a person's sign-in, not a service token."
+    if email not in LGTM_EMAILS:
+        return f"{email} may not apply LGTM."
+    return None
+
+
+async def _repo_has_lgtm_label(client: httpx.AsyncClient, github_repo: str,
+                               headers: dict) -> bool:
+    key = f"lgtm_label:{github_repo}"
+    cached = _cache_get(key, _LGTM_LABEL_TTL)
+    if cached is not None:
+        return cached
+    resp = await client.get(
+        f"https://api.github.com/repos/{github_repo}/labels/{LGTM_LABEL}",
+        headers=headers,
+    )
+    if resp.status_code == 200:
+        _cache_set(key, True)
+        return True
+    if resp.status_code == 404:
+        _cache_set(key, False)
+        return False
+    raise _GitHubError(f"label lookup failed: HTTP {resp.status_code}", resp.status_code)
+
+
+def _lgtm_pr_state(pr: dict) -> dict:
+    labels = [lbl.get("name", "") for lbl in pr.get("labels") or []]
+    return {
+        "applied": LGTM_LABEL in labels,
+        "state": pr.get("state", ""),
+        "merged": bool(pr.get("merged_at")),
+        "draft": bool(pr.get("draft")),
+        "head_sha": (pr.get("head") or {}).get("sha", ""),
+    }
+
+
+@app.get("/api/{owner}/{repo}/pr/{number}/lgtm")
+async def pr_lgtm_status(owner: str, repo: str, number: int, request: Request):
+    """Whether this viewer may apply LGTM here, and whether it is applied.
+
+    ``can_apply`` is what decides whether a button is drawn at all; the POST
+    asks every question again rather than trusting this answer.
+    """
+    github_repo = f"{owner}/{repo}"
+    refusal = _lgtm_refusal(request)
+    if refusal or not GITHUB_TOKEN:
+        return {"can_apply": False, "reason": refusal or "No GITHUB_TOKEN configured"}
+
+    headers = _gh_headers()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            if not await _repo_has_lgtm_label(client, github_repo, headers):
+                return {"can_apply": False,
+                        "reason": f"{github_repo} has no {LGTM_LABEL!r} label."}
+            pr_resp = await client.get(
+                f"https://api.github.com/repos/{github_repo}/pulls/{number}",
+                headers=headers,
+            )
+    except Exception as exc:
+        return {"can_apply": False, "reason": f"GitHub could not be asked: {exc}"}
+    if pr_resp.status_code != 200:
+        return {"can_apply": False, "reason": f"PR not found: HTTP {pr_resp.status_code}"}
+
+    status = _lgtm_pr_state(pr_resp.json())
+    status["can_apply"] = status["state"] == "open"
+    if not status["can_apply"]:
+        status["reason"] = "This PR is not open."
+    return status
+
+
+@app.post("/api/{owner}/{repo}/pr/{number}/lgtm")
+async def apply_lgtm(owner: str, repo: str, number: int, request: Request):
+    """Add the `lgtm` label to a PR, for a signed-in person on VR_LGTM_EMAILS.
+
+    The body may name ``head_sha``, the commit the reviewer was looking at. If
+    the PR has moved on since, the label is not applied: the point of looking
+    first is lost if the approval lands on a commit nobody saw.
+    """
+    github_repo = f"{owner}/{repo}"
+
+    if request.headers.get(LGTM_INTENT_HEADER, "").strip().lower() != "lgtm":
+        return JSONResponse(status_code=400, content={
+            "error": "Missing X-VR-Intent: lgtm header."})
+
+    refusal = _lgtm_refusal(request)
+    if refusal:
+        claims = getattr(request.state, "access_claims", None) or {}
+        logger.warning("LGTM refused on %s#%s for %r: %s", github_repo, number,
+                       claims.get("email") or claims.get("common_name") or "", refusal)
+        return JSONResponse(status_code=403, content={"error": refusal})
+
+    if not GITHUB_TOKEN:
+        return JSONResponse(status_code=503, content={"error": "No GITHUB_TOKEN configured"})
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    expected_head = str(payload.get("head_sha") or "").strip()
+
+    headers = _gh_headers()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            if not await _repo_has_lgtm_label(client, github_repo, headers):
+                return JSONResponse(status_code=404, content={
+                    "error": f"{github_repo} has no {LGTM_LABEL!r} label."})
+
+            pr_resp = await client.get(
+                f"https://api.github.com/repos/{github_repo}/pulls/{number}",
+                headers=headers,
+            )
+            if pr_resp.status_code != 200:
+                return JSONResponse(status_code=404, content={
+                    "error": f"PR not found: HTTP {pr_resp.status_code}"})
+            status = _lgtm_pr_state(pr_resp.json())
+
+            if status["state"] != "open":
+                return JSONResponse(status_code=409, content={
+                    "error": "This PR is not open.", **status})
+            if expected_head and expected_head != status["head_sha"]:
+                return JSONResponse(status_code=409, content={
+                    "error": "The PR has new commits since this page loaded. "
+                             "Reload and look again before approving.",
+                    **status})
+            if status["applied"]:
+                return {"ok": True, **status}
+
+            label_resp = await client.post(
+                f"https://api.github.com/repos/{github_repo}/issues/{number}/labels",
+                headers=headers,
+                json={"labels": [LGTM_LABEL]},
+            )
+    except Exception as exc:
+        return JSONResponse(status_code=502, content={"error": f"GitHub error: {exc}"})
+
+    if label_resp.status_code not in (200, 201):
+        return JSONResponse(status_code=502, content={
+            "error": f"GitHub API error: HTTP {label_resp.status_code}: {label_resp.text}"})
+
+    claims = getattr(request.state, "access_claims", None) or {}
+    logger.info("LGTM applied to %s#%s by %s", github_repo, number, claims.get("email"))
+    status["applied"] = True
+    return {"ok": True, **status}
+
+
 @app.get("/api/{owner}/{repo}/pr/{number}/checks")
 async def pr_checks(owner: str, repo: str, number: int):
     """Return combined CI check status for a PR's head commit."""

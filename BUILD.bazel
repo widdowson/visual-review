@@ -413,3 +413,10 @@ spa_browser_test(
     name = "test_spa_topbar",
     srcs = ["tests/test_spa_topbar.py"],
 )
+
+# The LGTM button: drawn only when the server offers it, two clicks to apply,
+# and the intent header and head commit the server checks.
+spa_browser_test(
+    name = "test_spa_lgtm",
+    srcs = ["tests/test_spa_lgtm.py"],
+)

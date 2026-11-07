@@ -136,7 +136,8 @@ class FixtureState:
                  files: list[dict] | None = None,
                  comments: dict[str, list[dict]] | None = None,
                  images: dict[tuple[str, str], bytes | int] | None = None,
-                 pr_title: str = "Fixture PR"):
+                 pr_title: str = "Fixture PR",
+                 lgtm: dict | None = None):
         # `files` replaces the generated list outright, rather than being
         # merged with it, so that what a test passes is exactly what the page
         # is shown. The generated list is kept for the tests written against
@@ -149,6 +150,11 @@ class FixtureState:
         self.renamed_index = renamed_index
         self.signed_in_email = signed_in_email
         self.pr_title = pr_title
+        # What GET .../lgtm answers. None models every viewer the server would
+        # not offer the button to. A POST sets "applied", unless "post_error"
+        # names the error to answer with instead (status "post_status").
+        self.lgtm = dict(lgtm) if lgtm is not None else None
+        self.lgtm_posts: list[dict] = []
         self.comments = {k: list(v) for k, v in (comments or {}).items()}
         # Keyed by (path, side), side being "base" or "head" rather than a ref,
         # so a test need not know the refs. Bytes are served in place of the
@@ -315,7 +321,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if path.endswith("/comments"):
             return self._post_comment()
+        if path.endswith("/lgtm"):
+            return self._post_lgtm()
         self.send_error(404)
+
+    def _post_lgtm(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        with self.state.lock:
+            self.state.lgtm_posts.append({
+                "intent": self.headers.get("X-VR-Intent"), "body": body})
+            lgtm = self.state.lgtm or {}
+            if lgtm.get("post_error"):
+                status, payload = lgtm.get("post_status", 409), {"error": lgtm["post_error"]}
+            else:
+                lgtm["applied"] = True
+                status, payload = 200, {"ok": True, "applied": True}
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _post_comment(self) -> None:
         # Read in full before anything else, so the socket has nothing left to
@@ -374,6 +401,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"counts": counts})
         if path.endswith("/checks"):
             return self._json({"checks": [], "state": "success"})
+        if path.endswith("/lgtm"):
+            with self.state.lock:
+                lgtm = self.state.lgtm
+                answer = ({"can_apply": False} if lgtm is None else
+                          {k: v for k, v in lgtm.items() if not k.startswith("post_")})
+            return self._json(answer)
         if "/pr/" in path:
             return self._send(self.index_html, "text/html; charset=utf-8")
         self.send_error(404)
