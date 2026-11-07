@@ -1,16 +1,24 @@
 {
   "manifest_version": 3,
   "name": "Visual Review for GitHub",
-  "description": "Adds Visual Review links to GitHub PRs that contain image files",
-  "version": "1.0.0",
+  "description": "Adds Visual Review links, and an LGTM button for its reviewers, to GitHub PRs",
+  "version": "1.1.0",
   "permissions": [],
+  "host_permissions": [
+    "https://vr.apw.photos/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://github.com/*"],
-      "js": ["image_config.js", "content.js"],
+      "matches": [
+        "https://github.com/*"
+      ],
+      "js": [
+        "image_config.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

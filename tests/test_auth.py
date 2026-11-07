@@ -456,3 +456,263 @@ class TestWhoami:
         resp = await _get(app_module.app, "/api/me")
         assert resp.status_code == 200
         assert resp.json() == {"authenticated": False}
+
+
+# -- LGTM ----------------------------------------------------------------------
+#
+# The `lgtm` label merges a PR, so these are mostly refusals: a suite that only
+# proved Andrew can apply it would stay green against an endpoint anyone could
+# use. Every refusal also asserts GitHub was never asked to add a label.
+
+ANDREW = "apw@apw.photos"
+PR_PATH = "/api/widdowson/apwphotos-appv2/pr/25/lgtm"
+INTENT = {"X-VR-Intent": "lgtm"}
+
+
+class FakeGitHub:
+    """Stands in for httpx.AsyncClient in app.py, recording every request."""
+
+    def __init__(self, *, label=200, pr_state="open", labels=(), head="abc123",
+                 add_status=200):
+        self.label = label
+        self.pr = {
+            "state": pr_state,
+            "draft": False,
+            "merged_at": None,
+            "labels": [{"name": n} for n in labels],
+            "head": {"sha": head},
+        }
+        self.add_status = add_status
+        self.calls: list[tuple[str, str, object]] = []
+
+    def factory(self, *args, **kwargs):
+        gh = self
+
+        class _Resp:
+            def __init__(self, status, payload=None):
+                self.status_code = status
+                self._payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._payload
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, **kw):
+                gh.calls.append(("GET", url, None))
+                if url.endswith("/labels/lgtm"):
+                    return _Resp(gh.label, {"name": "lgtm"})
+                if "/pulls/" in url:
+                    return _Resp(200, gh.pr)
+                return _Resp(404, {})
+
+            async def post(self, url, json=None, **kw):
+                gh.calls.append(("POST", url, json))
+                return _Resp(gh.add_status, [{"name": "lgtm"}])
+
+        return _Client()
+
+    @property
+    def label_posts(self):
+        return [c for c in self.calls if c[0] == "POST"]
+
+
+@pytest.fixture
+def lgtm(gated, monkeypatch):
+    """The gated app with LGTM enabled for Andrew, and a fake GitHub."""
+    import app as app_module
+    application, signer, _ = gated
+    gh = FakeGitHub()
+    monkeypatch.setattr(app_module, "LGTM_EMAILS", frozenset({ANDREW}))
+    monkeypatch.setattr(app_module, "GITHUB_TOKEN", "fake-token")
+    monkeypatch.setattr(app_module.httpx, "AsyncClient", gh.factory)
+    app_module._cache.clear()
+    return application, signer, gh
+
+
+async def _post(application, path, **kwargs):
+    transport = ASGITransport(app=application)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        return await ac.post(path, **kwargs)
+
+
+def _service_token(signer):
+    """What Access issues a service token: a common_name and no email."""
+    return signer.token(email=None, common_name="0123abcd.access", sub="")
+
+
+@pytest.mark.asyncio
+class TestLgtmApply:
+    async def test_andrew_applies_the_label(self, lgtm):
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()},
+            json={"head_sha": "abc123"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ok"] is True and resp.json()["applied"] is True
+        assert gh.label_posts == [(
+            "POST",
+            "https://api.github.com/repos/widdowson/apwphotos-appv2/issues/25/labels",
+            {"labels": ["lgtm"]},
+        )]
+
+    async def test_the_cookie_works_as_well_as_the_header(self, lgtm):
+        """The SPA's own fetch carries the cookie; Access adds the header."""
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH, headers=INTENT,
+                           cookies={"CF_Authorization": signer.token()})
+        assert resp.status_code == 200
+        assert len(gh.label_posts) == 1
+
+    async def test_case_in_the_address_does_not_matter(self, lgtm):
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token(email="APW@apw.photos")})
+        assert resp.status_code == 200
+        assert len(gh.label_posts) == 1
+
+    async def test_a_service_token_is_refused(self, lgtm):
+        """How an agent reaches an Access app. No email, so no LGTM."""
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": _service_token(signer)})
+        assert resp.status_code == 403
+        assert "service token" in resp.json()["error"]
+        assert gh.calls == []
+
+    async def test_someone_else_signed_in_is_refused(self, lgtm):
+        """Getting into VR to look at a PR is not leave to merge it."""
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token(email="reviewer@example.com")})
+        assert resp.status_code == 403
+        assert gh.calls == []
+
+    async def test_no_token_never_reaches_the_endpoint(self, lgtm):
+        application, _, gh = lgtm
+        resp = await _post(application, PR_PATH, headers=INTENT)
+        assert resp.status_code == 403
+        assert gh.calls == []
+
+    async def test_an_unset_list_turns_it_off_for_everyone(self, lgtm, monkeypatch):
+        import app as app_module
+        application, signer, gh = lgtm
+        monkeypatch.setattr(app_module, "LGTM_EMAILS", frozenset())
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()})
+        assert resp.status_code == 403
+        assert gh.calls == []
+
+    async def test_the_gate_off_means_no_not_anyone(self, monkeypatch):
+        """Local development has no identity, so nobody may apply it."""
+        import app as app_module
+        assert app_module._access_verifier is None
+        gh = FakeGitHub()
+        monkeypatch.setattr(app_module, "LGTM_EMAILS", frozenset({ANDREW}))
+        monkeypatch.setattr(app_module, "GITHUB_TOKEN", "fake-token")
+        monkeypatch.setattr(app_module.httpx, "AsyncClient", gh.factory)
+        resp = await _post(app_module.app, PR_PATH, headers=INTENT)
+        assert resp.status_code == 403
+        assert gh.calls == []
+
+    async def test_without_the_intent_header_it_is_refused(self, lgtm):
+        """What another site's form post would look like, cookie and all."""
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH,
+                           cookies={"CF_Authorization": signer.token()})
+        assert resp.status_code == 400
+        assert gh.calls == []
+
+    async def test_another_site_cannot_get_a_preflight_for_the_header(self, lgtm):
+        """The intent header is only worth something while no other origin
+        may send it, which is the CORS layer's GET-only list."""
+        application, _, _ = lgtm
+        transport = ASGITransport(app=application)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.options(PR_PATH, headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "x-vr-intent",
+            })
+        assert "POST" not in resp.headers.get("access-control-allow-methods", "")
+        assert resp.status_code >= 400
+
+    async def test_new_commits_since_the_page_loaded_are_not_approved(self, lgtm):
+        application, signer, gh = lgtm
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()},
+            json={"head_sha": "older"})
+        assert resp.status_code == 409
+        assert gh.label_posts == []
+
+    async def test_a_closed_pr_is_refused(self, lgtm):
+        application, signer, gh = lgtm
+        gh.pr["state"] = "closed"
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()})
+        assert resp.status_code == 409
+        assert gh.label_posts == []
+
+    async def test_a_repo_with_no_lgtm_label_is_left_alone(self, lgtm):
+        """GitHub would create the label; a stray one would merge nothing."""
+        application, signer, gh = lgtm
+        gh.label = 404
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()})
+        assert resp.status_code == 404
+        assert gh.label_posts == []
+
+    async def test_already_applied_is_ok_and_adds_nothing(self, lgtm):
+        application, signer, gh = lgtm
+        gh.pr["labels"] = [{"name": "lgtm"}]
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()})
+        assert resp.status_code == 200 and resp.json()["applied"] is True
+        assert gh.label_posts == []
+
+    async def test_a_github_refusal_is_reported_not_swallowed(self, lgtm):
+        application, signer, gh = lgtm
+        gh.add_status = 403
+        resp = await _post(application, PR_PATH, headers={
+            **INTENT, "Cf-Access-Jwt-Assertion": signer.token()})
+        assert resp.status_code == 502
+        assert "403" in resp.json()["error"]
+
+
+@pytest.mark.asyncio
+class TestLgtmStatus:
+    async def test_andrew_is_offered_the_button(self, lgtm):
+        application, signer, _ = lgtm
+        resp = await _get(application, PR_PATH,
+                          headers={"Cf-Access-Jwt-Assertion": signer.token()})
+        body = resp.json()
+        assert body["can_apply"] is True
+        assert body["applied"] is False
+        assert body["head_sha"] == "abc123"
+
+    async def test_a_service_token_is_not_offered_it(self, lgtm):
+        application, signer, gh = lgtm
+        resp = await _get(application, PR_PATH,
+                          headers={"Cf-Access-Jwt-Assertion": _service_token(signer)})
+        assert resp.json()["can_apply"] is False
+        assert gh.calls == []
+
+    async def test_someone_else_is_not_offered_it(self, lgtm):
+        application, signer, gh = lgtm
+        resp = await _get(application, PR_PATH, headers={
+            "Cf-Access-Jwt-Assertion": signer.token(email="reviewer@example.com")})
+        assert resp.json()["can_apply"] is False
+        assert gh.calls == []
+
+    async def test_a_closed_pr_is_not_offered_it(self, lgtm):
+        application, signer, gh = lgtm
+        gh.pr["state"] = "closed"
+        resp = await _get(application, PR_PATH,
+                          headers={"Cf-Access-Jwt-Assertion": signer.token()})
+        assert resp.json()["can_apply"] is False

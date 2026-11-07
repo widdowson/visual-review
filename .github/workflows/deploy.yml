@@ -77,12 +77,16 @@ jobs:
       # delimiter gcloud would split it mid-value and try to set an env var
       # named after the second address. A pipe cannot appear in an email
       # address, a Cloudflare team domain, an AUD tag or a GitHub token.
+      #
+      # VR_LGTM_EMAILS is who may apply the lgtm label from VR, which queues a
+      # merge. It defaults to Andrew's two addresses; a repository variable of
+      # the same name replaces the list.
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy ${{ env.SERVICE }} \
             --image ${{ env.IMAGE }}:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --allow-unauthenticated \
-            --set-env-vars="^|^GITHUB_TOKEN=${{ secrets.GH_PAT }}|VR_AUTH_MODE=cloudflare_access|CF_ACCESS_TEAM_DOMAIN=${{ vars.CF_ACCESS_TEAM_DOMAIN }}|CF_ACCESS_AUD=${{ vars.CF_ACCESS_AUD }}|VR_ALLOWED_EMAILS=${{ vars.VR_ALLOWED_EMAILS }}" \
+            --set-env-vars="^|^GITHUB_TOKEN=${{ secrets.GH_PAT }}|VR_AUTH_MODE=cloudflare_access|CF_ACCESS_TEAM_DOMAIN=${{ vars.CF_ACCESS_TEAM_DOMAIN }}|CF_ACCESS_AUD=${{ vars.CF_ACCESS_AUD }}|VR_ALLOWED_EMAILS=${{ vars.VR_ALLOWED_EMAILS }}|VR_LGTM_EMAILS=${{ vars.VR_LGTM_EMAILS || 'apw@apw.photos,widdowson@gmail.com' }}" \
             --port 8080 \
             --quiet

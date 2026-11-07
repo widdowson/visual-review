@@ -18,16 +18,20 @@ LONG_TITLE = ("Scope home page and shoot prev/next to the viewer's shoots "
 PHONE = {"width": 375, "height": 812}
 DESKTOP = {"width": 1280, "height": 900}
 
-CONTROLS = ["#vr-user", "#theme-toggle", "#kbd-hint"]
+# The LGTM button is drawn for Andrew, so it is laid out here too: the
+# widest the controls get is with it present.
+CONTROLS = ["#lgtm-btn", "#vr-user", "#theme-toggle", "#kbd-hint"]
 
 
 @pytest.fixture
 def open_pr(spa_backend, spa_page):
     def _open(viewport):
-        backend = spa_backend(signed_in_email=EMAIL, pr_title=LONG_TITLE)
+        backend = spa_backend(signed_in_email=EMAIL, pr_title=LONG_TITLE,
+                              lgtm={"can_apply": True, "applied": False})
         page = spa_page(viewport=viewport)
         page.goto(backend.url + "/owner/repo/pr/1", wait_until="load")
         page.locator("#vr-user").wait_for(state="visible", timeout=10_000)
+        page.locator("#lgtm-btn").wait_for(state="visible", timeout=10_000)
         page.locator("#pr-meta .ci-badge").wait_for(state="visible", timeout=10_000)
         return page
 

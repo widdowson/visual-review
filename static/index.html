@@ -112,15 +112,35 @@
         .ci-badge.ci-none { background: #3a3f52; color: #8eb5f0; }
         .ci-badge .ci-icon { font-size: 0.8rem; line-height: 1; }
 
+        /* LGTM button. Drawn only when the server says this viewer may
+           apply the label (auth is server-side; this is just the control).
+           One click arms it, a second within a few seconds applies, because
+           the label is a merge order and a stray click should not merge. */
+        .lgtm-btn {
+            background: #1a7f37; border: 1px solid #1a7f37; color: #fff;
+            border-radius: 4px; padding: 3px 7px; cursor: pointer;
+            font-size: 0.75rem; font-weight: 600; white-space: nowrap;
+        }
+        .lgtm-btn[hidden] { display: none; }
+        .lgtm-btn:hover { filter: brightness(1.1); }
+        .lgtm-btn.armed { background: #9a6700; border-color: #9a6700; }
+        .lgtm-btn.applied, .lgtm-btn:disabled {
+            background: none; color: #4ade80; border-color: #4ade80;
+            cursor: default; filter: none;
+        }
+        .lgtm-btn.failed { background: #cf222e; border-color: #cf222e; }
+
         /* Signed-in chip. Cloudflare Access gives the app an email and
            nothing else -- no display name, no avatar -- so the circle is
            initials taken from the address rather than a picture fetched from
-           somewhere that would then learn who reviews what. */
+           somewhere that would then learn who reviews what. 200px rather
+           than more so that the LGTM button fits beside a long PR title
+           and its links on one desktop line; a longer address ellipsizes. */
         .vr-user {
             display: inline-flex; align-items: center; gap: 6px;
             font-size: 0.72rem; color: var(--vr-text-secondary);
             border: 1px solid var(--vr-border); border-radius: 12px;
-            padding: 2px 8px 2px 3px; max-width: 260px;
+            padding: 2px 8px 2px 3px; max-width: 200px;
         }
         .vr-user[hidden] { display: none; }
         .vr-user .vr-user-initials {
@@ -569,6 +589,7 @@
         <button id="sidebar-toggle" aria-label="Toggle file panel" aria-expanded="false">&#9776;</button>
         <span class="pr-title" id="pr-title">Loading...</span>
         <div class="topbar-actions">
+            <button class="lgtm-btn" id="lgtm-btn" hidden></button>
             <span class="vr-user" id="vr-user" hidden>
                 <span class="vr-user-initials" id="vr-user-initials" aria-hidden="true"></span>
                 <span class="vr-user-email" id="vr-user-email"></span>
@@ -806,6 +827,7 @@
                     renderFileList();
                     loadCommentCounts();
                     loadCIStatus();
+                    loadLgtm();
 
                     if (state.images.length === 0) {
                         viewport.innerHTML = '<div class="empty-msg">No changed image files found in this PR.</div>';
@@ -2843,6 +2865,84 @@
                 })
                 .catch(function() {});
         }
+
+        // ── lgtm:begin ────────────────────────────────────────────────────
+        // The button only asks; the server decides. GET .../lgtm says whether
+        // this viewer may apply the label at all (a person on the server's LGTM
+        // list, signed in through Access), and the POST asks every question
+        // again. The POST names the head commit this page loaded, so a push
+        // that lands while the reviewer is looking is not approved unseen.
+        var LGTM_ARM_MS = 4000;
+
+        function lgtmLabelFor(status) {
+            if (status.applied) return 'LGTM ✓';
+            return 'LGTM';
+        }
+
+        function renderLgtm(btn, status) {
+            btn.classList.remove('armed', 'failed');
+            btn.textContent = lgtmLabelFor(status);
+            if (status.applied) {
+                btn.classList.add('applied');
+                btn.disabled = true;
+                btn.title = 'The lgtm label is on this PR; the merge queue has it.';
+            } else {
+                btn.classList.remove('applied');
+                btn.disabled = false;
+                btn.title = 'Add the lgtm label: the merge queue merges this PR once CI is green.' +
+                    (status.draft ? ' (This PR is a draft; the queue waits until it is ready.)' : '');
+            }
+            btn.hidden = false;
+        }
+
+        function loadLgtm() {
+            var btn = document.getElementById('lgtm-btn');
+            if (!btn) return;
+            fetch(apiBase + '/lgtm', {headers: {'Accept': 'application/json'}})
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(status) {
+                    if (!status || !status.can_apply) return;
+                    renderLgtm(btn, status);
+                    var armTimer = null;
+                    btn.addEventListener('click', function() {
+                        if (btn.disabled) return;
+                        if (!btn.classList.contains('armed')) {
+                            btn.classList.remove('failed');
+                            btn.classList.add('armed');
+                            btn.textContent = 'Confirm LGTM';
+                            armTimer = setTimeout(function() { renderLgtm(btn, status); }, LGTM_ARM_MS);
+                            return;
+                        }
+                        clearTimeout(armTimer);
+                        btn.disabled = true;
+                        btn.textContent = 'Applying…';
+                        fetch(apiBase + '/lgtm', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json', 'X-VR-Intent': 'lgtm'},
+                            body: JSON.stringify({head_sha: state.headRef || ''}),
+                        })
+                            .then(function(r) { return r.json().then(function(b) { return {ok: r.ok, body: b}; }); })
+                            .then(function(res) {
+                                if (res.ok && res.body.ok) {
+                                    status.applied = true;
+                                    renderLgtm(btn, status);
+                                    return;
+                                }
+                                lgtmFailed(btn, status, (res.body && res.body.error) || 'LGTM failed');
+                            })
+                            .catch(function(err) { lgtmFailed(btn, status, err.message || 'LGTM failed'); });
+                    });
+                })
+                .catch(function() { /* no button; the label can still go on in GitHub */ });
+        }
+
+        function lgtmFailed(btn, status, message) {
+            renderLgtm(btn, status);
+            btn.classList.add('failed');
+            btn.textContent = 'LGTM failed';
+            btn.title = message;
+        }
+        // ── lgtm:end ──────────────────────────────────────────────────────
 
         // -- Utilities --
         function escHtml(s) {

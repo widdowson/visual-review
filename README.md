@@ -225,6 +225,8 @@ deployment holding one.
 | GET | `/api/{owner}/{repo}/pr/{number}/checks` | Combined CI status for the PR's head commit |
 | GET | `/api/{owner}/{repo}/pulls?probe=1` | List open PRs with each one's image count. `probe=0` returns the list alone, with no per-PR count, in a single request |
 | GET | `/api/extensions` | Image extensions this server understands, for clients that would otherwise hardcode them |
+| GET | `/api/{owner}/{repo}/pr/{number}/lgtm` | Whether this viewer may apply the `lgtm` label, and whether it is on |
+| POST | `/api/{owner}/{repo}/pr/{number}/lgtm` | Apply the `lgtm` label. Needs the `X-VR-Intent: lgtm` header and a signed-in address on `VR_LGTM_EMAILS` |
 | GET | `/api/me` | The signed-in address, or `authenticated: false` |
 | GET | `/health` | Liveness check (the one path the auth gate exempts) |
 
@@ -238,6 +240,7 @@ deployment holding one.
 | `CF_ACCESS_TEAM_DOMAIN` | When enabled | — | `yourteam.cloudflareaccess.com` (the bare team name also works) |
 | `CF_ACCESS_AUD` | When enabled | — | The Access application's AUD tag |
 | `VR_ALLOWED_EMAILS` | No | — | Optional comma-separated allowlist, checked after the token verifies |
+| `VR_LGTM_EMAILS` | No | — | Who may apply the `lgtm` label from VR. Unset turns the button off. The deploy defaults it to `apw@apw.photos,widdowson@gmail.com` |
 
 ## Authentication
 
@@ -272,6 +275,28 @@ for some *other* Access application on the same team from opening this one.
 what decides who can sign in at all. Setting this as well means that if the
 policy is ever widened by accident, the app still serves only the addresses it
 was configured with.
+
+### The LGTM button
+
+A PR page shows an **LGTM** button to the people on `VR_LGTM_EMAILS`, and the
+Chrome extension shows the same button on GitHub's PR page. The label queues a
+merge (Mergify merges on `lgtm`), so it is an approval, and the server decides
+who may give it:
+
+- **A person, signed in through Access, on the list.** A service token's JWT
+  carries no `email`, so an agent holding one is refused however it asks, and
+  an anonymous request never reaches the check. The list is separate from
+  `VR_ALLOWED_EMAILS`: being let in to look is not being allowed to approve.
+- **Only on purpose.** The POST must carry `X-VR-Intent: lgtm`. CORS allows
+  other origins `GET` only, so another site cannot send that header with the
+  viewer's cookie, and a plain form post cannot add it.
+- **Only what was looked at.** The page sends the head commit it loaded; if
+  the PR has moved on, the server answers 409 and asks for a reload.
+- Every application and every refusal is logged with the address.
+
+The label is applied with the server's own `GITHUB_TOKEN`, which therefore
+needs permission to add labels (issues: write) on the repositories it serves.
+One click arms the button and a second within four seconds applies it.
 
 ### What the app learns about the person
 
